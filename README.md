@@ -79,26 +79,16 @@ Current limits:
 ### 1. Start ZooKeeper
 
 ```powershell
+cd path/to/zookeeper
 zkServer.cmd
 ```
 
 ### 2. Prepare MySQL
 
-Make sure the MySQL settings in `regionserver-1/2/3.properties` are valid, then create the databases:
+Make sure the MySQL settings in `regionserver-1/2/3.properties` are valid
 
-```sql
-CREATE DATABASE IF NOT EXISTS minisql_db1;
-CREATE DATABASE IF NOT EXISTS minisql_db2;
-CREATE DATABASE IF NOT EXISTS minisql_db3;
-```
 
-### 3. Compile
-
-```powershell
-mvn -q -DskipTests compile
-```
-
-### 4. Start the cluster
+### 3. Start the cluster
 
 ```powershell
 cmd /c scripts\start-all.bat
@@ -111,52 +101,16 @@ Default ports:
 - RegionServer2: `16021`
 - RegionServer3: `16022`
 
-### 5. Start the CLI
+### 5. Access Web
 
-```powershell
-cmd /c scripts\start-cli.bat
-```
+localhost:16010/monitor
 
 ### 6. Run a minimal SQL sample
 
 ```sql
+SHOW TABLES;
 CREATE TABLE products (id INT PRIMARY KEY, name STRING, price INT);
 INSERT INTO products (id, name, price) VALUES (1, 'A', 10);
 INSERT INTO products (id, name, price) VALUES (2, 'B', 20);
 SELECT * FROM products ORDER BY id;
 ```
-
-## Test Layers
-
-The repository uses four layers:
-
-- `unit`
-  Fast pure-logic tests for identity, routing, quorum, and metadata cleanup.
-- `component`
-  Single-module tests for `MasterServiceImpl`, `RegionServerServiceImpl`, and similar boundaries.
-- `integration`
-  Multi-component tests inside one JVM for failover dispatch and recovery reconciliation.
-- `e2e`
-  Real multi-process scripts for smoke, join projection, failover/rejoin, and drop cleanup.
-
-## Regression Items
-
-Important regressions already covered:
-
-- `ServerId` uses `host:port` as stable identity
-- `CREATE TABLE` must initialize primary and ready secondaries
-- failover must update metadata, cluster routing, and ZooKeeper primary consistently
-- restarted RegionServers must rejoin and recover replicas automatically
-- secondaries must reject client writes
-- replication failure must not be reported as a successful write
-- `DROP TABLE` must not leave stale region state behind
-- `JOIN` queries must keep correct results while pruning unused columns
-
-## Encoding Policy
-
-Text files are now standardized as UTF-8 through:
-
-- [`.gitattributes`](/d:/aLabs/dd/.gitattributes)
-- [`.editorconfig`](/d:/aLabs/dd/.editorconfig)
-
-If a historical file was already saved with broken transcoding, terminal settings alone cannot restore it. Such files must be rewritten or re-saved from a clean source.
