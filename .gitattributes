@@ -1,0 +1,12 @@
+* text=auto
+
+*.java text working-tree-encoding=UTF-8
+*.md text working-tree-encoding=UTF-8
+*.proto text working-tree-encoding=UTF-8
+*.ps1 text working-tree-encoding=UTF-8
+*.sql text working-tree-encoding=UTF-8
+*.xml text working-tree-encoding=UTF-8
+*.properties text working-tree-encoding=UTF-8
+
+*.bat text eol=crlf
+*.ps1 text eol=crlf

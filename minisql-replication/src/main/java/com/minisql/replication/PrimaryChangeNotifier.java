@@ -1,0 +1,117 @@
+package com.minisql.replication;
+
+import com.minisql.common.model.ServerId;
+import com.minisql.common.proto.CommonProto;
+import com.minisql.common.proto.MasterProto;
+import com.minisql.common.proto.MasterServiceGrpc;
+import com.minisql.zookeeper.ZkClient;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Publishes primary changes to ZooKeeper and Master.
+ */
+public class PrimaryChangeNotifier {
+
+    private ZkClient zkClient;
+
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
+    }
+
+    public void notifyPrimaryChange(String regionId, ServerId oldPrimary, ServerId newPrimary) {
+        publishToZooKeeper(regionId, newPrimary);
+        notifyMaster(regionId, oldPrimary, newPrimary);
+    }
+
+    private void publishToZooKeeper(String regionId, ServerId newPrimary) {
+        if (zkClient == null || newPrimary == null) {
+            return;
+        }
+
+        try {
+            String rootPath = "/minisql/regions";
+            if (!zkClient.exists(rootPath)) {
+                zkClient.createPersistent(rootPath, new byte[0]);
+            }
+            String regionPath = rootPath + "/" + regionId;
+            if (!zkClient.exists(regionPath)) {
+                zkClient.createPersistent(regionPath, new byte[0]);
+            }
+
+            String primaryPath = regionPath + "/primary";
+            byte[] data = (newPrimary.getHost() + ":" + newPrimary.getPort()).getBytes(StandardCharsets.UTF_8);
+            if (!zkClient.exists(primaryPath)) {
+                zkClient.createPersistent(primaryPath, data);
+            } else {
+                zkClient.setData(primaryPath, data);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to update ZooKeeper primary path: " + e.getMessage());
+        }
+    }
+
+    private void notifyMaster(String regionId, ServerId oldPrimary, ServerId newPrimary) {
+        if (zkClient == null || newPrimary == null) {
+            return;
+        }
+
+        String masterAddress = getMasterAddressFromZk();
+        if (masterAddress == null || masterAddress.isEmpty()) {
+            return;
+        }
+
+        String[] parts = masterAddress.split(":");
+        String host = parts[0];
+        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16000;
+
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        try {
+            MasterServiceGrpc.MasterServiceBlockingStub stub = MasterServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(5000, TimeUnit.MILLISECONDS);
+            MasterProto.PrimaryChangeResponse response = stub.reportPrimaryChange(
+                MasterProto.PrimaryChangeRequest.newBuilder()
+                    .setRegionId(regionId)
+                    .setOldPrimary(toProto(oldPrimary))
+                    .setNewPrimary(toProto(newPrimary))
+                    .setTimestamp(System.currentTimeMillis())
+                    .build()
+            );
+            if (!response.getStatus().getSuccess()) {
+                System.err.println("Master notification failed: " + response.getStatus().getMessage());
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to notify Master about primary change: " + e.getMessage());
+        } finally {
+            channel.shutdown();
+        }
+    }
+
+    private String getMasterAddressFromZk() {
+        if (zkClient == null) {
+            return null;
+        }
+        try {
+            String masterPath = "/minisql/master";
+            if (zkClient.exists(masterPath)) {
+                return new String(zkClient.getData(masterPath), StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to read master address from ZooKeeper: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private CommonProto.ServerId toProto(ServerId serverId) {
+        if (serverId == null) {
+            return CommonProto.ServerId.getDefaultInstance();
+        }
+        return CommonProto.ServerId.newBuilder()
+            .setHost(serverId.getHost())
+            .setPort(serverId.getPort())
+            .build();
+    }
+}

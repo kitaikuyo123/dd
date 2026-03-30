@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package minisql;
+
+option java_package = "com.minisql.common.proto";
+option java_outer_classname = "MigrationProto";
+
+import "common.proto";
+
+// 迁移服务定义
+service MigrationService {
+    // 发起迁移请求
+    rpc StartMigration(StartMigrationRequest) returns (StartMigrationResponse);
+    // 查询迁移进度
+    rpc GetMigrationProgress(GetProgressRequest) returns (GetProgressResponse);
+    // 取消迁移
+    rpc CancelMigration(CancelRequest) returns (CancelResponse);
+}
+
+// 开始迁移请求
+message StartMigrationRequest {
+    string regionId = 1;
+    ServerId source = 2;
+    ServerId target = 3;
+    MySQLConfig targetMySQLConfig = 4;  // 目标 MySQL 配置
+    bool verifyData = 5;                 // 是否验证数据一致性
+}
+
+// 开始迁移响应
+message StartMigrationResponse {
+    Status status = 1;
+    string migrationId = 2;
+    string message = 3;
+}
+
+// 查询迁移进度请求
+message GetProgressRequest {
+    string migrationId = 1;
+}
+
+// 迁移进度状态
+enum MigrationState {
+    PENDING = 0;       // 等待中
+    EXPORTING = 1;     // 导出中
+    IMPORTING = 2;     // 导入中
+    VERIFYING = 3;     // 验证中
+    COMPLETED = 4;     // 已完成
+    FAILED = 5;        // 失败
+    CANCELLED = 6;     // 已取消
+}
+
+// 迁移进度响应
+message GetProgressResponse {
+    Status status = 1;
+    string migrationId = 2;
+    MigrationState state = 3;
+    double progress = 4;           // 进度 0.0 - 1.0
+    int64 totalRows = 5;           // 总行数
+    int64 migratedRows = 6;        // 已迁移行数
+    string currentStage = 7;       // 当前阶段描述
+    string errorMessage = 8;       // 错误消息（如果有）
+}
+
+// 取消迁移请求
+message CancelRequest {
+    string migrationId = 1;
+    string reason = 2;
+}
+
+// 取消迁移响应
+message CancelResponse {
+    Status status = 1;
+    string message = 2;
+}
+
+// 迁移任务信息
+message MigrationTask {
+    string migrationId = 1;
+    string regionId = 2;
+    ServerId source = 3;
+    ServerId target = 4;
+    MigrationState state = 5;
+    int64 createTime = 6;
+    int64 startTime = 7;
+    int64 endTime = 8;
+    string errorMessage = 9;
+    int64 totalRows = 10;          // 总行数
+    int64 migratedRows = 11;       // 已迁移行数
+    string currentStage = 12;      // 当前阶段描述
+}
+
+// 列出迁移任务请求
+message ListMigrationsRequest {
+    MigrationState state = 1;      // 可选，过滤特定状态
+}
+
+// 列出迁移任务响应
+message ListMigrationsResponse {
+    Status status = 1;
+    repeated MigrationTask tasks = 2;
+}

@@ -1,0 +1,149 @@
+package com.minisql.replication;
+
+import com.google.protobuf.ByteString;
+import com.minisql.common.model.KeyValue;
+import com.minisql.common.model.ServerId;
+import com.minisql.common.proto.CommonProto;
+import com.minisql.common.proto.RegionServerProto;
+import com.minisql.common.proto.RegionServerServiceGrpc;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * gRPC implementation of the replication transport abstraction.
+ */
+public class GrpcReplicationTransportClient implements ReplicationTransportClient {
+
+    private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
+
+    @Override
+    public boolean replicate(ServerId replica, String regionId, ReplicationLogEntry entry, long timeoutMs) {
+        try {
+            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = newStub(replica, timeoutMs);
+            RegionServerProto.LogEntry.Builder logEntryBuilder = RegionServerProto.LogEntry.newBuilder()
+                .setSequenceId(entry.getSequenceId())
+                .setTimestamp(entry.getTimestamp());
+
+            for (KeyValue kv : entry.getMutations()) {
+                logEntryBuilder.addMutations(toProto(kv));
+            }
+
+            RegionServerProto.ReplicateResponse response = stub.replicate(
+                RegionServerProto.ReplicateRequest.newBuilder()
+                    .setRegionId(regionId)
+                    .addEntries(logEntryBuilder.build())
+                    .build()
+            );
+            return response.getStatus().getSuccess();
+        } catch (Exception e) {
+            System.err.println("Replication RPC failed to " + replica + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public List<KeyValue> fetchSnapshot(ServerId primary, String regionId, long timeoutMs) {
+        try {
+            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = newStub(primary, timeoutMs);
+            Iterator<RegionServerProto.SnapshotResponse> responses = stub.getSnapshot(
+                RegionServerProto.SnapshotRequest.newBuilder().setRegionId(regionId).build()
+            );
+
+            List<KeyValue> snapshot = new ArrayList<>();
+            while (responses.hasNext()) {
+                RegionServerProto.SnapshotResponse response = responses.next();
+                if (!response.getStatus().getSuccess()) {
+                    throw new IllegalStateException("Snapshot fetch failed: " + response.getStatus().getMessage());
+                }
+                for (CommonProto.KeyValue kvProto : response.getKeyValuesList()) {
+                    snapshot.add(fromProto(kvProto));
+                }
+            }
+            return snapshot;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to fetch snapshot from primary " + primary, e);
+        }
+    }
+
+    @Override
+    public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs) {
+        try {
+            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = newStub(replica, timeoutMs);
+            int effectiveBatchSize = Math.max(1, batchSize);
+            for (int i = 0; i < snapshot.size(); i += effectiveBatchSize) {
+                List<KeyValue> batch = snapshot.subList(i, Math.min(i + effectiveBatchSize, snapshot.size()));
+                RegionServerProto.LogEntry.Builder entryBuilder = RegionServerProto.LogEntry.newBuilder()
+                    .setSequenceId(0L)
+                    .setTimestamp(System.currentTimeMillis());
+                for (KeyValue kv : batch) {
+                    entryBuilder.addMutations(toProto(kv));
+                }
+                RegionServerProto.ReplicateResponse response = stub.replicate(
+                    RegionServerProto.ReplicateRequest.newBuilder()
+                        .setRegionId(regionId)
+                        .addEntries(entryBuilder.build())
+                        .build()
+                );
+                if (!response.getStatus().getSuccess()) {
+                    System.err.println("Snapshot apply failed on " + replica + " for region " + regionId +
+                        ": " + response.getStatus().getMessage());
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            System.err.println("Snapshot send failed to " + replica + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public void close() {
+        for (ManagedChannel channel : channels.values()) {
+            channel.shutdown();
+        }
+        channels.clear();
+    }
+
+    private RegionServerServiceGrpc.RegionServerServiceBlockingStub newStub(ServerId serverId, long timeoutMs) {
+        return RegionServerServiceGrpc.newBlockingStub(channelFor(serverId))
+            .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    private ManagedChannel channelFor(ServerId serverId) {
+        String key = serverId.getHost() + ":" + serverId.getPort();
+        return channels.computeIfAbsent(key, ignored -> ManagedChannelBuilder
+            .forAddress(serverId.getHost(), serverId.getPort())
+            .usePlaintext()
+            .build());
+    }
+
+    private CommonProto.KeyValue toProto(KeyValue kv) {
+        return CommonProto.KeyValue.newBuilder()
+            .setRowKey(ByteString.copyFrom(kv.getRowKey()))
+            .setColumnFamily(kv.getFamily() != null ? kv.getFamily() : "")
+            .setQualifier(kv.getQualifier() != null ? kv.getQualifier() : "")
+            .setTimestamp(kv.getTimestamp())
+            .setValue(ByteString.copyFrom(kv.getValue() != null ? kv.getValue() : new byte[0]))
+            .setType(kv.getType() == KeyValue.Type.PUT ? CommonProto.KeyValueType.PUT : CommonProto.KeyValueType.DELETE)
+            .build();
+    }
+
+    private KeyValue fromProto(CommonProto.KeyValue kvProto) {
+        KeyValue kv = new KeyValue();
+        kv.setRowKey(kvProto.getRowKey().toByteArray());
+        kv.setFamily(kvProto.getColumnFamily());
+        kv.setQualifier(kvProto.getQualifier());
+        kv.setTimestamp(kvProto.getTimestamp());
+        kv.setValue(kvProto.getValue().toByteArray());
+        kv.setType(kvProto.getType() == CommonProto.KeyValueType.PUT ? KeyValue.Type.PUT : KeyValue.Type.DELETE);
+        return kv;
+    }
+}

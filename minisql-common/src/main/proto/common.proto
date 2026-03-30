@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package minisql;
+
+option java_package = "com.minisql.common.proto";
+option java_outer_classname = "CommonProto";
+
+// 服务器标识
+message ServerId {
+    string host = 1;
+    int32 port = 2;
+    string serverType = 3;  // MASTER or REGIONSERVER
+}
+
+// KeyValue 键值对
+message KeyValue {
+    bytes rowKey = 1;
+    string columnFamily = 2;
+    string qualifier = 3;
+    int64 timestamp = 4;
+    bytes value = 5;
+    KeyValueType type = 6;
+}
+
+enum KeyValueType {
+    PUT = 0;
+    DELETE = 1;
+}
+
+// Region 信息
+message RegionInfo {
+    string regionId = 1;
+    string tableName = 2;
+    bytes startKey = 3;
+    bytes endKey = 4;
+    repeated ServerId replicas = 5;
+    ServerId primary = 6;
+    RegionState state = 7;
+    MySQLConfig mysqlConfig = 8;  // MySQL 配置
+}
+
+enum RegionState {
+    OFFLINE = 0;
+    OPENING = 1;
+    OPEN = 2;
+    CLOSING = 3;
+    CLOSED = 4;
+    SPLITTING = 5;
+    SPLIT = 6;
+}
+
+// 表结构
+message TableSchema {
+    string tableName = 1;
+    repeated ColumnSchema columns = 2;
+    string primaryKey = 3;
+    // 复合主键支持
+    repeated string partitionKeys = 4;    // 分区键列表
+    repeated string clusteringKeys = 5;   // 聚类键列表
+}
+
+message ColumnSchema {
+    string name = 1;
+    string type = 2;  // INT, BIGINT, VARCHAR, DOUBLE, etc.
+    bool nullable = 3;
+    int32 maxLength = 4;
+}
+
+// 通用响应状态
+message Status {
+    int32 code = 1;
+    string message = 2;
+    bool success = 3;
+}
+
+// 行数据
+message RowData {
+    repeated Cell cells = 1;
+}
+
+message Cell {
+    string columnName = 1;
+    bytes value = 2;
+}
+
+// MySQL 配置
+message MySQLConfig {
+    string url = 1;
+    string user = 2;
+    string password = 3;
+    int32 maxPoolSize = 4;
+}

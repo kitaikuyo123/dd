@@ -1,0 +1,341 @@
+﻿syntax = "proto3";
+
+package minisql;
+
+option java_package = "com.minisql.common.proto";
+option java_outer_classname = "RegionServerProto";
+
+import "common.proto";
+
+// RegionServer 鏈嶅姟瀹氫箟
+service RegionServerService {
+    // 鏁版嵁鎿嶄綔
+    rpc Put(PutRequest) returns (PutResponse);
+    rpc Get(GetRequest) returns (GetResponse);
+    rpc Scan(ScanRequest) returns (stream ScanResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+    rpc BatchPut(BatchPutRequest) returns (BatchPutResponse);
+
+    // SQL 鏌ヨ
+    rpc ExecuteQuery(ExecuteQueryRequest) returns (ExecuteQueryResponse);
+    rpc ExecuteUpdate(ExecuteUpdateRequest) returns (ExecuteUpdateResponse);
+
+    // Region 绠＄悊
+    rpc OpenRegion(OpenRegionRequest) returns (OpenRegionResponse);
+    rpc CloseRegion(CloseRegionRequest) returns (CloseRegionResponse);
+    rpc SplitRegion(SplitRegionRequest) returns (SplitRegionResponse);
+    rpc MergeRegion(MergeRegionRequest) returns (MergeRegionResponse);
+    rpc CompactRegion(CompactRegionRequest) returns (CompactRegionResponse);
+    rpc FlushRegion(FlushRegionRequest) returns (FlushRegionResponse);
+    rpc GetSplitKey(GetSplitKeyRequest) returns (GetSplitKeyResponse);
+    rpc CheckMergeCandidates(CheckMergeCandidatesRequest) returns (CheckMergeCandidatesResponse);
+
+    // 鍓湰鍚屾
+    rpc Replicate(ReplicateRequest) returns (ReplicateResponse);
+    rpc GetReplicationLag(GetReplicationLagRequest) returns (GetReplicationLagResponse);
+
+    // Region migration
+    rpc StartMigration(MigrateRequest) returns (MigrateResponse);
+    rpc FinalizeMigration(FinalizeMigrationRequest) returns (FinalizeMigrationResponse);
+    rpc AbortMigration(AbortMigrationRequest) returns (AbortMigrationResponse);
+    rpc PromoteToPrimary(PromoteRequest) returns (PromoteResponse);
+    rpc GetSnapshot(SnapshotRequest) returns (stream SnapshotResponse);
+}
+
+// 杩佺Щ璇锋眰
+message MigrateRequest {
+    string regionId = 1;
+    ServerId targetServer = 2;
+}
+
+message MigrateResponse {
+    Status status = 1;
+    int64 sourceSequenceId = 2;
+}
+
+message FinalizeMigrationRequest {
+    string regionId = 1;
+    ServerId targetServer = 2;
+    int64 fromSequenceId = 3;
+}
+
+message FinalizeMigrationResponse {
+    Status status = 1;
+    int64 sourceSequenceId = 2;
+}
+
+message AbortMigrationRequest {
+    string regionId = 1;
+}
+
+message AbortMigrationResponse {
+    Status status = 1;
+}
+
+// 鎻愬崌涓轰富鍓湰璇锋眰
+message PromoteRequest {
+    string regionId = 1;
+    int64 fencingToken = 2;  // Fencing token 闃叉鑴戣
+}
+
+message PromoteResponse {
+    Status status = 1;
+    int64 fencingToken = 2;  // 杩斿洖纭鐨?fencing token
+}
+
+// 蹇収璇锋眰
+message SnapshotRequest {
+    string regionId = 1;
+}
+
+message SnapshotResponse {
+    Status status = 1;
+    repeated KeyValue keyValues = 2;
+}
+
+// Put 璇锋眰
+message PutRequest {
+    string regionId = 1;
+    bytes rowKey = 2;
+    repeated KeyValue keyValues = 3;
+    bool durable = 4;  // 鏄惁鍐欏叆WAL
+}
+
+message PutResponse {
+    Status status = 1;
+}
+
+// BatchPut 璇锋眰
+message BatchPutRequest {
+    string regionId = 1;
+    repeated RowMutation mutations = 2;
+    bool durable = 3;
+}
+
+message RowMutation {
+    bytes rowKey = 1;
+    repeated KeyValue keyValues = 2;
+}
+
+message BatchPutResponse {
+    Status status = 1;
+    repeated FailedMutation failures = 2;
+}
+
+message FailedMutation {
+    bytes rowKey = 1;
+    string errorMessage = 2;
+}
+
+// Get 璇锋眰
+message GetRequest {
+    string regionId = 1;
+    bytes rowKey = 2;
+    repeated string columnFamilies = 3;
+    repeated string qualifiers = 4;
+    int64 timestamp = 5;  // 鑾峰彇鎸囧畾鏃堕棿鎴崇殑鏁版嵁
+}
+
+message GetResponse {
+    Status status = 1;
+    repeated KeyValue keyValues = 2;
+}
+
+// Scan 璇锋眰
+message ScanRequest {
+    string regionId = 1;
+    bytes startKey = 2;
+    bytes endKey = 3;
+    repeated string columnFamilies = 4;
+    repeated string qualifiers = 5;
+    int64 timestamp = 6;
+    int32 limit = 7;  // 闄愬埗杩斿洖鏁伴噺
+    bool reversed = 8;  // 鍙嶅悜鎵弿
+    string tableName = 9;  // Optional logical table name for predicate pushdown
+    string whereClause = 10;  // Optional raw WHERE clause without WHERE keyword
+}
+
+message ScanResponse {
+    Status status = 1;
+    repeated KeyValue keyValues = 2;
+    bool hasMore = 3;  // 鏄惁杩樻湁鏇村鏁版嵁
+}
+
+// Delete 璇锋眰
+message DeleteRequest {
+    string regionId = 1;
+    bytes rowKey = 2;
+    repeated string columnFamilies = 3;
+    repeated string qualifiers = 4;
+    int64 timestamp = 5;  // 鍒犻櫎鎸囧畾鏃堕棿鎴充箣鍓嶇殑鏁版嵁
+    bool deleteAllVersions = 6;
+}
+
+message DeleteResponse {
+    Status status = 1;
+}
+
+// OpenRegion 璇锋眰
+message OpenRegionRequest {
+    RegionInfo region = 1;
+    // 鐢ㄤ簬绠€鍖栬皟鐢ㄧ殑瀛楁
+    string regionId = 2;
+    string tableName = 3;
+    bytes startKey = 4;
+    bytes endKey = 5;
+    bool asReplica = 6;  // 鏄惁浣滀负鍓湰鎵撳紑
+}
+
+message OpenRegionResponse {
+    Status status = 1;
+}
+
+// CloseRegion 璇锋眰
+message CloseRegionRequest {
+    string regionId = 1;
+    bool abort = 2;  // 鏄惁寮哄埗鍏抽棴
+    bool dropTable = 3;  // 鏄惁鍒犻櫎 MySQL 琛紙鐢ㄤ簬 DROP TABLE 鎿嶄綔锛?}
+}
+
+message CloseRegionResponse {
+    Status status = 1;
+}
+
+// SplitRegion 璇锋眰
+message SplitRegionRequest {
+    string regionId = 1;
+    bytes splitKey = 2;  // 鍒嗚鐐癸紝濡傛灉涓虹┖鍒欑敱绯荤粺鑷姩閫夋嫨
+}
+
+message SplitRegionResponse {
+    Status status = 1;
+    RegionInfo leftRegion = 2;
+    RegionInfo rightRegion = 3;
+}
+
+// GetSplitKey 璇锋眰 - 鑾峰彇鏈€浣冲垎瑁傜偣
+message GetSplitKeyRequest {
+    string regionId = 1;
+}
+
+message GetSplitKeyResponse {
+    Status status = 1;
+    bytes splitKey = 2;  // 鎺ㄨ崘鐨勫垎瑁傜偣
+}
+
+// CompactRegion 璇锋眰
+message CompactRegionRequest {
+    string regionId = 1;
+    bool major = 2;  // 鏄惁涓诲帇缂?}
+}
+
+message CompactRegionResponse {
+    Status status = 1;
+}
+
+// FlushRegion 璇锋眰
+message FlushRegionRequest {
+    string regionId = 1;
+}
+
+message FlushRegionResponse {
+    Status status = 1;
+}
+
+// 鍓湰鍚屾
+message ReplicateRequest {
+    string regionId = 1;
+    repeated LogEntry entries = 2;
+}
+
+message LogEntry {
+    int64 sequenceId = 1;
+    int64 timestamp = 2;
+    repeated KeyValue mutations = 3;
+}
+
+message ReplicateResponse {
+    Status status = 1;
+    int64 lastAppliedSeqId = 2;
+}
+
+message GetReplicationLagRequest {
+    string regionId = 1;
+}
+
+message GetReplicationLagResponse {
+    Status status = 1;
+    int64 lagInEntries = 2;
+    int64 lagInBytes = 3;
+    int64 currentSequenceId = 4;
+    int64 lastAppliedSequenceId = 5;
+}
+
+// ==================== Region 鍚堝苟娑堟伅 ====================
+
+// 鍚堝苟 Region 璇锋眰
+message MergeRegionRequest {
+    string leftRegionId = 1;   // 宸?Region锛堣寖鍥磋緝灏忥級
+    string rightRegionId = 2;  // 鍙?Region锛堣寖鍥磋緝澶э級
+}
+
+message MergeRegionResponse {
+    Status status = 1;
+    RegionInfo mergedRegion = 2;  // 鍚堝苟鍚庣殑鏂?Region
+    int64 totalEntries = 3;       // 鍚堝苟鐨勬€绘潯鐩暟
+}
+
+// 妫€鏌ュ彲鍚堝苟 Region 璇锋眰锛圡aster 鐢級
+message CheckMergeCandidatesRequest {
+    string tableName = 1;  // 鎸囧畾琛ㄥ悕锛屼负绌哄垯妫€鏌ユ墍鏈夎〃
+}
+
+message CheckMergeCandidatesResponse {
+    Status status = 1;
+    repeated MergeCandidate candidates = 2;  // 鍙悎骞剁殑 Region 瀵瑰垪琛?
+    message MergeCandidate {
+        string leftRegionId = 1;
+        string rightRegionId = 2;
+        int64 combinedSize = 3;  // 鍚堝苟鍚庣殑澶у皬浼拌
+    }
+}
+
+// ==================== SQL interfaces ====================
+
+// ExecuteQuery request
+message ExecuteQueryRequest {
+    string regionId = 1;
+    string sql = 2;
+    int32 limit = 3;
+}
+
+// ExecuteQuery response
+message ExecuteQueryResponse {
+    Status status = 1;
+    repeated QueryRow rows = 2;
+    repeated QueryColumn columns = 3;
+}
+
+// Query row payload
+message QueryRow {
+    repeated bytes values = 1;
+}
+
+// Query column metadata
+message QueryColumn {
+    string name = 1;
+    string type = 2;
+    bool nullable = 3;
+}
+
+// ExecuteUpdate request
+message ExecuteUpdateRequest {
+    string regionId = 1;
+    string sql = 2;
+}
+
+// ExecuteUpdate response
+message ExecuteUpdateResponse {
+    Status status = 1;
+    int64 affectedRows = 2;
+}

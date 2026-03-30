@@ -1,0 +1,212 @@
+syntax = "proto3";
+
+package minisql;
+
+option java_package = "com.minisql.common.proto";
+option java_outer_classname = "MasterProto";
+
+import "common.proto";
+
+service MasterService {
+    rpc RegisterRegionServer(RegisterRequest) returns (RegisterResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc ReportSqlMetrics(ReportSqlMetricsRequest) returns (ReportSqlMetricsResponse);
+    rpc ReportRegionStatus(RegionStatusRequest) returns (RegionStatusResponse);
+    rpc GetRegionLocation(GetLocationRequest) returns (GetLocationResponse);
+    rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
+    rpc DeleteTable(DeleteTableRequest) returns (DeleteTableResponse);
+    rpc ListTables(ListTablesRequest) returns (ListTablesResponse);
+    rpc GetTableSchema(GetTableSchemaRequest) returns (GetTableSchemaResponse);
+    rpc GetTableRegions(GetTableRegionsRequest) returns (GetTableRegionsResponse);
+    rpc TriggerBalance(BalanceRequest) returns (BalanceResponse);
+    rpc ReportPrimaryChange(PrimaryChangeRequest) returns (PrimaryChangeResponse);
+    rpc GetReplicaLifecycleStatus(GetReplicaLifecycleStatusRequest) returns (GetReplicaLifecycleStatusResponse);
+}
+
+message PrimaryChangeRequest {
+    string regionId = 1;
+    ServerId oldPrimary = 2;
+    ServerId newPrimary = 3;
+    int64 timestamp = 4;
+}
+
+message PrimaryChangeResponse {
+    Status status = 1;
+}
+
+message RegisterRequest {
+    ServerId serverId = 1;
+    int64 timestamp = 2;
+    MySQLConfig mysqlConfig = 3;
+}
+
+message RegisterResponse {
+    Status status = 1;
+    string clusterId = 2;
+    int64 serverSequenceId = 3;
+}
+
+message HeartbeatRequest {
+    ServerId serverId = 1;
+    int64 timestamp = 2;
+    repeated RegionLoad regionLoads = 3;
+    ServerMetrics metrics = 4;
+}
+
+message HeartbeatResponse {
+    Status status = 1;
+    repeated Command commands = 2;
+}
+
+message ReportSqlMetricsRequest {
+    string sqlType = 1;
+    string tableName = 2;
+    repeated string regionIds = 3;
+    bool success = 4;
+    int64 latencyMs = 5;
+    int64 timestamp = 6;
+    string errorMessage = 7;
+    string source = 8;
+}
+
+message ReportSqlMetricsResponse {
+    Status status = 1;
+}
+
+message RegionLoad {
+    string regionId = 1;
+    int64 readRequests = 2;
+    int64 writeRequests = 3;
+    int64 storeFileSize = 4;
+    int64 memStoreSize = 5;
+}
+
+message ServerMetrics {
+    double cpuUsage = 1;
+    double memoryUsage = 2;
+    int64 availableSpace = 3;
+    int64 totalSpace = 4;
+}
+
+message Command {
+    CommandType type = 1;
+    bytes payload = 2;
+}
+
+enum CommandType {
+    NOOP = 0;
+    OPEN_REGION = 1;
+    CLOSE_REGION = 2;
+    FLUSH = 3;
+    COMPACT = 4;
+    STOP = 5;
+}
+
+message RegionStatusRequest {
+    ServerId serverId = 1;
+    string regionId = 2;
+    RegionState state = 3;
+    string errorMessage = 4;
+}
+
+message RegionStatusResponse {
+    Status status = 1;
+}
+
+message GetLocationRequest {
+    string tableName = 1;
+    bytes rowKey = 2;
+}
+
+message GetLocationResponse {
+    Status status = 1;
+    RegionInfo region = 2;
+    ServerId serverId = 3;
+    MySQLConfig mysqlConfig = 4;
+}
+
+message CreateTableRequest {
+    TableSchema schema = 1;
+    int32 numRegions = 2;
+    bytes startKey = 3;
+    bytes endKey = 4;
+}
+
+message CreateTableResponse {
+    Status status = 1;
+    repeated RegionInfo regions = 2;
+}
+
+message DeleteTableRequest {
+    string tableName = 1;
+}
+
+message DeleteTableResponse {
+    Status status = 1;
+}
+
+message ListTablesRequest {
+}
+
+message ListTablesResponse {
+    Status status = 1;
+    repeated TableSchema tables = 2;
+}
+
+message GetTableSchemaRequest {
+    string tableName = 1;
+}
+
+message GetTableSchemaResponse {
+    Status status = 1;
+    TableSchema schema = 2;
+}
+
+message GetTableRegionsRequest {
+    string tableName = 1;
+}
+
+message GetTableRegionsResponse {
+    Status status = 1;
+    repeated RegionInfo regions = 2;
+}
+
+message BalanceRequest {
+    bool force = 1;
+}
+
+message BalanceResponse {
+    Status status = 1;
+    repeated BalanceAction actions = 2;
+}
+
+message BalanceAction {
+    string regionId = 1;
+    ServerId source = 2;
+    ServerId target = 3;
+    ActionType type = 4;
+}
+
+enum ActionType {
+    MOVE = 0;
+    MERGE = 1;
+    REGION_SPLIT = 2;
+}
+
+message GetReplicaLifecycleStatusRequest {
+    string regionId = 1;
+    ServerId serverId = 2;
+}
+
+message ReplicaLifecycleStatus {
+    string regionId = 1;
+    ServerId serverId = 2;
+    string state = 3;
+    string detail = 4;
+    int64 updatedAt = 5;
+}
+
+message GetReplicaLifecycleStatusResponse {
+    Status status = 1;
+    repeated ReplicaLifecycleStatus statuses = 2;
+}
