@@ -2,7 +2,6 @@ package com.minisql.regionserver;
 
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
-import com.minisql.storage.MySQLConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -132,9 +131,8 @@ public class RegionSplitService {
         rightRegion.setEndKey(oldRegion.getEndKey());
 
         // 2. 创建新的 MySQL 存储
-        MySQLConfig config = regionManager.getMysqlConfigForRegion(oldRegion);
-        MySQLRegionStorage leftStorage = new MySQLRegionStorage(leftRegionId, config);
-        MySQLRegionStorage rightStorage = new MySQLRegionStorage(rightRegionId, config);
+        MySQLRegionStorage leftStorage = regionManager.createRegionStorage(leftRegionId);
+        MySQLRegionStorage rightStorage = regionManager.createRegionStorage(rightRegionId);
         leftStorage.start();
         rightStorage.start();
 
@@ -165,13 +163,8 @@ public class RegionSplitService {
         regionManager.closeRegion(regionId, true);
 
         // 6. 注册并打开新 Region
-        regionManager.registerRegionInternal(leftRegion);
-        regionManager.setRegionState(leftRegionId, RegionManager.RegionState.OPEN);
-        regionManager.registerMySQLRegionStorage(leftRegionId, leftStorage);
-
-        regionManager.registerRegionInternal(rightRegion);
-        regionManager.setRegionState(rightRegionId, RegionManager.RegionState.OPEN);
-        regionManager.registerMySQLRegionStorage(rightRegionId, rightStorage);
+        regionManager.registerOpenedRegion(leftRegion, leftStorage);
+        regionManager.registerOpenedRegion(rightRegion, rightStorage);
 
         logger.info("Region split completed: {} -> {} + {}", regionId, leftRegionId, rightRegionId);
 

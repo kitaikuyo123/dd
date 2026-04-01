@@ -2,7 +2,6 @@ package com.minisql.regionserver;
 
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
-import com.minisql.storage.MySQLConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -162,8 +161,7 @@ public class RegionMergeService {
             mergedRegion.setEndKey(rightRegion.getEndKey());
 
             // 2. 创建新存储（会自动创建 kv_store_{mergedRegionId} 表）
-            MySQLConfig config = regionManager.getMysqlConfigForRegion(leftRegion);
-            MySQLRegionStorage mergedStorage = new MySQLRegionStorage(mergedRegionId, config);
+            MySQLRegionStorage mergedStorage = regionManager.createRegionStorage(mergedRegionId);
             checkpoint.mergedStorage = mergedStorage;
             mergedStorage.start();
 
@@ -206,9 +204,7 @@ public class RegionMergeService {
             regionManager.closeRegion(rightRegionId, true);
 
             // 6. 打开新 Region
-            regionManager.registerRegionInternal(mergedRegion);
-            regionManager.setRegionState(mergedRegionId, RegionManager.RegionState.OPEN);
-            regionManager.registerMySQLRegionStorage(mergedRegionId, mergedStorage);
+            regionManager.registerOpenedRegion(mergedRegion, mergedStorage);
 
             logger.info("Region merge completed: {} + {} -> {}", leftRegionId, rightRegionId, mergedRegionId);
 
