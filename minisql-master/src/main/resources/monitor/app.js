@@ -267,6 +267,8 @@ createApp({
     const regionColumns = [
       { key: "regionId", label: "Region", render: row => row.regionId || "-" },
       { key: "tableName", label: "Table", render: row => row.tableName || "-" },
+      { key: "serverId", label: "Server", render: row => row.serverId || "-" },
+      { key: "role", label: "Role", render: row => row.role || "-" },
       { key: "primaryServer", label: "Primary", render: row => row.primaryServer || "-" },
       { key: "replicationLag", label: "Lag", render: row => formatNumber(row.replicationLag) },
       { key: "readRequests", label: "Reads", render: row => formatNumber(row.readRequests) },

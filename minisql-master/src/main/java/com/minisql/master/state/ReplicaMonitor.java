@@ -8,7 +8,7 @@ import java.util.concurrent.*;
 
 /**
  * 副本监控器
- * 负责监控所有 Region 副本的健康状态、复制延迟和故障检测
+ * 负责维护 Region 副本的运行态指标；成员存活与故障收敛以 ZooKeeper 为准。
  */
 public class ReplicaMonitor {
 
@@ -183,41 +183,9 @@ public class ReplicaMonitor {
      * 执行健康检查
      */
     private void performHealthCheck() {
-        long now = System.currentTimeMillis();
-
-        for (Map.Entry<String, List<ReplicaInfo>> entry : regionReplicas.entrySet()) {
-            String regionId = entry.getKey();
-            List<ReplicaInfo> replicas = entry.getValue();
-
-            for (ReplicaInfo replica : replicas) {
-                // 检查心跳超时
-                if (replica.isTimeout(heartbeatTimeoutMs)) {
-                    if (replica.getState() != ReplicaInfo.ReplicaState.OFFLINE) {
-                        System.err.println("Replica timeout: " + replica.getServerId() +
-                                         " for region: " + regionId +
-                                         " (last heartbeat: " + (now - replica.getLastHeartbeat()) + "ms ago)");
-
-                        replica.setState(ReplicaInfo.ReplicaState.OFFLINE);
-                        notifyReplicaFailed(regionId, replica.getServerId());
-
-                        // 如果是主副本离线，触发故障转移
-                        if (replica.isPrimary()) {
-                            System.out.println("Primary replica offline, failover will be triggered for region: " + regionId);
-                        }
-                    }
-                } else {
-                    // 副本在线，确保状态正确
-                    if (replica.getState() == ReplicaInfo.ReplicaState.OFFLINE) {
-                        replica.setState(replica.isPrimary() ?
-                                        ReplicaInfo.ReplicaState.PRIMARY :
-                                        ReplicaInfo.ReplicaState.SECONDARY);
-                        System.out.println("Replica recovered: " + replica.getServerId() +
-                                         " for region: " + regionId);
-                        notifyReplicaRecovered(regionId, replica.getServerId());
-                    }
-                }
-            }
-        }
+        // Membership and failure convergence are driven by ZooKeeper node events.
+        // Heartbeat no longer marks replicas offline/online to avoid dual failure
+        // pipelines and delayed or conflicting convergence.
     }
 
     /**

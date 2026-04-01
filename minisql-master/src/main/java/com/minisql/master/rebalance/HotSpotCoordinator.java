@@ -123,7 +123,6 @@ public class HotSpotCoordinator {
     }
 
     private void detectAndPlanHotSpots() {
-        System.out.println("Detecting hot spots...");
         clearExpiredCooldowns();
 
         for (String regionId : loadHistory.keySet()) {

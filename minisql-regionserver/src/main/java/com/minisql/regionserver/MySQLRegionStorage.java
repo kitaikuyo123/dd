@@ -149,16 +149,6 @@ public class MySQLRegionStorage {
                         long oldSize = this.estimatedSize;
                         this.estimatedSize = actualSize;
 
-                        String sizeInfo = formatSize(actualSize);
-                        String diffInfo = "";
-                        if (oldSize != actualSize) {
-                            long diff = actualSize - oldSize;
-                            String diffSign = diff >= 0 ? "+" : "";
-                            diffInfo = " (change: " + diffSign + formatSize(diff) + ")";
-                        }
-                        System.out.printf("[RegionSize Calibrated] Region: %s | Table: %s | Size: %s%s | Estimated: %s%n",
-                            regionId, engine.getTableName(), sizeInfo, diffInfo, formatSize(oldSize));
-
                         return actualSize;
                     }
                 }

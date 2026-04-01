@@ -31,7 +31,7 @@
         <!-- Dependency versions -->
         <zookeeper.version>3.8.2</zookeeper.version>
         <curator.version>5.6.0</curator.version>
-        <grpc.version>1.58.0</grpc.version>
+        <grpc.version>1.76.1</grpc.version>
         <protobuf.version>3.24.0</protobuf.version>
         <rocksdb.version>8.5.3</rocksdb.version>
         <slf4j.version>2.0.9</slf4j.version>

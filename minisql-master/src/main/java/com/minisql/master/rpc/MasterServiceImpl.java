@@ -8,6 +8,8 @@ import com.minisql.master.rebalance.*;
 import com.minisql.master.recover.*;
 import com.minisql.master.state.*;
 import com.minisql.replication.ReplicationCoordinator;
+import com.minisql.zookeeper.DistributedLock;
+import com.minisql.zookeeper.ZkClient;
 import io.grpc.stub.StreamObserver;
 
 import java.util.ArrayList;
@@ -20,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -47,6 +50,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private final java.util.Set<String> recoveringRegions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private MonitoringService monitoringService;
     private ScheduledExecutorService balanceScheduler;
+    private volatile boolean leader = true;
+    private volatile ZkClient zkClient;
 
     // Master 状态
     private final String clusterId;
@@ -108,6 +113,17 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.migrationCoordinator.setMonitoringService(monitoringService);
         this.splitCoordinator.setMonitoringService(monitoringService);
         this.mergeCoordinator.setMonitoringService(monitoringService);
+    }
+
+    public void setLeader(boolean leader) {
+        this.leader = leader;
+    }
+
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
+        this.migrationCoordinator.setZkClient(zkClient);
+        this.splitCoordinator.setZkClient(zkClient);
+        this.mergeCoordinator.setZkClient(zkClient);
     }
 
     /**
@@ -222,10 +238,12 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             return;
         }
         for (String regionId : event.getAffectedRegionIds()) {
+            boolean primaryFailed = removeFailedReplicaFromMetadata(regionId, event.getFailedServer());
             lifecycleManager.transition(regionId, event.getFailedServer(),
                 ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
                 "Server failure event received");
-            serverFailureRecoveryExecutor.submit(() -> recoverRegionAfterServerFailure(regionId, event.getFailedServer()));
+            serverFailureRecoveryExecutor.submit(() ->
+                recoverRegionAfterServerFailure(regionId, event.getFailedServer(), primaryFailed));
         }
     }
 
@@ -238,7 +256,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         );
     }
 
-    private void recoverRegionAfterServerFailure(String regionId, ServerId failedServer) {
+    private void recoverRegionAfterServerFailure(String regionId, ServerId failedServer, boolean primaryFailed) {
         if (!recoveringRegions.add(regionId)) {
             return;
         }
@@ -254,11 +272,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             }
 
             clusterManager.updateRegionState(regionId, Region.State.OFFLINE);
-            ServerId currentPrimary = clusterManager.getPrimaryServerForRegion(regionId);
-            if (failedServer.equals(currentPrimary)) {
+            if (primaryFailed) {
                 lifecycleManager.transition(regionId, failedServer,
                     ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
                     "Primary failure detected by ServerFailureEvent");
+                clusterManager.unassignRegion(regionId);
                 if (failoverCoordinator == null) {
                     throw new IllegalStateException("FailoverCoordinator is required for primary recovery");
                 }
@@ -289,6 +307,34 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         } finally {
             recoveringRegions.remove(regionId);
         }
+    }
+
+    private boolean removeFailedReplicaFromMetadata(String regionId, ServerId failedServer) {
+        if (regionId == null || failedServer == null) {
+            return false;
+        }
+
+        clusterManager.removeReplica(regionId, failedServer);
+        replicaMonitor.removeReplica(regionId, failedServer);
+
+        Region region = metadataManager.getRegion(regionId);
+        if (region == null) {
+            return false;
+        }
+
+        boolean changed = false;
+        if (region.getReplicas() != null && region.getReplicas().contains(failedServer)) {
+            region.removeReplica(failedServer);
+            changed = true;
+        }
+
+        ServerId currentPrimary = clusterManager.getPrimaryServerForRegion(regionId);
+        boolean primaryFailed = failedServer.equals(currentPrimary);
+
+        if (changed && !primaryFailed) {
+            metadataManager.registerRegionForTable(region, region.getPrimary());
+        }
+        return primaryFailed;
     }
 
     private ServerId selectNewServerForReplica(String regionId, ServerId excludeServer) {
@@ -332,6 +378,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public void registerRegionServer(MasterProto.RegisterRequest request,
                                       StreamObserver<MasterProto.RegisterResponse> responseObserver) {
         try {
+            if (!ensureLeader(responseObserver, MasterProto.RegisterResponse::newBuilder)) {
+                return;
+            }
             ServerId serverId = convertServerId(request.getServerId());
             long seqId = serverSequenceId.incrementAndGet();
 
@@ -353,17 +402,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 ).maxPoolSize(mysqlConfigProto.getMaxPoolSize()).build();
                 clusterManager.registerMySQLConfig(serverId, mysqlConfig);
                 System.out.println("MySQL config registered for server: " + serverId);
-            }
-
-            // 注册到副本监控器
-            if (replicaMonitor != null) {
-                ReplicaInfo replicaInfo = new ReplicaInfo();
-                replicaInfo.setServerId(serverId);
-                replicaInfo.setRegionId("server-" + serverId.getHost() + ":" + serverId.getPort());
-                replicaInfo.setState(ReplicaInfo.ReplicaState.SECONDARY);
-                replicaInfo.setLastHeartbeat(System.currentTimeMillis());
-                replicaMonitor.registerReplica(replicaInfo.getRegionId(), replicaInfo);
-                System.out.println("Replica registered to monitor: " + serverId);
             }
 
             MasterProto.RegisterResponse response = MasterProto.RegisterResponse.newBuilder()
@@ -397,6 +435,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public void reportSqlMetrics(MasterProto.ReportSqlMetricsRequest request,
                                  StreamObserver<MasterProto.ReportSqlMetricsResponse> responseObserver) {
         try {
+            if (!ensureLeader(responseObserver, MasterProto.ReportSqlMetricsResponse::newBuilder)) {
+                return;
+            }
             if (monitoringService != null) {
                 monitoringService.recordSqlMetric(
                     request.getSqlType(),
@@ -424,16 +465,15 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public void heartbeat(MasterProto.HeartbeatRequest request,
                           StreamObserver<MasterProto.HeartbeatResponse> responseObserver) {
         try {
+            if (!ensureLeader(responseObserver, MasterProto.HeartbeatResponse::newBuilder)) {
+                return;
+            }
             ServerId serverId = convertServerId(request.getServerId());
 
-            // 更新心跳
-            String serverReplicaRegionId = "server-" + serverId.getHost() + ":" + serverId.getPort();
             clusterManager.handleHeartbeat(serverId, request.getTimestamp());
-            if (replicaMonitor != null) {
-                replicaMonitor.updateHeartbeat(serverReplicaRegionId, serverId, 0);
-            }
 
-            // 处理负载报告
+            // Heartbeat only carries runtime metrics. ZooKeeper membership is authoritative
+            // for server liveness and failover triggers.
             if (request.getRegionLoadsCount() > 0) {
                 for (MasterProto.RegionLoad load : request.getRegionLoadsList()) {
                     clusterManager.updateRegionLoad(serverId, load.getRegionId(),
@@ -482,6 +522,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public void reportRegionStatus(MasterProto.RegionStatusRequest request,
                                     StreamObserver<MasterProto.RegionStatusResponse> responseObserver) {
         try {
+            if (!ensureLeader(responseObserver, MasterProto.RegionStatusResponse::newBuilder)) {
+                return;
+            }
             String regionId = request.getRegionId();
             CommonProto.RegionState state = request.getState();
 
@@ -564,9 +607,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                             StreamObserver<MasterProto.CreateTableResponse> responseObserver) {
         boolean tablePersisted = false;
         List<Region> createdRegions = new ArrayList<>();
+        DistributedLock lock = null;
         try {
+            if (!ensureLeader(responseObserver, MasterProto.CreateTableResponse::newBuilder)) {
+                return;
+            }
             CommonProto.TableSchema protoSchema = request.getSchema();
             String tableName = protoSchema.getTableName();
+            lock = acquireTableLock(tableName);
 
             System.out.println("[CREATE TABLE] Start creating table: " + tableName);
             System.out.println("[CREATE TABLE] Columns count: " + protoSchema.getColumnsCount());
@@ -784,14 +832,21 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
             responseObserver.onCompleted();
+        } finally {
+            releaseLock(lock);
         }
     }
 
     @Override
     public void deleteTable(MasterProto.DeleteTableRequest request,
                             StreamObserver<MasterProto.DeleteTableResponse> responseObserver) {
+        DistributedLock lock = null;
         try {
+            if (!ensureLeader(responseObserver, MasterProto.DeleteTableResponse::newBuilder)) {
+                return;
+            }
             String tableName = request.getTableName();
+            lock = acquireTableLock(tableName);
 
             if (!metadataManager.tableExists(tableName)) {
                 responseObserver.onNext(MasterProto.DeleteTableResponse.newBuilder()
@@ -851,6 +906,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
             responseObserver.onCompleted();
+        } finally {
+            releaseLock(lock);
         }
     }
 
@@ -1025,6 +1082,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public void triggerBalance(MasterProto.BalanceRequest request,
                                 StreamObserver<MasterProto.BalanceResponse> responseObserver) {
         try {
+            if (!ensureLeader(responseObserver, MasterProto.BalanceResponse::newBuilder)) {
+                return;
+            }
             List<ClusterManager.ServerInfo> servers = new ArrayList<>(clusterManager.getActiveServers());
 
             if (servers.size() < 2) {
@@ -1071,8 +1131,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     @Override
     public void reportPrimaryChange(MasterProto.PrimaryChangeRequest request,
                                     StreamObserver<MasterProto.PrimaryChangeResponse> responseObserver) {
+        DistributedLock lock = null;
         try {
+            if (!ensureLeader(responseObserver, MasterProto.PrimaryChangeResponse::newBuilder)) {
+                return;
+            }
             String regionId = request.getRegionId();
+            lock = acquireRegionLock(regionId);
             ServerId newPrimary = convertServerId(request.getNewPrimary());
             ServerId oldPrimary = request.hasOldPrimary() ? convertServerId(request.getOldPrimary()) : null;
 
@@ -1112,6 +1177,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
             responseObserver.onCompleted();
+        } finally {
+            releaseLock(lock);
         }
     }
 
@@ -1168,6 +1235,58 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             .setSuccess(false)
             .setMessage(message)
             .build();
+    }
+
+    private <T extends com.google.protobuf.GeneratedMessageV3.Builder<T>> boolean ensureLeader(
+        StreamObserver<?> responseObserver,
+        Supplier<T> builderSupplier
+    ) {
+        if (leader) {
+            return true;
+        }
+        T builder = builderSupplier.get();
+        try {
+            builder.getClass().getMethod("setStatus", CommonProto.Status.class)
+                .invoke(builder, createErrorStatus("Current master is standby; retry the elected leader"));
+            @SuppressWarnings("unchecked")
+            StreamObserver<com.google.protobuf.Message> typedObserver =
+                (StreamObserver<com.google.protobuf.Message>) responseObserver;
+            typedObserver.onNext((com.google.protobuf.Message) builder.build());
+            typedObserver.onCompleted();
+        } catch (Exception reflectionError) {
+            throw new IllegalStateException("Failed to build standby rejection response", reflectionError);
+        }
+        return false;
+    }
+
+    private DistributedLock acquireTableLock(String tableName) throws Exception {
+        return acquireLock("/minisql/locks/tables/" + tableName);
+    }
+
+    private DistributedLock acquireRegionLock(String regionId) throws Exception {
+        return acquireLock("/minisql/locks/regions/" + regionId);
+    }
+
+    private DistributedLock acquireLock(String path) throws Exception {
+        if (zkClient == null) {
+            return null;
+        }
+        DistributedLock lock = new DistributedLock(zkClient.getClient(), path);
+        lock.acquire();
+        return lock;
+    }
+
+    private void releaseLock(DistributedLock lock) {
+        if (lock == null) {
+            return;
+        }
+        try {
+            if (lock.isAcquiredInThisProcess()) {
+                lock.release();
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to release distributed lock: " + e.getMessage());
+        }
     }
 
     private ServerId convertServerId(CommonProto.ServerId proto) {

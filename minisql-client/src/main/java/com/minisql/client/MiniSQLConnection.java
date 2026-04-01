@@ -1,10 +1,12 @@
 package com.minisql.client;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.*;
 import com.minisql.common.proto.*;
 import com.minisql.common.utils.RowKeySerializer;
 import com.minisql.sql.SQLParser;
 import com.minisql.zookeeper.ZkClient;
+import com.minisql.zookeeper.ZkPayloads;
 import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -158,10 +160,10 @@ public class MiniSQLConnection implements Connection {
      */
     private void refreshMasterAddress() throws SQLException {
         try {
-            String masterPath = "/minisql/master";
+            String masterPath = Constants.ZK_MASTER_LEADER_PATH;
             if (zkClient.exists(masterPath)) {
                 byte[] data = zkClient.getData(masterPath);
-                String masterAddress = new String(data);
+                String masterAddress = ZkPayloads.decodeLeaderAddress(data);
                 connectToMaster(masterAddress);
             } else {
                 throw new SQLException("Master not found in ZooKeeper");

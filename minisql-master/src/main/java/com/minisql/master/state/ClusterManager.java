@@ -82,42 +82,6 @@ public class ClusterManager {
         ServerInfo info = new ServerInfo(serverId, timestamp);
         activeServers.put(serverKey(serverId), info);
         System.out.println("RegionServer registered: " + serverId);
-
-        // 注册到 ZooKeeper
-        registerServerToZooKeeper(serverId, timestamp);
-    }
-
-    /**
-     * 将 RegionServer 注册到 ZooKeeper
-     * 路径：/minisql/regionservers/{host}:{port}
-     * 数据：JSON 格式
-     */
-    private void registerServerToZooKeeper(ServerId serverId, long timestamp) {
-        if (zkClient == null) {
-            System.err.println("ZooKeeper client not initialized");
-            return;
-        }
-
-        try {
-            String serverPath = "/minisql/regionservers/" + serverId.getHost() + ":" + serverId.getPort();
-
-            // 构建服务器信息数据
-            String serverInfo = "{\"host\":\"" + serverId.getHost() +
-                               "\",\"port\":" + serverId.getPort() +
-                               ",\"timestamp\":" + timestamp + "}";
-            byte[] data = serverInfo.getBytes("UTF-8");
-
-            if (zkClient.exists(serverPath)) {
-                zkClient.setData(serverPath, data);
-            } else {
-                zkClient.createEphemeral(serverPath, data);
-            }
-
-            System.out.println("RegionServer registered to ZooKeeper: " + serverPath);
-        } catch (Exception e) {
-            System.err.println("Failed to register server to ZooKeeper: " + e.getMessage());
-            e.printStackTrace();
-        }
     }
 
     /**
@@ -170,6 +134,9 @@ public class ClusterManager {
         regionReplicas.remove(regionId);
         replicaSequenceIds.remove(regionId);
         regionFencingTokens.remove(regionId);
+        for (ServerInfo info : activeServers.values()) {
+            info.removeRegionLoad(regionId);
+        }
 
         if (tableName != null) {
             Set<String> regions = tableRegions.get(tableName);
@@ -261,6 +228,10 @@ public class ClusterManager {
      * 检测故障节点
      */
     public List<ServerId> detectFailedServers(long timeoutMs) {
+        return Collections.emptyList();
+    }
+
+    public List<ServerId> detectStaleMetricServers(long timeoutMs) {
         List<ServerId> failedServers = new ArrayList<>();
         long now = System.currentTimeMillis();
 
@@ -286,6 +257,34 @@ public class ClusterManager {
      */
     public Map<String, RegionAssignment> getRegionAssignments() {
         return new ConcurrentHashMap<>(regionAssignments);
+    }
+
+    public List<String> getRegionsAssignedToServer(ServerId serverId) {
+        List<String> regionIds = new ArrayList<>();
+        if (serverId == null) {
+            return regionIds;
+        }
+        for (Map.Entry<String, RegionAssignment> entry : regionAssignments.entrySet()) {
+            RegionAssignment assignment = entry.getValue();
+            if (assignment != null && serverId.equals(assignment.getServerId())) {
+                regionIds.add(entry.getKey());
+            }
+        }
+        return regionIds;
+    }
+
+    public List<String> getRegionsReplicatedOnServer(ServerId serverId) {
+        List<String> regionIds = new ArrayList<>();
+        if (serverId == null) {
+            return regionIds;
+        }
+        for (Map.Entry<String, List<ServerId>> entry : regionReplicas.entrySet()) {
+            List<ServerId> replicas = entry.getValue();
+            if (replicas != null && replicas.contains(serverId)) {
+                regionIds.add(entry.getKey());
+            }
+        }
+        return regionIds;
     }
 
     /**
@@ -467,6 +466,10 @@ public class ClusterManager {
 
         public void updateRegionLoad(String regionId, RegionLoad load) {
             regionLoads.put(regionId, load);
+        }
+
+        public void removeRegionLoad(String regionId) {
+            regionLoads.remove(regionId);
         }
 
         public ServerMetrics getMetrics() {

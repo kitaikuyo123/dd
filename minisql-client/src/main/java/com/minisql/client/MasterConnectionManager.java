@@ -3,6 +3,7 @@ package com.minisql.client;
 import com.minisql.common.Constants;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.zookeeper.ZkClient;
+import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
@@ -194,10 +195,10 @@ public class MasterConnectionManager {
      */
     private String getMasterAddressFromZk() {
         try {
-            String masterPath = Constants.ZK_MASTER_PATH;
+            String masterPath = Constants.ZK_MASTER_LEADER_PATH;
             if (zkClient.exists(masterPath)) {
                 byte[] data = zkClient.getData(masterPath);
-                return new String(data);
+                return ZkPayloads.decodeLeaderAddress(data);
             }
         } catch (Exception e) {
             System.err.println("Failed to get Master address from ZooKeeper: " + e.getMessage());

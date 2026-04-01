@@ -8,6 +8,8 @@ import com.minisql.master.rpc.RegionServerCommandClient;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
+import com.minisql.zookeeper.DistributedLock;
+import com.minisql.zookeeper.ZkClient;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,6 +28,7 @@ public class RegionMigrationCoordinator {
     private final Map<String, MigrationStatus> migrationStatuses = new ConcurrentHashMap<>();
 
     private MonitoringService monitoringService;
+    private volatile ZkClient zkClient;
 
     public RegionMigrationCoordinator(ClusterManager clusterManager,
                                       MetadataManager metadataManager,
@@ -41,7 +44,12 @@ public class RegionMigrationCoordinator {
         this.monitoringService = monitoringService;
     }
 
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
+    }
+
     public void execute(LoadBalancer.BalanceAction action) {
+        DistributedLock lock = null;
         System.out.println("Executing balance action: move " + action.getRegionId() +
             " from " + action.getSource() + " to " + action.getTarget());
 
@@ -50,6 +58,7 @@ public class RegionMigrationCoordinator {
         migrationStatuses.put(action.getRegionId(), migrationStatus);
 
         try {
+            lock = acquireRegionLock(action.getRegionId());
             String regionId = action.getRegionId();
             ServerId sourceServer = action.getSource();
             ServerId targetServer = action.getTarget();
@@ -134,6 +143,9 @@ public class RegionMigrationCoordinator {
             updateMigrationState(migrationStatus, MigrationState.COMMITTING_METADATA, "Committing metadata switch");
             clusterManager.unassignRegion(regionId);
             clusterManager.assignRegionToServer(regionId, targetServer);
+            region.setPrimary(targetServer);
+            region.addReplica(targetServer);
+            metadataManager.registerRegionForTable(region, targetServer);
             transition(regionId, targetServer,
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
                 "Balanced region now primary on target");
@@ -145,6 +157,31 @@ public class RegionMigrationCoordinator {
             System.out.println("Migration completed for region: " + regionId);
         } catch (Exception e) {
             failMigration(migrationStatus, "Failed to execute balance action: " + e.getMessage());
+        } finally {
+            releaseLock(lock);
+        }
+    }
+
+    private DistributedLock acquireRegionLock(String regionId) throws Exception {
+        if (zkClient == null) {
+            return null;
+        }
+        DistributedLock lock = new DistributedLock(zkClient.getClient(),
+            "/minisql/locks/regions/" + regionId);
+        lock.acquire();
+        return lock;
+    }
+
+    private void releaseLock(DistributedLock lock) {
+        if (lock == null) {
+            return;
+        }
+        try {
+            if (lock.isAcquiredInThisProcess()) {
+                lock.release();
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to release migration lock: " + e.getMessage());
         }
     }
 

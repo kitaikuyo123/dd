@@ -1,10 +1,12 @@
 package com.minisql.replication;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.zookeeper.ZkClient;
+import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -23,35 +25,7 @@ public class PrimaryChangeNotifier {
     }
 
     public void notifyPrimaryChange(String regionId, ServerId oldPrimary, ServerId newPrimary) {
-        publishToZooKeeper(regionId, newPrimary);
         notifyMaster(regionId, oldPrimary, newPrimary);
-    }
-
-    private void publishToZooKeeper(String regionId, ServerId newPrimary) {
-        if (zkClient == null || newPrimary == null) {
-            return;
-        }
-
-        try {
-            String rootPath = "/minisql/regions";
-            if (!zkClient.exists(rootPath)) {
-                zkClient.createPersistent(rootPath, new byte[0]);
-            }
-            String regionPath = rootPath + "/" + regionId;
-            if (!zkClient.exists(regionPath)) {
-                zkClient.createPersistent(regionPath, new byte[0]);
-            }
-
-            String primaryPath = regionPath + "/primary";
-            byte[] data = (newPrimary.getHost() + ":" + newPrimary.getPort()).getBytes(StandardCharsets.UTF_8);
-            if (!zkClient.exists(primaryPath)) {
-                zkClient.createPersistent(primaryPath, data);
-            } else {
-                zkClient.setData(primaryPath, data);
-            }
-        } catch (Exception e) {
-            System.err.println("Failed to update ZooKeeper primary path: " + e.getMessage());
-        }
     }
 
     private void notifyMaster(String regionId, ServerId oldPrimary, ServerId newPrimary) {
@@ -95,9 +69,9 @@ public class PrimaryChangeNotifier {
             return null;
         }
         try {
-            String masterPath = "/minisql/master";
+            String masterPath = Constants.ZK_MASTER_LEADER_PATH;
             if (zkClient.exists(masterPath)) {
-                return new String(zkClient.getData(masterPath), StandardCharsets.UTF_8);
+                return ZkPayloads.decodeLeaderAddress(zkClient.getData(masterPath));
             }
         } catch (Exception e) {
             System.err.println("Failed to read master address from ZooKeeper: " + e.getMessage());

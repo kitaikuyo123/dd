@@ -35,6 +35,7 @@ public class MetadataManager {
     // - /minisql/tables/{tableName}/schema - 表结构
     // - /minisql/tables/{tableName}/regions/{regionId} - Region 元数据
     // - /minisql/tables/{tableName}/regions/{regionId}/primary - 主副本地址
+    // - /minisql/tables/{tableName}/regions/{regionId}/replicas - 副本地址列表
     private static final String TABLES_BASE = "/minisql/tables";
 
     public MetadataManager() {
@@ -266,44 +267,52 @@ public class MetadataManager {
         }
 
         try {
-            // 构建路径：/minisql/tables/{tableName}/regions/{regionId}
             String tablePath = TABLES_BASE + "/" + tableName;
             String regionsPath = tablePath + "/regions";
             String regionPath = regionsPath + "/" + regionId;
             String primaryPath = regionPath + "/primary";
+            String replicasPath = regionPath + "/replicas";
 
-            // 确保父路径存在
-            if (!zkClient.exists(tablePath)) {
-                zkClient.createPersistent(tablePath, new byte[0]);
-            }
-            if (!zkClient.exists(regionsPath)) {
-                zkClient.createPersistent(regionsPath, new byte[0]);
-            }
+            ensurePersistentPath(tablePath);
+            ensurePersistentPath(regionsPath);
+            upsertPersistentNode(regionPath, serializeRegion(region));
 
-            // 写入 Region 元数据
-            byte[] regionData = serializeRegion(region);
-            if (zkClient.exists(regionPath)) {
-                zkClient.setData(regionPath, regionData);
-            } else {
-                zkClient.createPersistent(regionPath, regionData);
-            }
-
-            // 写入主副本服务器地址
             if (primaryServer != null) {
                 String serverAddress = primaryServer.getHost() + ":" + primaryServer.getPort();
-                byte[] primaryData = serverAddress.getBytes("UTF-8");
-                if (zkClient.exists(primaryPath)) {
-                    zkClient.setData(primaryPath, primaryData);
-                } else {
-                    zkClient.createPersistent(primaryPath, primaryData);
-                }
+                byte[] primaryData = serverAddress.getBytes(StandardCharsets.UTF_8);
+                upsertPersistentNode(primaryPath, primaryData);
                 System.out.println("Primary server " + serverAddress + " registered for region " + regionId);
             }
+
+            byte[] replicasData = encodeReplicas(region.getReplicas()).getBytes(StandardCharsets.UTF_8);
+            upsertPersistentNode(replicasPath, replicasData);
 
             System.out.println("Region " + regionId + " registered for table " + tableName);
         } catch (Exception e) {
             System.err.println("Failed to persist region for table to ZK: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+
+    private void ensurePersistentPath(String path) throws Exception {
+        if (!zkClient.exists(path)) {
+            try {
+                zkClient.createPersistent(path, new byte[0]);
+            } catch (org.apache.zookeeper.KeeperException.NodeExistsException ignored) {
+                // Another writer created the node first.
+            }
+        }
+    }
+
+    private void upsertPersistentNode(String path, byte[] data) throws Exception {
+        try {
+            if (zkClient.exists(path)) {
+                zkClient.setData(path, data);
+            } else {
+                zkClient.createPersistent(path, data);
+            }
+        } catch (org.apache.zookeeper.KeeperException.NodeExistsException ignored) {
+            zkClient.setData(path, data);
         }
     }
 
@@ -550,6 +559,20 @@ public class MetadataManager {
                     if (primary != null) {
                         region.setPrimary(primary);
                         region.addReplica(primary);
+                    }
+                }
+            }
+
+            String replicasPath = regionPath + "/replicas";
+            if (zkClient.exists(replicasPath)) {
+                byte[] replicasData = zkClient.getData(replicasPath);
+                if (replicasData != null && replicasData.length > 0) {
+                    region.setReplicas(new ArrayList<>());
+                    for (ServerId replica : decodeReplicas(new String(replicasData, StandardCharsets.UTF_8))) {
+                        region.addReplica(replica);
+                    }
+                    if (region.getPrimary() != null && !region.getReplicas().contains(region.getPrimary())) {
+                        region.addReplica(region.getPrimary());
                     }
                 }
             }

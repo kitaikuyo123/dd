@@ -25,8 +25,8 @@ try {
     $tableRegionsOutput = Invoke-ZkCli -Commands @("ls /minisql/tables")
     Assert-NotContains -Text $tableRegionsOutput -Unexpected "products" -Message "Dropped table should be removed from /minisql/tables."
 
-    $regionsOutput = Invoke-ZkCli -Commands @("ls /minisql/regions")
-    Assert-NotContains -Text $regionsOutput -Unexpected $regionId -Message "Dropped region should be removed from /minisql/regions."
+    $tableRegionOutput = Invoke-ZkCli -Commands @("ls /minisql/tables/products/regions")
+    Assert-NotContains -Text $tableRegionOutput -Unexpected $regionId -Message "Dropped region should be removed from /minisql/tables/products/regions."
 
     Write-Host "Drop cleanup E2E passed."
 } finally {

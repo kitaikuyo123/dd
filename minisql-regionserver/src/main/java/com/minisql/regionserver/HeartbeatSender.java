@@ -2,7 +2,11 @@ package com.minisql.regionserver;
 
 import com.minisql.common.Constants;
 import com.minisql.common.model.ServerId;
-import com.minisql.common.proto.*;
+import com.minisql.common.proto.CommonProto;
+import com.minisql.common.proto.MasterProto;
+import com.minisql.common.proto.MasterServiceGrpc;
+import com.minisql.zookeeper.ZkManager;
+import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
@@ -12,11 +16,12 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 心跳发送器
- * 负责定期向 Master 发送心跳
+ * Sends registration and heartbeats to the current leader master.
  */
 public class HeartbeatSender {
 
@@ -25,17 +30,19 @@ public class HeartbeatSender {
     private final ServerId serverId;
     private final RegionManager regionManager;
     private final ScheduledExecutorService scheduler;
+    private final long heartbeatIntervalMs;
 
     private volatile String masterAddress;
     private volatile ManagedChannel masterChannel;
     private volatile MasterServiceGrpc.MasterServiceBlockingStub masterStub;
+    private volatile boolean registeredWithCurrentMaster;
 
-    private final long heartbeatIntervalMs;
+    private volatile boolean running;
+    private volatile String zkConnectString;
+    private volatile ZkManager zkManager;
+
     private com.minisql.storage.MySQLConfig mysqlConfig;
-    private long diskCapacityMb = 1024L; // Default 1GB
-
-    // 是否正在运行
-    private volatile boolean running = false;
+    private long diskCapacityMb = 1024L;
 
     public HeartbeatSender(ServerId serverId, RegionManager regionManager) {
         this(serverId, regionManager, Constants.DEFAULT_HEARTBEAT_INTERVAL_MS);
@@ -45,7 +52,6 @@ public class HeartbeatSender {
         this.serverId = serverId;
         this.regionManager = regionManager;
         this.heartbeatIntervalMs = heartbeatIntervalMs;
-
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "HeartbeatSender");
             t.setDaemon(true);
@@ -53,9 +59,6 @@ public class HeartbeatSender {
         });
     }
 
-    /**
-     * 设置 MySQL 配置
-     */
     public void setMySQLConfig(com.minisql.storage.MySQLConfig mysqlConfig) {
         this.mysqlConfig = mysqlConfig;
     }
@@ -64,75 +67,33 @@ public class HeartbeatSender {
         this.diskCapacityMb = diskCapacityMb;
     }
 
-    /**
-     * 设置 Master 地址
-     */
+    public void setZkConnectString(String zkConnectString) {
+        this.zkConnectString = zkConnectString;
+    }
+
     public synchronized void setMasterAddress(String address) {
-        if (address == null || address.equals(this.masterAddress)) {
+        if (address == null || address.isBlank()) {
+            return;
+        }
+        if (address.equals(this.masterAddress) && masterStub != null) {
             return;
         }
 
-        // 关闭旧连接
         closeMasterConnection();
-
         this.masterAddress = address;
-
-        // 建立新连接
         connectToMaster(address);
+        registeredWithCurrentMaster = false;
     }
 
-    /**
-     * 连接到 Master
-     */
-    private void connectToMaster(String address) {
-        try {
-            String[] parts = address.split(":");
-            String host = parts[0];
-            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
-
-            masterChannel = ManagedChannelBuilder.forAddress(host, port)
-                .usePlaintext()
-                .build();
-
-            // 不设置全局 Deadline，改为在每次请求时设置
-            masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
-
-            logger.info("HeartbeatSender connected to Master: {}", address);
-        } catch (Exception e) {
-            logger.error("Failed to connect to Master: {}", e.getMessage());
-            closeMasterConnection();
-        }
-    }
-
-    /**
-     * 关闭 Master 连接
-     */
-    private void closeMasterConnection() {
-        if (masterChannel != null) {
-            try {
-                masterChannel.shutdown();
-                masterChannel.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                logger.error("Error closing Master connection: {}", e.getMessage());
-            }
-            masterChannel = null;
-            masterStub = null;
-        }
-    }
-
-    /**
-     * 启动心跳发送
-     */
     public void start() {
         if (running) {
             return;
         }
         running = true;
 
-        // 先注册到 Master
+        startZkCoordinationIfConfigured();
         registerWithMaster();
 
-        // 启动定时心跳
         scheduler.scheduleAtFixedRate(
             this::sendHeartbeat,
             heartbeatIntervalMs,
@@ -140,16 +101,23 @@ public class HeartbeatSender {
             TimeUnit.MILLISECONDS
         );
 
-        logger.info("HeartbeatSender started, interval: {}ms", heartbeatIntervalMs);
+        logger.info("HeartbeatSender started, interval={}ms", heartbeatIntervalMs);
     }
 
-    /**
-     * 停止心跳发送
-     */
     public void stop() {
         running = false;
         scheduler.shutdown();
         closeMasterConnection();
+
+        if (zkManager != null) {
+            try {
+                zkManager.close();
+            } catch (Exception e) {
+                logger.warn("Failed to close ZooKeeper coordination", e);
+            } finally {
+                zkManager = null;
+            }
+        }
 
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -163,19 +131,85 @@ public class HeartbeatSender {
         logger.info("HeartbeatSender stopped");
     }
 
-    /**
-     * 向 Master 注册
-     */
+    private void startZkCoordinationIfConfigured() {
+        if (zkConnectString == null || zkConnectString.isBlank()) {
+            return;
+        }
+        try {
+            zkManager = new ZkManager(zkConnectString, serverId);
+            zkManager.start();
+            zkManager.addListener(new ZkManager.ServerListener() {
+                @Override
+                public void onLeadershipChange(boolean isLeader) {
+                }
+
+                @Override
+                public void onLeaderAddressChanged(String leaderAddress) {
+                    if (leaderAddress != null && !leaderAddress.isBlank()) {
+                        setMasterAddress(leaderAddress);
+                    }
+                }
+
+                @Override
+                public void onServerAdded(String path) {
+                }
+
+                @Override
+                public void onServerRemoved(String path) {
+                }
+            });
+            zkManager.watchLeader();
+            zkManager.registerRegionServer(ZkPayloads.encodeRegionServerNode(
+                serverId,
+                serverId.getServerName(),
+                mysqlConfig == null ? "" : mysqlConfig.getJdbcUrl(),
+                mysqlConfig == null ? "" : mysqlConfig.getUsername(),
+                serverId.getStartTime(),
+                0L
+            ));
+            logger.info("RegionServer registered in ZooKeeper: {}", serverId.getInstanceName());
+        } catch (Exception e) {
+            logger.error("Failed to initialize ZooKeeper-based master discovery", e);
+        }
+    }
+
+    private void connectToMaster(String address) {
+        try {
+            String[] parts = address.split(":");
+            String host = parts[0];
+            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
+
+            masterChannel = ManagedChannelBuilder.forAddress(host, port)
+                .usePlaintext()
+                .build();
+            masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
+            logger.info("HeartbeatSender connected to Master: {}", address);
+        } catch (Exception e) {
+            logger.error("Failed to connect to Master: {}", address, e);
+            closeMasterConnection();
+        }
+    }
+
+    private void closeMasterConnection() {
+        if (masterChannel != null) {
+            try {
+                masterChannel.shutdown();
+                masterChannel.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                logger.debug("Error closing Master connection", e);
+            }
+        }
+        masterChannel = null;
+        masterStub = null;
+        registeredWithCurrentMaster = false;
+    }
+
     private void registerWithMaster() {
-        if (masterStub == null) {
-            logger.error("Cannot register: Master not connected (masterStub is null)");
-            logger.error("Master address: {}", masterAddress);
+        if (masterStub == null || registeredWithCurrentMaster) {
             return;
         }
 
         try {
-            logger.info("Sending register request to Master...");
-
             MasterProto.RegisterRequest.Builder requestBuilder = MasterProto.RegisterRequest.newBuilder()
                 .setServerId(CommonProto.ServerId.newBuilder()
                     .setHost(serverId.getHost())
@@ -183,76 +217,59 @@ public class HeartbeatSender {
                     .build())
                 .setTimestamp(System.currentTimeMillis());
 
-            // 添加 MySQL 配置
             if (mysqlConfig != null) {
-                CommonProto.MySQLConfig mysqlConfigProto = CommonProto.MySQLConfig.newBuilder()
+                requestBuilder.setMysqlConfig(CommonProto.MySQLConfig.newBuilder()
                     .setUrl(mysqlConfig.getJdbcUrl())
                     .setUser(mysqlConfig.getUsername())
                     .setPassword(mysqlConfig.getPassword())
                     .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                    .build();
-                requestBuilder.setMysqlConfig(mysqlConfigProto);
-                logger.info("MySQL config included in register request: {}", mysqlConfig.getJdbcUrl());
+                    .build());
             }
 
-            MasterProto.RegisterRequest request = requestBuilder.build();
-            MasterProto.RegisterResponse response = masterStub.registerRegionServer(request);
-
+            MasterProto.RegisterResponse response = masterStub.registerRegionServer(requestBuilder.build());
             if (response.getStatus().getSuccess()) {
-                logger.info("Registered with Master successfully, clusterId: {}", response.getClusterId());
+                registeredWithCurrentMaster = true;
+                logger.info("Registered with Master successfully, clusterId={}", response.getClusterId());
             } else {
-                logger.error("Failed to register with Master: {}", response.getStatus().getMessage());
+                logger.warn("Master registration rejected: {}", response.getStatus().getMessage());
             }
         } catch (Exception e) {
-            logger.error("Error registering with Master: {}", e.getMessage());
-            logger.debug("Register exception details:", e);
+            logger.error("Error registering with Master", e);
+            registeredWithCurrentMaster = false;
         }
     }
 
-    /**
-     * 发送心跳
-     */
     private void sendHeartbeat() {
         if (masterStub == null) {
-            // 尝试重新连接
             if (masterAddress != null) {
                 connectToMaster(masterAddress);
+                registerWithMaster();
             }
             return;
         }
 
+        registerWithMaster();
+
         try {
-            // 构建心跳请求
             MasterProto.HeartbeatRequest.Builder requestBuilder = MasterProto.HeartbeatRequest.newBuilder()
                 .setServerId(CommonProto.ServerId.newBuilder()
                     .setHost(serverId.getHost())
                     .setPort(serverId.getPort())
                     .build())
-                .setTimestamp(System.currentTimeMillis());
+                .setTimestamp(System.currentTimeMillis())
+                .addAllRegionLoads(collectRegionLoads())
+                .setMetrics(collectServerMetrics());
 
-            // 添加 Region 负载信息
-            List<MasterProto.RegionLoad> regionLoads = collectRegionLoads();
-            requestBuilder.addAllRegionLoads(regionLoads);
-
-            // 添加服务器指标
-            MasterProto.ServerMetrics metrics = collectServerMetrics();
-            requestBuilder.setMetrics(metrics);
-
-            // 发送心跳，设置 10 秒超时
             MasterProto.HeartbeatResponse response = masterStub
                 .withDeadlineAfter(10, TimeUnit.SECONDS)
                 .heartbeat(requestBuilder.build());
 
-            if (response.getStatus().getSuccess()) {
-                // 心跳仅用于确认存活，不再处理命令
-                // 所有管理操作通过独立 gRPC 调用完成（openRegion, closeRegion, splitRegion, mergeRegion 等）
-            } else {
-                logger.error("Heartbeat failed: {}", response.getStatus().getMessage());
+            if (!response.getStatus().getSuccess()) {
+                logger.warn("Heartbeat rejected: {}", response.getStatus().getMessage());
+                registeredWithCurrentMaster = false;
             }
-
         } catch (Exception e) {
-            logger.error("Error sending heartbeat: {}", e.getMessage());
-            // 连接可能已断开，尝试重新连接
+            logger.error("Error sending heartbeat", e);
             closeMasterConnection();
             if (masterAddress != null) {
                 connectToMaster(masterAddress);
@@ -260,76 +277,55 @@ public class HeartbeatSender {
         }
     }
 
-    /**
-     * 收集 Region 负载信息
-     */
     private List<MasterProto.RegionLoad> collectRegionLoads() {
         List<MasterProto.RegionLoad> loads = new ArrayList<>();
-
         try {
             for (com.minisql.common.model.Region region : regionManager.getAllRegions()) {
                 MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(region.getRegionId());
-                if (storage != null) {
-                    // 使用实际大小（不再返回 0）
-                    long reportSize = storage.getStoreFileSize();
-
-                    MasterProto.RegionLoad load = MasterProto.RegionLoad.newBuilder()
-                        .setRegionId(region.getRegionId())
-                        .setReadRequests(storage.getReadRequestCount())
-                        .setWriteRequests(storage.getWriteRequestCount())
-                        .setStoreFileSize(reportSize)  // 不再返回 0
-                        .setMemStoreSize(0)
-                        .build();
-                    loads.add(load);
+                if (storage == null) {
+                    continue;
                 }
+                loads.add(MasterProto.RegionLoad.newBuilder()
+                    .setRegionId(region.getRegionId())
+                    .setReadRequests(storage.getReadRequestCount())
+                    .setWriteRequests(storage.getWriteRequestCount())
+                    .setStoreFileSize(storage.getStoreFileSize())
+                    .setMemStoreSize(0)
+                    .build());
             }
         } catch (Exception e) {
-            logger.error("Error collecting region loads: {}", e.getMessage());
+            logger.error("Error collecting region loads", e);
         }
-
         return loads;
     }
 
-    /**
-     * 收集服务器指标
-     */
     private MasterProto.ServerMetrics collectServerMetrics() {
         try {
             MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
-
-            // CPU 强制硬编码为 0.0（测试环境获取不到有意义的值）
             double cpuUsage = 0.0;
 
             long totalMemory = memoryBean.getHeapMemoryUsage().getMax();
             long usedMemory = memoryBean.getHeapMemoryUsage().getUsed();
-            double memoryUsage = totalMemory > 0 ? (double) usedMemory / totalMemory : 0;
+            double memoryUsage = totalMemory > 0 ? (double) usedMemory / totalMemory : 0.0;
 
-            // 获取磁盘空间（总空间使用配置文件设定的配置上限）
             long totalSpace = diskCapacityMb * 1024L * 1024L;
-            long usedSpace = 0;
-            
-            // 使用所有 Region 的物理大小总计作为 usedSpace
+            long usedSpace = 0L;
             for (com.minisql.common.model.Region region : regionManager.getAllRegions()) {
                 MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(region.getRegionId());
                 if (storage != null) {
                     usedSpace += storage.getStoreFileSize();
                 }
             }
-            
-            long availableSpace = totalSpace - usedSpace;
-            if (availableSpace < 0) {
-                availableSpace = 0;
-            }
 
+            long availableSpace = Math.max(0L, totalSpace - usedSpace);
             return MasterProto.ServerMetrics.newBuilder()
                 .setCpuUsage(cpuUsage)
                 .setMemoryUsage(memoryUsage)
                 .setAvailableSpace(availableSpace)
                 .setTotalSpace(totalSpace)
                 .build();
-
         } catch (Exception e) {
-            logger.error("Error collecting server metrics: {}", e.getMessage());
+            logger.error("Error collecting server metrics", e);
             return MasterProto.ServerMetrics.getDefaultInstance();
         }
     }

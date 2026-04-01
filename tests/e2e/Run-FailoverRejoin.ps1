@@ -20,7 +20,7 @@ try {
     Assert-Contains -Text $setupOutput -Expected "(2 rows)" -Message "Setup should create two product rows."
 
     $regionId = Get-OnlyRegionId -TableName "products"
-    $primaryAddress = Get-PrimaryAddress -RegionId $regionId
+    $primaryAddress = Get-PrimaryAddress -TableName "products" -RegionId $regionId
     $primaryPort = [int]($primaryAddress.Split(":")[1])
 
     Stop-PortProcess -Port $primaryPort

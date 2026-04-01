@@ -8,6 +8,8 @@ import com.minisql.master.rpc.GrpcRegionServerCommandClient;
 import com.minisql.master.rpc.RegionServerCommandClient;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
+import com.minisql.zookeeper.DistributedLock;
+import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +45,7 @@ public class RegionSplitCoordinator {
     private final LoadBalancer loadBalancer;
     private final RegionServerCommandClient commandClient;
     private MonitoringService monitoringService;
+    private volatile ZkClient zkClient;
 
     private volatile boolean running = false;
 
@@ -71,6 +74,10 @@ public class RegionSplitCoordinator {
 
     public void setMonitoringService(MonitoringService monitoringService) {
         this.monitoringService = monitoringService;
+    }
+
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
     }
 
     /**
@@ -143,6 +150,7 @@ public class RegionSplitCoordinator {
      */
     private void executeSplit(SplitTask task) {
         String regionId = task.getRegionId();
+        DistributedLock lock = null;
 
         // 标记为正在分裂
         if (!splittingRegions.add(regionId)) {
@@ -151,6 +159,7 @@ public class RegionSplitCoordinator {
         }
 
         try {
+            lock = acquireRegionLock(regionId);
             System.out.println("Starting split for region: " + regionId);
 
             // 1. 获取分裂点（从 RegionServer 获取）
@@ -172,7 +181,7 @@ public class RegionSplitCoordinator {
             }
 
             // 3. 更新元数据
-            updateMetadataAfterSplit(regionId, result);
+            updateMetadataAfterSplit(regionId, task.getServerId(), result);
 
             // 4. 为新 Region 分配服务器
             ServerId leftServer = task.getServerId();  // 左半部分留在原服务器
@@ -194,6 +203,7 @@ public class RegionSplitCoordinator {
             System.err.println("Error splitting region " + regionId + ": " + e.getMessage());
             e.printStackTrace();
         } finally {
+            releaseLock(lock);
             splittingRegions.remove(regionId);
         }
     }
@@ -234,58 +244,17 @@ public class RegionSplitCoordinator {
     /**
      * 分裂后更新元数据
      */
-    private void updateMetadataAfterSplit(String oldRegionId, SplitResult result) {
+    private void updateMetadataAfterSplit(String oldRegionId, ServerId primaryServer, SplitResult result) {
         // 1. 移除旧的 Region
         metadataManager.removeRegion(oldRegionId);
         clusterManager.unassignRegion(oldRegionId);
 
         // 2. 注册新的 Region
-        metadataManager.registerRegion(result.getLeftRegion());
-        metadataManager.registerRegion(result.getRightRegion());
+        metadataManager.registerRegionForTable(result.getLeftRegion(), primaryServer);
+        metadataManager.registerRegionForTable(result.getRightRegion(), primaryServer);
 
-        // 3. 更新 ZooKeeper 中的 Region 信息
-        updateZkPaths(result.getLeftRegion().getRegionId());
-        updateZkPaths(result.getRightRegion().getRegionId());
-
-        logger.info("ZooKeeper paths updated for split regions: {} and {}",
+        logger.info("ZooKeeper metadata updated for split regions: {} and {}",
             result.getLeftRegion().getRegionId(), result.getRightRegion().getRegionId());
-    }
-
-    /**
-     * 更新 ZooKeeper 中的 Region 路径
-     */
-    private void updateZkPaths(String regionId) {
-        try {
-            String regionPath = com.minisql.common.Constants.ZK_REGIONS_PATH + "/" + regionId;
-            Region region = metadataManager.getRegion(regionId);
-            if (region != null && metadataManager.getZkClient() != null) {
-                // 更新 Region 元数据到 ZooKeeper
-                byte[] data = serializeRegion(region);
-                if (metadataManager.getZkClient().exists(regionPath)) {
-                    metadataManager.getZkClient().setData(regionPath, data);
-                } else {
-                    metadataManager.getZkClient().createPersistent(regionPath, data);
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to update ZooKeeper path for region: {}", regionId, e);
-        }
-    }
-
-    /**
-     * 序列化 Region 对象为字节数组
-     */
-    private byte[] serializeRegion(Region region) throws Exception {
-        CommonProto.RegionInfo.Builder builder = CommonProto.RegionInfo.newBuilder()
-            .setRegionId(region.getRegionId())
-            .setTableName(region.getTableName());
-        if (region.getStartKey() != null) {
-            builder.setStartKey(com.google.protobuf.ByteString.copyFrom(region.getStartKey()));
-        }
-        if (region.getEndKey() != null) {
-            builder.setEndKey(com.google.protobuf.ByteString.copyFrom(region.getEndKey()));
-        }
-        return builder.build().toByteArray();
     }
 
     /**
@@ -316,8 +285,34 @@ public class RegionSplitCoordinator {
         notifyServerOpenRegion(targetServer, region);
         clusterManager.unassignRegion(regionId);
         clusterManager.assignRegionToServer(regionId, targetServer);
+        region.setPrimary(targetServer);
+        region.addReplica(targetServer);
+        metadataManager.registerRegionForTable(region, targetServer);
 
         logger.info("Migration completed for region: {}", regionId);
+    }
+
+    private DistributedLock acquireRegionLock(String regionId) throws Exception {
+        if (zkClient == null) {
+            return null;
+        }
+        DistributedLock lock = new DistributedLock(zkClient.getClient(),
+            "/minisql/locks/regions/" + regionId);
+        lock.acquire();
+        return lock;
+    }
+
+    private void releaseLock(DistributedLock lock) {
+        if (lock == null) {
+            return;
+        }
+        try {
+            if (lock.isAcquiredInThisProcess()) {
+                lock.release();
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to release split lock for region", e);
+        }
     }
 
     /**

@@ -119,6 +119,42 @@ public class MonitoringService {
 
     public List<Map<String, Object>> regions() {
         List<Map<String, Object>> result = new ArrayList<>();
+        for (ClusterManager.ServerInfo info : clusterManager.getActiveServers()) {
+            String serverName = toServerName(info.getServerId());
+            for (Map.Entry<String, ClusterManager.RegionLoad> entry : info.getRegionLoads().entrySet()) {
+                String regionId = entry.getKey();
+                Region region = metadataManager.getRegion(regionId);
+                if (region == null) {
+                    continue;
+                }
+                ClusterManager.RegionLoad load = entry.getValue();
+                ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+                boolean isPrimary = primary != null && primary.equals(info.getServerId());
+
+                Map<String, Object> row = new HashMap<>();
+                row.put("id", regionId + "@" + serverName);
+                row.put("regionId", regionId);
+                row.put("tableName", region.getTableName());
+                row.put("serverId", serverName);
+                row.put("primaryServer", primary != null ? toServerName(primary) : null);
+                row.put("role", isPrimary ? "Primary" : "Replica");
+                row.put("state", String.valueOf(clusterManager.getRegionState(regionId)));
+                row.put("readRequests", load != null ? load.getReadRequests() : 0L);
+                row.put("writeRequests", load != null ? load.getWriteRequests() : 0L);
+                row.put("storeFileSize", load != null ? load.getStoreFileSize() : 0L);
+                row.put("replicationLag", replicaLagForServer(regionId, info.getServerId()));
+                result.add(row);
+            }
+        }
+        result.sort(Comparator
+            .comparing((Map<String, Object> row) -> String.valueOf(row.get("regionId")))
+            .thenComparing(row -> String.valueOf(row.get("role")))
+            .thenComparing(row -> String.valueOf(row.get("serverId"))));
+        return result;
+    }
+
+    private List<Map<String, Object>> logicalRegions() {
+        List<Map<String, Object>> result = new ArrayList<>();
         for (Region region : metadataManager.getAllRegions()) {
             if (region == null) {
                 continue;
@@ -154,7 +190,7 @@ public class MonitoringService {
 
     public List<Map<String, Object>> tables() {
         Map<String, Long> tableErrors = sqlMetricsRegistry.tableErrorTotals(DAY_MS);
-        Map<String, List<Map<String, Object>>> grouped = regions().stream()
+        Map<String, List<Map<String, Object>>> grouped = logicalRegions().stream()
             .collect(Collectors.groupingBy(region -> String.valueOf(region.get("tableName"))));
         List<Map<String, Object>> result = new ArrayList<>();
         for (Table table : metadataManager.getAllTables()) {
@@ -213,11 +249,15 @@ public class MonitoringService {
             double serverLoadScore = loadCalculator.calculateLoadScore(info);
             for (Map.Entry<String, ClusterManager.RegionLoad> entry : info.getRegionLoads().entrySet()) {
                 String regionId = entry.getKey();
+                Region region = metadataManager.getRegion(regionId);
+                if (region == null) {
+                    continue;
+                }
                 ClusterManager.RegionLoad load = entry.getValue();
                 
                 Map<String, Object> row = new HashMap<>();
                 row.put("regionId", regionId);
-                row.put("tableName", tableName(regionId));
+                row.put("tableName", region.getTableName());
                 row.put("serverId", serverName);
                 
                 ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
@@ -314,6 +354,15 @@ public class MonitoringService {
             maxLag = Math.max(maxLag, replica.getReplicationLag());
         }
         return maxLag;
+    }
+
+    private long replicaLagForServer(String regionId, ServerId serverId) {
+        for (ReplicaInfo replica : replicaMonitor.getReplicas(regionId)) {
+            if (replica.getServerId() != null && replica.getServerId().equals(serverId)) {
+                return replica.getReplicationLag();
+            }
+        }
+        return 0L;
     }
 
     private List<Map<String, Object>> lifecycleStatuses(String regionId) {

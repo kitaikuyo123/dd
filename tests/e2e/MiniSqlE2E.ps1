@@ -45,8 +45,8 @@ function Stop-PortProcess {
 
     $connections = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($pid in $connections) {
-        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    foreach ($processId in $connections) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -201,10 +201,12 @@ function Get-OnlyRegionId {
 function Get-PrimaryAddress {
     param(
         [Parameter(Mandatory = $true)]
+        [string]$TableName,
+        [Parameter(Mandatory = $true)]
         [string]$RegionId
     )
 
-    $output = Invoke-ZkCli -Commands @("get /minisql/regions/$RegionId/primary")
+    $output = Invoke-ZkCli -Commands @("get /minisql/tables/$TableName/regions/$RegionId/primary")
     $match = [regex]::Match($output, "(?<addr>localhost:\d+)")
     if (-not $match.Success) {
         throw "Could not read primary address for region '$RegionId'. Output:`n$output"

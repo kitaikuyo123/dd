@@ -1,5 +1,6 @@
 package com.minisql.client;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
@@ -8,6 +9,7 @@ import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
 import com.minisql.zookeeper.ZkClient;
+import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -44,6 +46,8 @@ public class Router {
     private final Map<String, LagSnapshot> lagCache = new ConcurrentHashMap<>();
     private final Map<String, Long> circuitBreakerUntil = new ConcurrentHashMap<>();
     private final Map<String, Long> recentWrites = new ConcurrentHashMap<>();
+    private final Set<String> watchedTables = ConcurrentHashMap.newKeySet();
+    private final Set<String> watchedRegionPaths = ConcurrentHashMap.newKeySet();
 
     public Router() {
     }
@@ -54,6 +58,8 @@ public class Router {
 
     public void setZkClient(ZkClient zkClient) {
         this.zkClient = zkClient;
+        this.watchedTables.clear();
+        this.watchedRegionPaths.clear();
     }
 
     public void setDefaultReadConsistency(ReadConsistency defaultReadConsistency) {
@@ -284,10 +290,6 @@ public class Router {
             return;
         }
 
-        if (refreshRouteCacheFromMaster(tableName)) {
-            return;
-        }
-
         try {
             // 从 ZooKeeper 获取该表的所有 Region 信息
             String tablePath = "/minisql/tables/" + tableName;
@@ -304,6 +306,7 @@ public class Router {
                 System.err.println("No regions found for table: " + tableName);
                 return;
             }
+            ensureTableWatcher(tableName, regionsPath);
 
             List<String> regionIds = zkClient.getChildren(regionsPath);
 
@@ -320,15 +323,24 @@ public class Router {
                     if (region != null) {
                         // 获取 Region 的主副本服务器
                         String primaryPath = regionPath + "/primary";
+                        String replicasPath = regionPath + "/replicas";
                         ServerAddress primaryServer = null;
+                        List<ServerAddress> replicas = Collections.emptyList();
+
+                        ensureRegionWatch(tableName, regionPath, primaryPath, replicasPath);
 
                         if (zkClient.exists(primaryPath)) {
                             byte[] primaryData = zkClient.getData(primaryPath);
-                            primaryServer = parseServerAddress(new String(primaryData, "UTF-8"));
+                            primaryServer = parseServerAddress(new String(primaryData, java.nio.charset.StandardCharsets.UTF_8));
+                        }
+
+                        if (zkClient.exists(replicasPath)) {
+                            byte[] replicasData = zkClient.getData(replicasPath);
+                            replicas = parseReplicaAddresses(new String(replicasData, java.nio.charset.StandardCharsets.UTF_8));
                         }
 
                         if (primaryServer != null) {
-                            regions.add(new RegionRouteInfo(region, primaryServer, Collections.emptyList()));
+                            regions.add(new RegionRouteInfo(region, primaryServer, replicas));
                         }
                     }
                 } catch (Exception e) {
@@ -339,6 +351,11 @@ public class Router {
             // 更新缓存
             if (!regions.isEmpty()) {
                 routeCache.put(tableName, regions);
+                return;
+            }
+
+            if (refreshRouteCacheFromMaster(tableName)) {
+                return;
             }
 
         } catch (Exception e) {
@@ -569,10 +586,10 @@ public class Router {
         if (zkClient != null) {
             try {
                 // 从 ZooKeeper 获取当前 Master
-                String masterPath = "/minisql/master";
+                String masterPath = Constants.ZK_MASTER_LEADER_PATH;
                 if (zkClient.exists(masterPath)) {
                     byte[] masterData = zkClient.getData(masterPath);
-                    String masterInfo = new String(masterData, "UTF-8");
+                    String masterInfo = ZkPayloads.decodeLeaderAddress(masterData);
                     masterAddress = parseServerAddress(masterInfo);
                     return masterAddress;
                 }
@@ -633,6 +650,77 @@ public class Router {
      */
     public void clearCache() {
         routeCache.clear();
+        watchedTables.clear();
+        watchedRegionPaths.clear();
+    }
+
+    private void ensureTableWatcher(String tableName, String regionsPath) {
+        if (watchedTables.add(tableName)) {
+            try {
+                zkClient.watchChildren(regionsPath, (path, children) -> {
+                    routeCache.remove(tableName);
+                    watchedRegionPaths.removeIf(watchedPath -> watchedPath.startsWith(path));
+                    try {
+                        ensureTableWatcher(tableName, regionsPath);
+                        refreshRouteCache(tableName);
+                    } catch (Exception e) {
+                        System.err.println("Failed to refresh table watcher cache for " + tableName + ": " + e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                watchedTables.remove(tableName);
+                System.err.println("Failed to watch regions for table " + tableName + ": " + e.getMessage());
+            }
+        }
+    }
+
+    private void ensureRegionWatch(String tableName, String regionPath, String primaryPath, String replicasPath) {
+        if (watchedRegionPaths.add(regionPath)) {
+            try {
+                zkClient.watchChildren(regionPath, (path, children) -> {
+                    routeCache.remove(tableName);
+                    watchedRegionPaths.remove(regionPath);
+                    refreshRouteCache(tableName);
+                });
+            } catch (Exception e) {
+                System.err.println("Failed to watch region path " + regionPath + ": " + e.getMessage());
+            }
+            registerNodeWatcher(primaryPath, tableName, regionPath);
+            registerNodeWatcher(replicasPath, tableName, regionPath);
+        }
+    }
+
+    private void registerNodeWatcher(String nodePath, String tableName, String regionPath) {
+        try {
+            if (!zkClient.exists(nodePath)) {
+                return;
+            }
+            zkClient.watchNode(nodePath, (path, type) -> {
+                routeCache.remove(tableName);
+                watchedRegionPaths.remove(regionPath);
+                try {
+                    refreshRouteCache(tableName);
+                } catch (Exception e) {
+                    System.err.println("Failed to refresh route cache for watcher " + nodePath + ": " + e.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            System.err.println("Failed to register watcher for " + nodePath + ": " + e.getMessage());
+        }
+    }
+
+    private List<ServerAddress> parseReplicaAddresses(String encodedReplicas) {
+        if (encodedReplicas == null || encodedReplicas.isBlank()) {
+            return Collections.emptyList();
+        }
+        List<ServerAddress> replicas = new ArrayList<>();
+        for (String address : encodedReplicas.split(",")) {
+            ServerAddress replica = parseServerAddress(address.trim());
+            if (replica != null) {
+                replicas.add(replica);
+            }
+        }
+        return replicas;
     }
 
     /**

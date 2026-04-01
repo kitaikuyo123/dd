@@ -10,6 +10,7 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.zookeeper.DistributedLock;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -243,9 +244,11 @@ public class FailoverCoordinator {
      * 执行故障转移流程
      */
     private void executeFailover(String regionId) {
+        DistributedLock lock = null;
         System.out.println("Starting failover for region: " + regionId);
 
         try {
+            lock = acquireRegionLock(regionId);
             // 1. 选择新的主副本
             ReplicaInfo newPrimary = selectNewPrimary(regionId);
             if (newPrimary == null) {
@@ -314,6 +317,8 @@ public class FailoverCoordinator {
             // 记录失败的故障转移
             FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
             state.recordFailover(baseFailoverCooldownMs, maxFailoverCooldownMs);
+        } finally {
+            releaseLock(lock);
         }
     }
 
@@ -375,33 +380,9 @@ public class FailoverCoordinator {
      * 更新 ZooKeeper 中的主副本信息
      */
     private void updateZooKeeper(String regionId, ServerId newPrimary) {
-        if (zkClient == null) {
-            System.out.println("ZooKeeper client not initialized, skipping ZK update");
-            return;
-        }
-
-        try {
-            String path = "/minisql/regions/" + regionId + "/primary";
-            String data = newPrimary.getHost() + ":" + newPrimary.getPort();
-
-            // 确保路径存在
-            String parentPath = "/minisql/regions/" + regionId;
-            if (!zkClient.exists(parentPath)) {
-                zkClient.createPersistent(parentPath, new byte[0]);
-            }
-
-            // 创建或更新节点
-            if (!zkClient.exists(path)) {
-                zkClient.createEphemeral(path, data.getBytes("UTF-8"));
-            } else {
-                zkClient.setData(path, data.getBytes("UTF-8"));
-            }
-
-            System.out.println("Updated ZooKeeper: " + path + " -> " + data);
-        } catch (Exception e) {
-            System.err.println("Failed to update ZooKeeper: " + e.getMessage());
-            e.printStackTrace();
-        }
+        // The authoritative primary path now lives under /minisql/tables/... and is
+        // updated through MetadataManager.registerRegionForTable().
+        updateMetadataPrimary(regionId, newPrimary);
     }
 
     /**
@@ -446,43 +427,72 @@ public class FailoverCoordinator {
      * 手动触发故障转移（用于维护操作）
      */
     public void manualFailover(String regionId, ServerId targetPrimary) {
+        DistributedLock lock = null;
         System.out.println("Manual failover requested for region: " + regionId +
                          " to: " + targetPrimary);
 
-        ReplicaInfo targetReplica = null;
-        List<ReplicaInfo> replicas = replicaMonitor.getReplicas(regionId);
-        for (ReplicaInfo replica : replicas) {
-            if (replica.getServerId().equals(targetPrimary)) {
-                targetReplica = replica;
-                break;
+        try {
+            lock = acquireRegionLock(regionId);
+            ReplicaInfo targetReplica = null;
+            List<ReplicaInfo> replicas = replicaMonitor.getReplicas(regionId);
+            for (ReplicaInfo replica : replicas) {
+                if (replica.getServerId().equals(targetPrimary)) {
+                    targetReplica = replica;
+                    break;
+                }
             }
-        }
 
-        if (targetReplica == null) {
-            System.err.println("Target replica not found: " + targetPrimary);
+            if (targetReplica == null) {
+                System.err.println("Target replica not found: " + targetPrimary);
+                return;
+            }
+
+            if (!isCandidateCaughtUp(regionId, targetPrimary)) {
+                System.err.println("Target replica is not caught up enough for manual failover: " + targetPrimary);
+                return;
+            }
+            if (!promoteReplica(regionId, targetPrimary)) {
+                System.err.println("Failed to promote target replica: " + targetPrimary);
+                return;
+            }
+            replicaMonitor.promoteToPrimary(regionId, targetPrimary);
+            clusterManager.updateRegionAssignment(regionId, targetPrimary);
+            updateMetadataPrimary(regionId, targetPrimary);
+            updateZooKeeper(regionId, targetPrimary);
+
+            FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
+            state.recordSuccess();
+
+            logger.info("Manual failover completed: {} is now primary for region: {}",
+                       targetPrimary, regionId);
+        } catch (Exception e) {
+            logger.error("Manual failover failed for region {}: {}", regionId, e.getMessage(), e);
+        } finally {
+            releaseLock(lock);
+        }
+    }
+
+    private DistributedLock acquireRegionLock(String regionId) throws Exception {
+        if (zkClient == null) {
+            return null;
+        }
+        DistributedLock lock = new DistributedLock(zkClient.getClient(),
+            "/minisql/locks/regions/" + regionId);
+        lock.acquire();
+        return lock;
+    }
+
+    private void releaseLock(DistributedLock lock) {
+        if (lock == null) {
             return;
         }
-
-        // 直接执行提升
-        if (!isCandidateCaughtUp(regionId, targetPrimary)) {
-            System.err.println("Target replica is not caught up enough for manual failover: " + targetPrimary);
-            return;
+        try {
+            if (lock.isAcquiredInThisProcess()) {
+                lock.release();
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to release failover lock for region", e);
         }
-        if (!promoteReplica(regionId, targetPrimary)) {
-            System.err.println("Failed to promote target replica: " + targetPrimary);
-            return;
-        }
-        replicaMonitor.promoteToPrimary(regionId, targetPrimary);
-        clusterManager.updateRegionAssignment(regionId, targetPrimary);
-        updateMetadataPrimary(regionId, targetPrimary);
-        updateZooKeeper(regionId, targetPrimary);
-
-        // 记录手动故障转移
-        FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
-        state.recordSuccess();
-
-        logger.info("Manual failover completed: {} is now primary for region: {}",
-                   targetPrimary, regionId);
     }
 
     /**

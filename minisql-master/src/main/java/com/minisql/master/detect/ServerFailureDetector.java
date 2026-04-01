@@ -104,51 +104,19 @@ public class ServerFailureDetector implements ClusterDetector {
 
     private void checkFailedServers() {
         try {
-            List<ServerId> failedServers = clusterManager.detectFailedServers(heartbeatTimeoutMs);
-            if (failedServers.isEmpty()) {
+            List<ServerId> staleServers = clusterManager.detectStaleMetricServers(heartbeatTimeoutMs);
+            if (staleServers.isEmpty()) {
                 return;
             }
 
-            System.out.println("Detected " + failedServers.size() + " failed servers: " + failedServers);
-            for (ServerId failedServer : failedServers) {
-                handleServerFailure(failedServer);
+            for (ServerId staleServer : staleServers) {
+                recordEvent("METRICS_STALE", "WARN", null, staleServer, null,
+                    "Heartbeat metrics are stale; ZooKeeper membership remains authoritative", null);
             }
         } catch (Exception e) {
             System.err.println("Error checking failed servers: " + e.getMessage());
             e.printStackTrace();
         }
-    }
-
-    private void handleServerFailure(ServerId failedServer) {
-        System.out.println("Handling server failure: " + failedServer);
-        recordEvent("HEARTBEAT_TIMEOUT", "WARN", null, failedServer, null, "Heartbeat timeout detected", null);
-
-        clusterManager.removeServer(failedServer);
-        recordEvent("SERVER_OFFLINE", "WARN", null, failedServer, null, "Server removed from active set", null);
-        List<String> regionsOnServer = getRegionsOnServer(failedServer);
-        if (regionsOnServer.isEmpty()) {
-            System.out.println("No region assignments found for failed server: " + failedServer.getServerName());
-            return;
-        }
-
-        System.out.println("Server " + failedServer + " has " + regionsOnServer.size() + " regions to recover");
-        for (String regionId : regionsOnServer) {
-            transition(regionId, failedServer,
-                ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
-                "ServerFailureDetector marked replica offline");
-        }
-        eventSink.publish(new ServerFailedEvent(failedServer, regionsOnServer));
-    }
-
-    private List<String> getRegionsOnServer(ServerId serverId) {
-        List<String> regions = new ArrayList<>();
-        for (Map.Entry<String, ClusterManager.RegionAssignment> entry :
-            clusterManager.getRegionAssignments().entrySet()) {
-            if (entry.getValue().getServerId().equals(serverId)) {
-                regions.add(entry.getKey());
-            }
-        }
-        return regions;
     }
 
     private void transition(String regionId,

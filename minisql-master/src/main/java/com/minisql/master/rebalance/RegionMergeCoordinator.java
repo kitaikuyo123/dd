@@ -6,6 +6,8 @@ import com.minisql.common.proto.*;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
+import com.minisql.zookeeper.DistributedLock;
+import com.minisql.zookeeper.ZkClient;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -50,6 +52,7 @@ public class RegionMergeCoordinator {
     // 调度器
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
+    private volatile ZkClient zkClient;
 
     public RegionMergeCoordinator(ClusterManager clusterManager,
                                   MetadataManager metadataManager) {
@@ -66,6 +69,10 @@ public class RegionMergeCoordinator {
 
     public void setMonitoringService(MonitoringService monitoringService) {
         this.monitoringService = monitoringService;
+    }
+
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
     }
 
     /**
@@ -301,6 +308,8 @@ public class RegionMergeCoordinator {
     private void executeMerge(MergeTask task) {
         String leftRegionId = task.getLeftRegionId();
         String rightRegionId = task.getRightRegionId();
+        DistributedLock leftLock = null;
+        DistributedLock rightLock = null;
 
         // 标记为正在合并
         if (!mergingRegions.add(leftRegionId) || !mergingRegions.add(rightRegionId)) {
@@ -311,6 +320,10 @@ public class RegionMergeCoordinator {
         }
 
         try {
+            String firstLockRegion = leftRegionId.compareTo(rightRegionId) <= 0 ? leftRegionId : rightRegionId;
+            String secondLockRegion = leftRegionId.compareTo(rightRegionId) <= 0 ? rightRegionId : leftRegionId;
+            leftLock = acquireRegionLock(firstLockRegion);
+            rightLock = acquireRegionLock(secondLockRegion);
             System.out.println("Starting merge for regions: " + leftRegionId + " and " + rightRegionId);
             recordEvent("REGION_MERGE_STARTED", "INFO", leftRegionId, task.getServerId(),
                 "Region merge started", rightRegionId);
@@ -336,6 +349,8 @@ public class RegionMergeCoordinator {
             System.err.println("Error merging regions " + leftRegionId + " and " + rightRegionId + ": " + e.getMessage());
             e.printStackTrace();
         } finally {
+            releaseLock(rightLock);
+            releaseLock(leftLock);
             mergingRegions.remove(leftRegionId);
             mergingRegions.remove(rightRegionId);
         }
@@ -379,6 +394,7 @@ public class RegionMergeCoordinator {
      * 合并后更新元数据
      */
     private void updateMetadataAfterMerge(String leftRegionId, String rightRegionId, MergeResult result) {
+        ServerId serverId = clusterManager.getPrimaryServerForRegion(leftRegionId);
         // 1. 移除旧的 Region
         metadataManager.removeRegion(leftRegionId);
         metadataManager.removeRegion(rightRegionId);
@@ -386,10 +402,9 @@ public class RegionMergeCoordinator {
         clusterManager.unassignRegion(rightRegionId);
 
         // 2. 注册新的 Region
-        metadataManager.registerRegion(result.getMergedRegion());
+        metadataManager.registerRegionForTable(result.getMergedRegion(), serverId);
 
         // 3. 分配服务器（复用左 Region 的服务器）
-        ServerId serverId = clusterManager.getPrimaryServerForRegion(leftRegionId);
         if (serverId != null) {
             clusterManager.assignRegionToServer(result.getMergedRegion().getRegionId(), serverId);
         }
@@ -423,6 +438,29 @@ public class RegionMergeCoordinator {
 
         MergeTask task = new MergeTask(leftRegionId, rightRegionId, left.getTableName(), serverId);
         return mergeQueue.offer(task);
+    }
+
+    private DistributedLock acquireRegionLock(String regionId) throws Exception {
+        if (zkClient == null) {
+            return null;
+        }
+        DistributedLock lock = new DistributedLock(zkClient.getClient(),
+            "/minisql/locks/regions/" + regionId);
+        lock.acquire();
+        return lock;
+    }
+
+    private void releaseLock(DistributedLock lock) {
+        if (lock == null) {
+            return;
+        }
+        try {
+            if (lock.isAcquiredInThisProcess()) {
+                lock.release();
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to release merge lock: " + e.getMessage());
+        }
     }
 
     /**
