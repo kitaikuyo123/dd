@@ -1,7 +1,6 @@
 package com.minisql.master;
 
 import com.minisql.common.model.ServerId;
-import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.state.ClusterManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
