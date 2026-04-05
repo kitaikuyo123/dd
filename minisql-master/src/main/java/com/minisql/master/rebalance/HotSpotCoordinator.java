@@ -16,7 +16,6 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -27,10 +26,11 @@ public class HotSpotCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(HotSpotCoordinator.class);
 
-    private static final long HOTSPOT_READ_THRESHOLD = 10000;
-    private static final long HOTSPOT_WRITE_THRESHOLD = 5000;
-    private static final double HOTSPOT_GROWTH_THRESHOLD = 2.0;
-    private static final int TARGET_READ_REPLICA_COUNT = 3;
+    public static final long DEFAULT_READ_THRESHOLD_PER_INTERVAL = 200;
+    public static final long DEFAULT_WRITE_THRESHOLD_PER_INTERVAL = 100;
+    public static final double DEFAULT_GROWTH_THRESHOLD = 1.2;
+    public static final int DEFAULT_TARGET_READ_REPLICA_COUNT = 3;
+    public static final long DEFAULT_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(5);
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -41,7 +41,13 @@ public class HotSpotCoordinator {
     private final Map<String, Queue<RegionLoadSnapshot>> loadHistory = new ConcurrentHashMap<>();
     private final Queue<HotSpotAction> pendingActions = new ConcurrentLinkedQueue<>();
     private final Map<String, Long> cooldownUntilMs = new ConcurrentHashMap<>();
-    private ScheduledExecutorService scheduler;
+    private volatile long readThresholdPerInterval = DEFAULT_READ_THRESHOLD_PER_INTERVAL;
+    private volatile long writeThresholdPerInterval = DEFAULT_WRITE_THRESHOLD_PER_INTERVAL;
+    private volatile double growthThreshold = DEFAULT_GROWTH_THRESHOLD;
+    private volatile int targetReadReplicaCount = DEFAULT_TARGET_READ_REPLICA_COUNT;
+    private volatile long cooldownMs = DEFAULT_COOLDOWN_MS;
+    private volatile long historyWindowMs = TimeUnit.MINUTES.toMillis(2);
+    private volatile int minSnapshotCount = 3;
 
     public HotSpotCoordinator(ClusterManager clusterManager,
                               MetadataManager metadataManager,
@@ -53,21 +59,35 @@ public class HotSpotCoordinator {
         this.recoveryCoordinator = recoveryCoordinator;
     }
 
-    public void startHotSpotDetection() {
-        if (scheduler != null && !scheduler.isShutdown()) {
+    public void configure(HotSpotSettings settings) {
+        if (settings == null) {
             return;
         }
-        scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(this::planPendingActions, 10, 10, TimeUnit.SECONDS);
-        System.out.println("HotSpot detection started");
+        this.readThresholdPerInterval = Math.max(1L, settings.getReadThresholdPerInterval());
+        this.writeThresholdPerInterval = Math.max(1L, settings.getWriteThresholdPerInterval());
+        this.growthThreshold = Math.max(1.0, settings.getGrowthThreshold());
+        this.targetReadReplicaCount = Math.max(1, settings.getTargetReadReplicaCount());
+        this.cooldownMs = Math.max(0L, settings.getCooldownMs());
     }
 
-    public void stopHotSpotDetection() {
-        if (scheduler != null) {
-            scheduler.shutdown();
-            scheduler = null;
-        }
-        System.out.println("HotSpot detection stopped");
+    public long getReadThresholdPerInterval() {
+        return readThresholdPerInterval;
+    }
+
+    public long getWriteThresholdPerInterval() {
+        return writeThresholdPerInterval;
+    }
+
+    public double getGrowthThreshold() {
+        return growthThreshold;
+    }
+
+    public int getTargetReadReplicaCount() {
+        return targetReadReplicaCount;
+    }
+
+    public long getCooldownMs() {
+        return cooldownMs;
     }
 
     public List<HotSpotAction> planPendingActions() {
@@ -80,10 +100,16 @@ public class HotSpotCoordinator {
             regionId, ignored -> new ConcurrentLinkedQueue<>());
         history.offer(new RegionLoadSnapshot(System.currentTimeMillis(), load));
 
-        long oneMinuteAgo = System.currentTimeMillis() - 60000;
-        while (!history.isEmpty() && history.peek().timestamp < oneMinuteAgo) {
+        // 使用可配置的时间窗口
+        long cutoff = System.currentTimeMillis() - historyWindowMs;
+        while (!history.isEmpty() && history.peek().timestamp < cutoff) {
             history.poll();
         }
+    }
+
+    public void configureHistoryWindow(long windowMs, int minSnapshots) {
+        this.historyWindowMs = Math.max(30000L, windowMs);
+        this.minSnapshotCount = Math.max(2, minSnapshots);
     }
 
     public List<HotSpotAction> drainPendingActions() {
@@ -109,10 +135,6 @@ public class HotSpotCoordinator {
             case SPLIT_REGION:
                 splitHotRegion(action.getRegionId());
                 break;
-            case MOVE_REGION:
-                // Region move actions are executed by MasterServiceImpl so they can
-                // reuse the validated migration orchestration path.
-                break;
             default:
                 break;
         }
@@ -126,23 +148,27 @@ public class HotSpotCoordinator {
         clearExpiredCooldowns();
 
         for (String regionId : loadHistory.keySet()) {
-            long now = System.currentTimeMillis();
-            if (cooldownUntilMs.getOrDefault(regionId, 0L) > now) {
-                continue;
-            }
-
             Queue<RegionLoadSnapshot> history = loadHistory.get(regionId);
-            if (history == null || history.size() < 3) {
+            if (history == null || history.size() < minSnapshotCount) {
                 continue;
             }
 
             HotSpotType hotSpotType = analyzeHotSpot(history);
-            if (hotSpotType == null) {
-                continue;
+
+            // 始终更新热点状态（用于监控显示）
+            if (hotSpotType != null) {
+                long requestCount = estimateRequestDelta(history);
+                hotSpots.put(regionId, new HotSpotInfo(regionId, hotSpotType, requestCount));
+            } else {
+                // 不再是热点时移除
+                hotSpots.remove(regionId);
             }
 
-            long requestCount = estimateRequestDelta(history);
-            hotSpots.put(regionId, new HotSpotInfo(regionId, hotSpotType, requestCount));
+            // 冷却期只阻止动作规划
+            long now = System.currentTimeMillis();
+            if (hotSpotType == null || cooldownUntilMs.getOrDefault(regionId, 0L) > now) {
+                continue;
+            }
 
             HotSpotAction action = planHotSpotAction(regionId, hotSpotType);
             if (action != null) {
@@ -150,7 +176,7 @@ public class HotSpotCoordinator {
                     regionId, hotSpotType, action.getType(), action.getTargetServer());
                 pendingActions.offer(action);
             }
-            cooldownUntilMs.put(regionId, now + TimeUnit.MINUTES.toMillis(30));
+            cooldownUntilMs.put(regionId, now + cooldownMs);
         }
     }
 
@@ -171,11 +197,11 @@ public class HotSpotCoordinator {
         long readRequests = latest.load.getReadRequests() - previous.load.getReadRequests();
         long writeRequests = latest.load.getWriteRequests() - previous.load.getWriteRequests();
 
-        if (readRequests > HOTSPOT_READ_THRESHOLD) {
+        if (readRequests > readThresholdPerInterval) {
             return isSustainedGrowth(snapshots) ? HotSpotType.READ_GROWING : HotSpotType.READ;
         }
 
-        if (writeRequests > HOTSPOT_WRITE_THRESHOLD) {
+        if (writeRequests > writeThresholdPerInterval) {
             return isSustainedGrowth(snapshots) ? HotSpotType.WRITE_GROWING : HotSpotType.WRITE;
         }
 
@@ -200,7 +226,7 @@ public class HotSpotCoordinator {
         }
 
         double avgGrowth = growthSum / (snapshots.size() - 1);
-        return avgGrowth > HOTSPOT_GROWTH_THRESHOLD;
+        return avgGrowth > growthThreshold;
     }
 
     private long estimateRequestDelta(Queue<RegionLoadSnapshot> history) {
@@ -214,6 +240,18 @@ public class HotSpotCoordinator {
         long latestTotal = latest.load.getReadRequests() + latest.load.getWriteRequests();
         long previousTotal = previous.load.getReadRequests() + previous.load.getWriteRequests();
         return Math.max(0, latestTotal - previousTotal);
+    }
+
+    public double calculateDisplayScore(String regionId, long replicationLag) {
+        HotSpotInfo info = hotSpots.get(regionId);
+        if (info == null) {
+            return replicationLag > 0 ? Math.min(1.0, replicationLag / 1000.0) : 0.0;
+        }
+
+        long threshold = info.isReadHotSpot() ? readThresholdPerInterval : writeThresholdPerInterval;
+        double pressure = threshold > 0 ? (double) info.getRequestCount() / threshold : 0.0;
+        double lagPenalty = replicationLag > 0 ? Math.min(1.0, replicationLag / 1000.0) : 0.0;
+        return pressure + lagPenalty;
     }
 
     private HotSpotAction planHotSpotAction(String regionId, HotSpotType type) {
@@ -242,9 +280,18 @@ public class HotSpotCoordinator {
 
         List<ClusterManager.ServerInfo> servers = new ArrayList<>(clusterManager.getActiveServers());
         List<ServerId> currentReplicas = clusterManager.getReplicaServers(regionId);
+
+        // 过滤掉主服务器、现有副本、以及心跳过期的服务器
+        long heartbeatTimeout = 60000L; // 1 分钟
+        long now = System.currentTimeMillis();
+
         List<ClusterManager.ServerInfo> nonReplicaTargets = new ArrayList<>(servers);
-        nonReplicaTargets.removeIf(server -> server.getServerId().equals(primaryServer)
-            || currentReplicas.contains(server.getServerId()));
+        nonReplicaTargets.removeIf(server -> {
+            ServerId sid = server.getServerId();
+            boolean isPrimaryOrReplica = sid.equals(primaryServer) || currentReplicas.contains(sid);
+            boolean isStale = (now - server.getLastHeartbeat()) > heartbeatTimeout;
+            return isPrimaryOrReplica || isStale;
+        });
 
         if (nonReplicaTargets.isEmpty()) {
             logger.info("No secondary target available for hot region {}", regionId);
@@ -262,19 +309,11 @@ public class HotSpotCoordinator {
             ? hotSpots.get(regionId).getRequestCount()
             : 0L;
 
-        ScoredHotSpotAction bestAction = null;
-
+        // 只使用 ADD_READ_REPLICA 动作
+        // MOVE_REGION 暂未完整实现（缺少通知 RegionServer 的逻辑），暂时禁用
         HotSpotAction addReplicaAction = new HotSpotAction(regionId, HotSpotActionType.ADD_READ_REPLICA,
             null, targetServer.getServerId(), hotSpotType);
-        bestAction = pickBetter(bestAction,
-            scoreAddReplicaAction(addReplicaAction, currentReplicas.size(), targetServer, requestPressure));
-
-        HotSpotAction moveRegionAction = new HotSpotAction(regionId, HotSpotActionType.MOVE_REGION,
-            primaryServer, targetServer.getServerId(), hotSpotType);
-        bestAction = pickBetter(bestAction,
-            scoreMoveRegionAction(moveRegionAction, currentReplicas.size(), targetServer, requestPressure));
-
-        return bestAction != null ? bestAction.action : null;
+        return addReplicaAction;
     }
 
     private void addReadReplica(String regionId, ServerId targetServerId) {
@@ -286,7 +325,7 @@ public class HotSpotCoordinator {
     }
 
     private void splitHotRegion(String regionId) {
-        System.out.println("Triggering split for hot region: " + regionId);
+        logger.info("Triggering split for hot region: {}", regionId);
         splitCoordinator.checkAndSplitRegion(regionId);
     }
 
@@ -299,40 +338,6 @@ public class HotSpotCoordinator {
         return regionCount * 10 + totalRequests / 1000.0;
     }
 
-    private ScoredHotSpotAction scoreAddReplicaAction(HotSpotAction action,
-                                                      int currentReplicaCount,
-                                                      ClusterManager.ServerInfo targetServer,
-                                                      long requestPressure) {
-        double score = 0;
-        score += Math.max(0, TARGET_READ_REPLICA_COUNT - currentReplicaCount) * 25.0;
-        score += Math.max(0, 100.0 - calculateServerLoad(targetServer));
-        score += Math.min(30.0, requestPressure / 1000.0);
-        return new ScoredHotSpotAction(action, score);
-    }
-
-    private ScoredHotSpotAction scoreMoveRegionAction(HotSpotAction action,
-                                                      int currentReplicaCount,
-                                                      ClusterManager.ServerInfo targetServer,
-                                                      long requestPressure) {
-        double score = 0;
-        if (currentReplicaCount >= TARGET_READ_REPLICA_COUNT) {
-            score += 45.0;
-        }
-        score += Math.max(0, 100.0 - calculateServerLoad(targetServer)) * 0.8;
-        score += Math.min(25.0, requestPressure / 1500.0);
-        return new ScoredHotSpotAction(action, score);
-    }
-
-    private ScoredHotSpotAction pickBetter(ScoredHotSpotAction current, ScoredHotSpotAction candidate) {
-        if (candidate == null) {
-            return current;
-        }
-        if (current == null || candidate.score > current.score) {
-            return candidate;
-        }
-        return current;
-    }
-
     public enum HotSpotType {
         READ,
         READ_GROWING,
@@ -342,8 +347,7 @@ public class HotSpotCoordinator {
 
     public enum HotSpotActionType {
         ADD_READ_REPLICA,
-        SPLIT_REGION,
-        MOVE_REGION
+        SPLIT_REGION
     }
 
     public static class HotSpotAction {
@@ -420,15 +424,49 @@ public class HotSpotCoordinator {
         public long getRequestCount() {
             return requestCount;
         }
+
+        public boolean isReadHotSpot() {
+            return type == HotSpotType.READ || type == HotSpotType.READ_GROWING;
+        }
     }
 
-    private static class ScoredHotSpotAction {
-        private final HotSpotAction action;
-        private final double score;
+    public static class HotSpotSettings {
+        private final long readThresholdPerInterval;
+        private final long writeThresholdPerInterval;
+        private final double growthThreshold;
+        private final int targetReadReplicaCount;
+        private final long cooldownMs;
 
-        private ScoredHotSpotAction(HotSpotAction action, double score) {
-            this.action = action;
-            this.score = score;
+        public HotSpotSettings(long readThresholdPerInterval,
+                               long writeThresholdPerInterval,
+                               double growthThreshold,
+                               int targetReadReplicaCount,
+                               long cooldownMs) {
+            this.readThresholdPerInterval = readThresholdPerInterval;
+            this.writeThresholdPerInterval = writeThresholdPerInterval;
+            this.growthThreshold = growthThreshold;
+            this.targetReadReplicaCount = targetReadReplicaCount;
+            this.cooldownMs = cooldownMs;
+        }
+
+        public long getReadThresholdPerInterval() {
+            return readThresholdPerInterval;
+        }
+
+        public long getWriteThresholdPerInterval() {
+            return writeThresholdPerInterval;
+        }
+
+        public double getGrowthThreshold() {
+            return growthThreshold;
+        }
+
+        public int getTargetReadReplicaCount() {
+            return targetReadReplicaCount;
+        }
+
+        public long getCooldownMs() {
+            return cooldownMs;
         }
     }
 

@@ -12,11 +12,17 @@ import java.util.concurrent.TimeUnit;
 public class HotSpotDetector implements ClusterDetector {
 
     private final HotSpotCoordinator hotSpotCoordinator;
+    private final long intervalMs;
     private ScheduledExecutorService scheduler;
     private ClusterEventSink eventSink = event -> { };
 
     public HotSpotDetector(HotSpotCoordinator hotSpotCoordinator) {
+        this(hotSpotCoordinator, 10_000L);
+    }
+
+    public HotSpotDetector(HotSpotCoordinator hotSpotCoordinator, long intervalMs) {
         this.hotSpotCoordinator = hotSpotCoordinator;
+        this.intervalMs = Math.max(1000L, intervalMs);
     }
 
     @Override
@@ -34,7 +40,7 @@ public class HotSpotDetector implements ClusterDetector {
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleAtFixedRate(this::publishActions, 10, 10, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::publishActions, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     @Override

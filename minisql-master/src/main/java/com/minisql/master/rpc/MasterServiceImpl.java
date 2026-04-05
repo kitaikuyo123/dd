@@ -211,16 +211,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 recordEvent("HOTSPOT_DETECTED", "INFO", action.getRegionId(), null,
                     action.getSourceServer(), action.getTargetServer(),
                     "Hot spot action queued: " + action.getType(), null);
-                if (action.getType() == HotSpotCoordinator.HotSpotActionType.MOVE_REGION
-                    && action.getSourceServer() != null
-                    && action.getTargetServer() != null) {
-                    migrationCoordinator.execute(new LoadBalancer.BalanceAction(
-                        action.getRegionId(),
-                        action.getSourceServer(),
-                        action.getTargetServer()
-                    ));
-                    continue;
-                }
                 hotSpotCoordinator.executeAction(action);
             } catch (Exception e) {
                 System.err.println("Error executing hot spot action for " + action.getRegionId() +

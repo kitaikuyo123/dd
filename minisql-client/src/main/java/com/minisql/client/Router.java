@@ -285,7 +285,7 @@ public class Router {
      * 刷新路由缓存
      */
     public void refreshRouteCache(String tableName) {
-        if (zkClient == null) {
+        if (!isZkUsable()) {
             System.err.println("No ZooKeeper connection available");
             return;
         }
@@ -359,6 +359,9 @@ public class Router {
             }
 
         } catch (Exception e) {
+            if (isZkStoppedError(e)) {
+                return;
+            }
             System.err.println("Failed to refresh route cache: " + e.getMessage());
             e.printStackTrace();
         }
@@ -583,7 +586,7 @@ public class Router {
             return masterAddress;
         }
 
-        if (zkClient != null) {
+        if (isZkUsable()) {
             try {
                 // 从 ZooKeeper 获取当前 Master
                 String masterPath = Constants.ZK_MASTER_LEADER_PATH;
@@ -594,6 +597,9 @@ public class Router {
                     return masterAddress;
                 }
             } catch (Exception e) {
+                if (isZkStoppedError(e)) {
+                    return masterAddress;
+                }
                 System.err.println("Failed to get master from ZooKeeper: " + e.getMessage());
             }
         }
@@ -658,17 +664,26 @@ public class Router {
         if (watchedTables.add(tableName)) {
             try {
                 zkClient.watchChildren(regionsPath, (path, children) -> {
+                    if (!isZkUsable()) {
+                        return;
+                    }
                     routeCache.remove(tableName);
                     watchedRegionPaths.removeIf(watchedPath -> watchedPath.startsWith(path));
                     try {
                         ensureTableWatcher(tableName, regionsPath);
                         refreshRouteCache(tableName);
                     } catch (Exception e) {
+                        if (isZkStoppedError(e)) {
+                            return;
+                        }
                         System.err.println("Failed to refresh table watcher cache for " + tableName + ": " + e.getMessage());
                     }
                 });
             } catch (Exception e) {
                 watchedTables.remove(tableName);
+                if (isZkStoppedError(e)) {
+                    return;
+                }
                 System.err.println("Failed to watch regions for table " + tableName + ": " + e.getMessage());
             }
         }
@@ -678,11 +693,17 @@ public class Router {
         if (watchedRegionPaths.add(regionPath)) {
             try {
                 zkClient.watchChildren(regionPath, (path, children) -> {
+                    if (!isZkUsable()) {
+                        return;
+                    }
                     routeCache.remove(tableName);
                     watchedRegionPaths.remove(regionPath);
                     refreshRouteCache(tableName);
                 });
             } catch (Exception e) {
+                if (isZkStoppedError(e)) {
+                    return;
+                }
                 System.err.println("Failed to watch region path " + regionPath + ": " + e.getMessage());
             }
             registerNodeWatcher(primaryPath, tableName, regionPath);
@@ -692,21 +713,43 @@ public class Router {
 
     private void registerNodeWatcher(String nodePath, String tableName, String regionPath) {
         try {
+            if (!isZkUsable()) {
+                return;
+            }
             if (!zkClient.exists(nodePath)) {
                 return;
             }
             zkClient.watchNode(nodePath, (path, type) -> {
+                if (!isZkUsable()) {
+                    return;
+                }
                 routeCache.remove(tableName);
                 watchedRegionPaths.remove(regionPath);
                 try {
                     refreshRouteCache(tableName);
                 } catch (Exception e) {
+                    if (isZkStoppedError(e)) {
+                        return;
+                    }
                     System.err.println("Failed to refresh route cache for watcher " + nodePath + ": " + e.getMessage());
                 }
             });
         } catch (Exception e) {
+            if (isZkStoppedError(e)) {
+                return;
+            }
             System.err.println("Failed to register watcher for " + nodePath + ": " + e.getMessage());
         }
+    }
+
+    private boolean isZkUsable() {
+        return zkClient != null && zkClient.isStarted();
+    }
+
+    private boolean isZkStoppedError(Exception e) {
+        return e instanceof IllegalStateException
+            && e.getMessage() != null
+            && e.getMessage().contains("Expected state [STARTED] was [STOPPED]");
     }
 
     private List<ServerAddress> parseReplicaAddresses(String encodedReplicas) {

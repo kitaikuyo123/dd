@@ -28,7 +28,7 @@ public class MySQLRegionStorage {
     private final StorageEngine storageEngine;
     private final AtomicLong readRequestCount = new AtomicLong(0);
     private final AtomicLong writeRequestCount = new AtomicLong(0);
-    private volatile long estimatedSize = 0;
+    private volatile long actualSize = 0;
     private volatile long lastSizeSyncTime = 0;
 
     /**
@@ -47,21 +47,11 @@ public class MySQLRegionStorage {
     public void put(KeyValue kv) throws IOException {
         writeRequestCount.incrementAndGet();
         storageEngine.put(kv.getRowKey(), kv);
-
-        int keySize = kv.getRowKey() != null ? kv.getRowKey().length : 0;
-        int valueSize = kv.getValue() != null ? kv.getValue().length : 0;
-        estimatedSize += keySize + valueSize;
     }
 
     public void put(List<KeyValue> kvs) throws IOException {
         writeRequestCount.addAndGet(kvs.size());
         storageEngine.batchPut(kvs);
-
-        for (KeyValue kv : kvs) {
-            int keySize = kv.getRowKey() != null ? kv.getRowKey().length : 0;
-            int valueSize = kv.getValue() != null ? kv.getValue().length : 0;
-            estimatedSize += keySize + valueSize;
-        }
     }
 
     public KeyValue get(byte[] rowKey) {
@@ -125,51 +115,100 @@ public class MySQLRegionStorage {
         if (now - lastSizeSyncTime > 10000) {
             synchronized (this) {
                 if (now - lastSizeSyncTime > 10000) {
-                    getActualTableSize();
-                    lastSizeSyncTime = System.currentTimeMillis();
+                    return getActualTableSize();
                 }
             }
         }
-        return estimatedSize;
+        return actualSize;
     }
 
     public synchronized long getActualTableSize() {
         if (storageEngine instanceof MySQLStorageEngine) {
+            MySQLStorageEngine engine = (MySQLStorageEngine) storageEngine;
             try {
-                MySQLStorageEngine engine = (MySQLStorageEngine) storageEngine;
-                String sql = "SELECT data_length + index_length AS size " +
-                             "FROM information_schema.TABLES " +
-                             "WHERE table_schema = DATABASE() AND table_name = ?";
-                try (Connection conn = engine.getConnection();
-                     PreparedStatement stmt = conn.prepareStatement(sql)) {
-                    stmt.setString(1, engine.getTableName());
-                    ResultSet rs = stmt.executeQuery();
-                    if (rs.next()) {
-                        long actualSize = rs.getLong("size");
-                        long oldSize = this.estimatedSize;
-                        this.estimatedSize = actualSize;
-
-                        return actualSize;
+                try (Connection conn = engine.getConnection()) {
+                    Long tablespaceSize = queryTablespaceFileSize(conn, engine.getTableName());
+                    if (tablespaceSize != null) {
+                        this.actualSize = tablespaceSize;
+                        this.lastSizeSyncTime = System.currentTimeMillis();
+                        return tablespaceSize;
                     }
+
+                    Long reportedTableSize = queryReportedTableSize(conn, engine.getTableName());
+                    if (reportedTableSize != null) {
+                        this.actualSize = reportedTableSize;
+                        this.lastSizeSyncTime = System.currentTimeMillis();
+                        return reportedTableSize;
+                    }
+
+                    this.actualSize = 0;
+                    this.lastSizeSyncTime = System.currentTimeMillis();
+                    logger.warn("No size metadata found for table: {}, region: {}. Returning 0.",
+                        engine.getTableName(), regionId);
+                    return 0;
                 }
             } catch (SQLException e) {
-                logger.warn("Failed to get actual table size from MySQL metadata", e);
+                logger.error("Failed to get actual table size from MySQL metadata for region: {}, table: {}", 
+                    regionId, engine.getTableName(), e);
             }
         }
-        return estimatedSize;
+        logger.warn("Returning last known actual size {} for region: {}", actualSize, regionId);
+        return actualSize;
     }
 
-    private String formatSize(long size) {
-        if (size >= 1024L * 1024 * 1024) {
-            return String.format("%.2f GB", size / (1024.0 * 1024 * 1024));
-        } else if (size >= 1024L * 1024) {
-            return String.format("%.2f MB", size / (1024.0 * 1024));
-        } else if (size >= 1024L) {
-            return String.format("%.2f KB", size / 1024.0);
+    private Long queryTablespaceFileSize(Connection conn, String tableName) {
+        try {
+            String qualifiedTableName = currentDatabaseName(conn) + "/" + tableName;
+            Long fileSize = querySingleSize(conn,
+                "SELECT FILE_SIZE AS size FROM information_schema.INNODB_TABLESPACES WHERE NAME = ?",
+                qualifiedTableName);
+            if (fileSize != null) {
+                return fileSize;
+            }
+            return querySingleSize(conn,
+                "SELECT FILE_SIZE AS size FROM information_schema.INNODB_SYS_TABLESPACES WHERE NAME = ?",
+                qualifiedTableName);
+        } catch (SQLException e) {
+            logger.debug("Unable to resolve current database name for tablespace size lookup: {}", e.getMessage());
+            return null;
         }
-        return size + " B";
     }
 
+    private Long queryReportedTableSize(Connection conn, String tableName) {
+        return querySingleSize(conn,
+            "SELECT data_length + index_length AS size " +
+                "FROM information_schema.TABLES " +
+                "WHERE table_schema = DATABASE() AND table_name = ?",
+            tableName);
+    }
+
+    private Long querySingleSize(Connection conn, String sql, String parameter) {
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, parameter);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong("size");
+                }
+                return null;
+            }
+        } catch (SQLException e) {
+            logger.debug("Size metadata query failed: sql={}, parameter={}, message={}", sql, parameter, e.getMessage());
+            return null;
+        }
+    }
+
+    private String currentDatabaseName(Connection conn) throws SQLException {
+        try (PreparedStatement stmt = conn.prepareStatement("SELECT DATABASE()");
+             ResultSet rs = stmt.executeQuery()) {
+            if (rs.next()) {
+                String database = rs.getString(1);
+                if (database != null && !database.isBlank()) {
+                    return database;
+                }
+            }
+        }
+        throw new SQLException("Unable to determine current database name");
+    }
     public long getMemStoreSize() {
         return 0;
     }

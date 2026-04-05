@@ -12,11 +12,11 @@ MiniSQL 是一个基于 `Master + RegionServer + ZooKeeper + MySQL` 的分布式
 - 单表查询支持谓词下推和投影下推
 - `JOIN` 查询支持按左右两侧做投影裁剪
 
-## 最近一次架构改造摘要
+## 最近更新
 
-本次改造重点是把 ZooKeeper 从“辅助元数据存储”升级成“统一协调面”，核心变化如下：
+### 2026/04/01
 
-- 将 ZooKeeper 主路径统一为：
+- 完成 ZooKeeper 协调面重构，统一主路径为：
   - `/minisql/masters`
   - `/minisql/regionservers`
   - `/minisql/tables/{table}/regions/{region}/primary`
@@ -35,7 +35,8 @@ MiniSQL 是一个基于 `Master + RegionServer + ZooKeeper + MySQL` 的分布式
 - split / merge / migration / failover 路径补充分布式锁和元数据收敛
 - 监控页 Region 统计口径改为支持实际 Region 实例视图，并清理了多余日志输出
 - gRPC 传输栈升级为 `io.grpc:grpc-netty-shaded:1.76.1`
-- E2E 脚本与双 Master 验证配置同步更新，新增第二份 Master 配置文件 [master2.properties](/d:/aLabs/dd/minisql-master/src/main/resources/master2.properties)
+- E2E 脚本与双 Master 验证配置同步更新
+- 新增第二份 Master 配置文件 [master2.properties](/d:/aLabs/dd/minisql-master/src/main/resources/master2.properties)，用于双 Master 验证
 
 ## 测试入口
 

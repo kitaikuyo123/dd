@@ -8,6 +8,7 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.master.rebalance.HotSpotCoordinator;
 import com.minisql.master.rebalance.LoadBalancer;
 
 import java.util.ArrayList;
@@ -32,6 +33,7 @@ public class MonitoringService {
     private final ReplicaLifecycleManager lifecycleManager;
     private final SqlMetricsRegistry sqlMetricsRegistry;
     private final ClusterEventTimeline eventTimeline;
+    private volatile HotSpotCoordinator hotSpotCoordinator;
 
     public MonitoringService(ClusterManager clusterManager,
                              MetadataManager metadataManager,
@@ -43,6 +45,10 @@ public class MonitoringService {
         this.lifecycleManager = lifecycleManager;
         this.sqlMetricsRegistry = new SqlMetricsRegistry();
         this.eventTimeline = new ClusterEventTimeline();
+    }
+
+    public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
+        this.hotSpotCoordinator = hotSpotCoordinator;
     }
 
     public void recordSqlMetric(String sqlType, String tableName, boolean success, long latencyMs,
@@ -155,6 +161,9 @@ public class MonitoringService {
 
     private List<Map<String, Object>> logicalRegions() {
         List<Map<String, Object>> result = new ArrayList<>();
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = hotSpotCoordinator != null
+            ? hotSpotCoordinator.getCurrentHotSpots()
+            : Collections.emptyMap();
         for (Region region : metadataManager.getAllRegions()) {
             if (region == null) {
                 continue;
@@ -174,11 +183,14 @@ public class MonitoringService {
             long writeRequests = load != null ? load.getWriteRequests() : 0L;
             long storeFileSize = load != null ? load.getStoreFileSize() : 0L;
             long replicationLag = maxReplicationLag(region.getRegionId());
+            HotSpotCoordinator.HotSpotInfo hotSpotInfo = currentHotSpots.get(region.getRegionId());
             row.put("readRequests", readRequests);
             row.put("writeRequests", writeRequests);
             row.put("storeFileSize", storeFileSize);
             row.put("replicationLag", replicationLag);
-            row.put("hotspotScore", hotspotScore(readRequests, writeRequests, replicationLag));
+            row.put("hotspotDetected", hotSpotInfo != null);
+            row.put("hotspotType", hotSpotInfo != null ? hotSpotInfo.getType().name() : null);
+            row.put("hotspotScore", hotspotScore(region.getRegionId(), readRequests, writeRequests, replicationLag));
             row.put("lifecycle", lifecycleStatuses(region.getRegionId()));
             result.add(row);
         }
@@ -400,7 +412,10 @@ public class MonitoringService {
         }
     }
 
-    private double hotspotScore(long readRequests, long writeRequests, long replicationLag) {
+    private double hotspotScore(String regionId, long readRequests, long writeRequests, long replicationLag) {
+        if (hotSpotCoordinator != null) {
+            return hotSpotCoordinator.calculateDisplayScore(regionId, replicationLag);
+        }
         return readRequests + writeRequests * 3.0 + replicationLag * 2.0;
     }
 
