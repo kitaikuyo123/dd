@@ -10,35 +10,47 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>minisql-master</artifactId>
-    <name>MiniSQL - Master Module</name>
-    <description>Master node for cluster management</description>
+    <artifactId>regionserver</artifactId>
+    <name>MiniSQL - RegionServer</name>
+    <description>Region server for data storage and processing</description>
 
     <dependencies>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>minisql-common</artifactId>
+            <artifactId>common</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>minisql-storage</artifactId>
+            <artifactId>sql</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>minisql-zookeeper</artifactId>
+            <artifactId>replication</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>minisql-replication</artifactId>
+            <artifactId>storage</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>minisql-client</artifactId>
+            <artifactId>zookeeper</artifactId>
             <version>${project.version}</version>
+        </dependency>
+        <!-- MySQL Connector -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.2.0</version>
+        </dependency>
+        <!-- HikariCP 连接池 -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>5.1.0</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
@@ -64,26 +76,6 @@
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-slf4j2-impl</artifactId>
         </dependency>
-
-        <!-- curator-test for embedded ZooKeeper (used at runtime for development) -->
-        <dependency>
-            <groupId>org.apache.curator</groupId>
-            <artifactId>curator-test</artifactId>
-            <version>${curator.version}</version>
-            <scope>compile</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.junit.jupiter</groupId>
-                    <artifactId>junit-jupiter-api</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.junit.platform</groupId>
-                    <artifactId>junit-platform-commons</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <!-- Testing -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -93,13 +85,6 @@
 
     <build>
         <plugins>
-            <!-- Surefire plugin for running tests -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version>
-            </plugin>
-
             <!-- 添加主类配置 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -108,7 +93,7 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>com.minisql.master.rpc.MasterMain</mainClass>
+                            <mainClass>com.minisql.regionserver.RegionServerMain</mainClass>
                             <addClasspath>true</addClasspath>
                             <classpathPrefix>lib/</classpathPrefix>
                         </manifest>

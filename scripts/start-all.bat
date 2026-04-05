@@ -10,9 +10,9 @@ set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
 
-set "RS1_CONFIG=%PROJECT_ROOT%\minisql-regionserver\src\main\resources\regionserver-1.properties"
-set "RS2_CONFIG=%PROJECT_ROOT%\minisql-regionserver\src\main\resources\regionserver-2.properties"
-set "RS3_CONFIG=%PROJECT_ROOT%\minisql-regionserver\src\main\resources\regionserver-3.properties"
+set "RS1_CONFIG=%PROJECT_ROOT%\regionserver\src\main\resources\regionserver-1.properties"
+set "RS2_CONFIG=%PROJECT_ROOT%\regionserver\src\main\resources\regionserver-2.properties"
+set "RS3_CONFIG=%PROJECT_ROOT%\regionserver\src\main\resources\regionserver-3.properties"
 set "MASTER_SCRIPT=%PROJECT_ROOT%\scripts\start-master.bat"
 set "RS_SCRIPT=%PROJECT_ROOT%\scripts\start-regionserver.bat"
 

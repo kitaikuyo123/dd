@@ -10,8 +10,8 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>minisql-common</artifactId>
-    <name>MiniSQL - Common Module</name>
+    <artifactId>common</artifactId>
+    <name>MiniSQL - Common</name>
     <description>Common utilities, models and protobuf definitions</description>
 
     <dependencies>

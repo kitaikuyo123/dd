@@ -13,7 +13,7 @@ for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
 call :check_java || exit /b 1
 
 pushd "%PROJECT_ROOT%" >nul
-start "MiniSQL CLI" /D "%PROJECT_ROOT%" cmd /k mvn exec:java -pl minisql-client -Dexec.mainClass=com.minisql.client.cli.SqlCli
+start "MiniSQL CLI" /D "%PROJECT_ROOT%" cmd /k mvn exec:java -pl client -Dexec.mainClass=com.minisql.client.cli.SqlCli
 popd >nul
 exit /b 0
 

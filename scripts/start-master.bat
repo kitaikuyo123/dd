@@ -4,7 +4,7 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
-set "MASTER_CONFIG=%PROJECT_ROOT%\minisql-master\src\main\resources\master.properties"
+set "MASTER_CONFIG=%PROJECT_ROOT%\master\src\main\resources\master.properties"
 set "SKIP_COMPILE=0"
 
 if /I "%~1"=="--skip-compile" (
@@ -19,7 +19,7 @@ if not exist "%MASTER_CONFIG%" (
 
 pushd "%PROJECT_ROOT%" >nul
 if "%SKIP_COMPILE%"=="0" (
-    call mvn -q -DskipTests -pl minisql-master -am install
+    call mvn -q -DskipTests -pl master -am install
     if errorlevel 1 (
         echo [ERROR] Maven install failed.
         popd >nul
@@ -33,7 +33,7 @@ echo Config: %MASTER_CONFIG%
 echo ========================================
 echo.
 
-mvn -f minisql-master\pom.xml exec:java -Dexec.mainClass=com.minisql.master.rpc.MasterMain -Dexec.args=%MASTER_CONFIG%
+mvn -f master\pom.xml exec:java -Dexec.mainClass=com.minisql.master.rpc.MasterMain -Dexec.args=%MASTER_CONFIG%
 set "EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 exit /b %EXIT_CODE%

@@ -13,14 +13,14 @@
     <description>A distributed SQL database system inspired by HBase</description>
 
     <modules>
-        <module>minisql-common</module>
-        <module>minisql-zookeeper</module>
-        <module>minisql-master</module>
-        <module>minisql-storage</module>
-        <module>minisql-regionserver</module>
-        <module>minisql-replication</module>
-        <module>minisql-sql</module>
-        <module>minisql-client</module>
+        <module>common</module>
+        <module>zookeeper</module>
+        <module>master</module>
+        <module>storage</module>
+        <module>regionserver</module>
+        <module>replication</module>
+        <module>sql</module>
+        <module>client</module>
     </modules>
 
     <properties>
@@ -139,12 +139,12 @@
             <!-- Internal modules -->
             <dependency>
                 <groupId>com.minisql</groupId>
-                <artifactId>minisql-common</artifactId>
+                <artifactId>common</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.minisql</groupId>
-                <artifactId>minisql-zookeeper</artifactId>
+                <artifactId>zookeeper</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

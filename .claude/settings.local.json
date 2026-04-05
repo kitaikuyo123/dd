@@ -6,7 +6,8 @@
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
       "Bash(find d:/aLabs/dd -name \"*.java\" -type f -exec grep -l \"class.*Test\" {} \\\\;)",
-      "Bash(mvn compile:*)"
+      "Bash(mvn compile:*)",
+      "Bash(ls -d d:/aLabs/dd/*/)"
     ]
   }
 }

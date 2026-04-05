@@ -14,7 +14,7 @@ if /I "%~2"=="--skip-compile" (
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
-set "CONFIG_FILE=minisql-regionserver\src\main\resources\regionserver-%NUM%.properties"
+set "CONFIG_FILE=regionserver\src\main\resources\regionserver-%NUM%.properties"
 set "CONFIG_FILE_ABS=%PROJECT_ROOT%\%CONFIG_FILE%"
 
 call :check_java || exit /b 1
@@ -25,7 +25,7 @@ if not exist "%CONFIG_FILE_ABS%" (
 
 pushd "%PROJECT_ROOT%" >nul
 if "%SKIP_COMPILE%"=="0" (
-    call mvn -q -DskipTests -pl minisql-regionserver -am install
+    call mvn -q -DskipTests -pl regionserver -am install
     if errorlevel 1 (
         echo [ERROR] Maven install failed.
         popd >nul
@@ -39,7 +39,7 @@ echo Config: %CONFIG_FILE_ABS%
 echo ========================================
 echo.
 
-mvn -f minisql-regionserver\pom.xml exec:java -Dexec.mainClass=com.minisql.regionserver.RegionServerMain -Dexec.args=%CONFIG_FILE%
+mvn -f regionserver\pom.xml exec:java -Dexec.mainClass=com.minisql.regionserver.RegionServerMain -Dexec.args=%CONFIG_FILE%
 set "EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 exit /b %EXIT_CODE%
