@@ -312,11 +312,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
      */
     private void executeBalanceActions(List<LoadBalancer.BalanceAction> actions) {
         for (LoadBalancer.BalanceAction action : actions) {
+            if (action == null) {
+                logger.warn("Skipping null balance action");
+                continue;
+            }
             try {
-                if (action == null) {
-                    logger.warn("Skipping null balance action");
-                    continue;
-                }
                 migrationCoordinator.execute(action);
             } catch (Exception e) {
                 logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
@@ -326,11 +326,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private void executeHotSpotActions(List<HotSpotCoordinator.HotSpotAction> actions) {
         for (HotSpotCoordinator.HotSpotAction action : actions) {
+            if (action == null) {
+                logger.warn("Skipping null hot spot action");
+                continue;
+            }
             try {
-                if (action == null) {
-                    logger.warn("Skipping null hot spot action");
-                    continue;
-                }
                 recordEvent("HOTSPOT_DETECTED", "INFO", action.getRegionId(), null,
                     action.getSourceServer(), action.getTargetServer(),
                     "Hot spot action queued: " + action.getType(), null);
@@ -393,34 +393,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         } finally {
             recoveringRegions.remove(regionId);
         }
-    }
-
-    private boolean removeFailedReplicaFromMetadata(String regionId, ServerId failedServer) {
-        if (regionId == null || failedServer == null) {
-            return false;
-        }
-
-        clusterManager.removeReplica(regionId, failedServer);
-        replicaMonitor.removeReplica(regionId, failedServer);
-
-        Region region = metadataManager.getRegion(regionId);
-        if (region == null) {
-            return false;
-        }
-
-        boolean changed = false;
-        if (region.getReplicas() != null && region.getReplicas().contains(failedServer)) {
-            region.removeReplica(failedServer);
-            changed = true;
-        }
-
-        ServerId currentPrimary = clusterManager.getPrimaryServerForRegion(regionId);
-        boolean primaryFailed = failedServer.equals(currentPrimary);
-
-        if (changed && !primaryFailed) {
-            metadataManager.registerRegionForTable(region, region.getPrimary());
-        }
-        return primaryFailed;
     }
 
     private ServerId selectNewServerForReplica(String regionId, ServerId excludeServer) {
@@ -1412,16 +1384,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
     }
 
-    private CommonProto.RegionInfo convertRegionInfo(Region region) {
-        return CommonProto.RegionInfo.newBuilder()
-            .setRegionId(region.getRegionId())
-            .setTableName(region.getTableName())
-            .setStartKey(com.google.protobuf.ByteString.copyFrom(region.getStartKey()))
-            .setEndKey(com.google.protobuf.ByteString.copyFrom(region.getEndKey()))
-            .setState(CommonProto.RegionState.OPEN)
-            .build();
-    }
-
     private CommonProto.RegionInfo convertRegionInfo(Region region, CommonProto.MySQLConfig mysqlConfig) {
         CommonProto.RegionInfo.Builder builder = CommonProto.RegionInfo.newBuilder()
             .setRegionId(region.getRegionId())
@@ -1571,24 +1533,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
     }
 
-    /**
-     * 通知服务器提升为主副本
-     */
-    private boolean notifyServerPromoteToPrimary(ServerId serverId, String regionId) {
-        try {
-            long fencingToken = clusterManager.getFencingToken(regionId) + 1;
-            RegionServerProto.PromoteResponse response =
-                commandClient.promoteToPrimary(serverId, regionId, fencingToken);
-            if (response.getStatus().getSuccess()) {
-                clusterManager.updateFencingToken(regionId, fencingToken);
-                return true;
-            }
-            return false;
-        } catch (Exception e) {
-            logger.error("Failed to notify server promote to primary: {}", e.getMessage(), e);
-            return false;
-        }
-    }
 
     /**
      * 同步通知 RegionServer 打开 Region（等待完成后再返回）

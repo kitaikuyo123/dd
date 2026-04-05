@@ -39,7 +39,6 @@ public class FailoverCoordinator {
     private final long baseFailoverCooldownMs;
     private final long maxFailoverCooldownMs;
     private final long failoverTimeoutMs;
-    private final long emergencyFailoverThresholdMs;
 
     // 故障转移历史记录：regionId -> FailoverState
     private final Map<String, FailoverState> failoverStates = new ConcurrentHashMap<>();
@@ -61,13 +60,11 @@ public class FailoverCoordinator {
         long lastFailoverTime;
         int failoverCount;
         long currentCooldownMs;
-        long lastSuccessfulFailoverTime;
 
         FailoverState() {
             this.lastFailoverTime = 0;
             this.failoverCount = 0;
             this.currentCooldownMs = 0;
-            this.lastSuccessfulFailoverTime = 0;
         }
 
         /**
@@ -88,7 +85,6 @@ public class FailoverCoordinator {
          * 记录成功的故障转移，重置计数器
          */
         void recordSuccess() {
-            this.lastSuccessfulFailoverTime = System.currentTimeMillis();
             // 成功完成后，减少故障计数（但不完全清零）
             this.failoverCount = Math.max(0, failoverCount - 1);
             this.currentCooldownMs = 0;
@@ -139,7 +135,6 @@ public class FailoverCoordinator {
         this.baseFailoverCooldownMs = baseFailoverCooldownMs;
         this.maxFailoverCooldownMs = maxFailoverCooldownMs;
         this.failoverTimeoutMs = failoverTimeoutMs;
-        this.emergencyFailoverThresholdMs = emergencyFailoverThresholdMs;
 
         this.executor = Executors.newFixedThreadPool(3, r -> {
             Thread t = new Thread(r, "Failover-Worker");

@@ -24,8 +24,6 @@ import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -272,41 +270,6 @@ public class ParallelQueryExecutor {
         return projected;
     }
 
-    private List<Row> executeSingle(RegionLocation location, String sql) throws SQLException {
-        ManagedChannel channel = ManagedChannelBuilder
-            .forAddress(location.serverHost, location.serverPort)
-            .usePlaintext()
-            .build();
-
-        try {
-            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
-                RegionServerServiceGrpc.newBlockingStub(channel);
-            return scanAndEvaluate(location, stub, sql);
-        } finally {
-            channel.shutdown();
-        }
-    }
-
-    private List<Row> executeParallel(List<RegionLocation> locations, String sql) throws SQLException {
-        List<Future<List<Row>>> futures = new ArrayList<>();
-        for (RegionLocation location : locations) {
-            futures.add(executor.submit(() -> executeSingle(location, sql)));
-        }
-
-        List<Row> allRows = new ArrayList<>();
-        try {
-            for (Future<List<Row>> future : futures) {
-                allRows.addAll(future.get(queryTimeoutSeconds, TimeUnit.SECONDS));
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new SQLException("Query execution interrupted", e);
-        } catch (ExecutionException | TimeoutException e) {
-            throw new SQLException("Query execution failed: " + e.getMessage(), e);
-        }
-        return allRows;
-    }
-
     private List<com.minisql.common.model.Row> fetchSourceRows(String tableName,
                                                                byte[] rowKey,
                                                                Condition whereCondition,
@@ -358,109 +321,6 @@ public class ParallelQueryExecutor {
         } finally {
             channel.shutdown();
         }
-    }
-
-    private List<Row> scanAndEvaluate(RegionLocation location,
-                                      RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
-                                      String sql) throws SQLException {
-        SelectStatement select = parseSelect(sql);
-
-        Table schema = getTableSchema(location.tableName);
-        List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName, null, null);
-        List<com.minisql.common.model.Row> sourceRows = RowAssembler.assemble(keyValues, schema);
-
-        if (select.getWhere() != null) {
-            sourceRows = filterRows(sourceRows, select.getWhere());
-        }
-        if (select.getOrderBy() != null && !select.getOrderBy().isEmpty()) {
-            sourceRows.sort(createComparator(select.getOrderBy()));
-        }
-
-        int offset = select.getOffset() != null ? Math.max(0, select.getOffset()) : 0;
-        int limit = select.getLimit() != null ? select.getLimit() : -1;
-        List<String> resultColumns = determineResultColumns(select, schema);
-
-        List<Row> rows = new ArrayList<>();
-        for (int i = offset; i < sourceRows.size(); i++) {
-            if (limit >= 0 && rows.size() >= limit) {
-                break;
-            }
-
-            com.minisql.common.model.Row sourceRow = sourceRows.get(i);
-            Row row = new Row();
-            for (String columnName : resultColumns) {
-                row.addColumn(columnName, sourceRow.getColumn(columnName));
-            }
-            rows.add(row);
-        }
-        return rows;
-    }
-
-    private List<Row> executeJoinQuery(SelectStatement select) throws SQLException {
-        JoinSpec joinSpec = parseJoinSpec(select.getJoinCondition());
-
-        List<com.minisql.common.model.Row> leftRows = fetchSourceRows(select.getTable(), null, null, null, null);
-        List<com.minisql.common.model.Row> rightRows = fetchSourceRows(select.getJoinTable(), null, null, null, null);
-
-        Map<String, List<com.minisql.common.model.Row>> rightBuckets = new LinkedHashMap<>();
-        for (com.minisql.common.model.Row rightRow : rightRows) {
-            Object joinValue = rightRow.getColumn(joinSpec.rightColumn);
-            if (joinValue == null) {
-                continue;
-            }
-            rightBuckets.computeIfAbsent(String.valueOf(joinValue), ignored -> new ArrayList<>()).add(rightRow);
-        }
-
-        List<Row> joinedRows = new ArrayList<>();
-        for (com.minisql.common.model.Row leftRow : leftRows) {
-            Object joinValue = leftRow.getColumn(joinSpec.leftColumn);
-            if (joinValue == null) {
-                continue;
-            }
-
-            List<com.minisql.common.model.Row> candidates = rightBuckets.get(String.valueOf(joinValue));
-            if (candidates == null) {
-                continue;
-            }
-
-            for (com.minisql.common.model.Row rightRow : candidates) {
-                Row joined = mergeRows(leftRow, select.getTable(), rightRow, select.getJoinTable());
-                if (select.getWhere() == null || evaluateRow(joined, select.getWhere())) {
-                    joinedRows.add(joined);
-                }
-            }
-        }
-
-        if (select.getOrderBy() != null && !select.getOrderBy().isEmpty()) {
-            joinedRows.sort(ResultSetMerger.createComparator(
-                extractOrderByColumns(select.getOrderBy()),
-                extractOrderDirections(select.getOrderBy())
-            ));
-        }
-
-        int offset = select.getOffset() != null ? Math.max(0, select.getOffset()) : 0;
-        int limit = select.getLimit() != null ? select.getLimit() : -1;
-        List<String> resultColumns = determineJoinResultColumns(select, joinedRows);
-
-        List<Row> results = new ArrayList<>();
-        for (int i = offset; i < joinedRows.size(); i++) {
-            if (limit >= 0 && results.size() >= limit) {
-                break;
-            }
-
-            Row source = joinedRows.get(i);
-            if (select.isSelectAll()) {
-                results.add(source);
-                continue;
-            }
-
-            Row projected = new Row();
-            for (String column : resultColumns) {
-                projected.addColumn(column, source.getColumnValue(column));
-            }
-            results.add(projected);
-        }
-        return results;
     }
 
     private List<KeyValue> scanKeyValues(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
@@ -995,117 +855,6 @@ public class ParallelQueryExecutor {
         return value;
     }
 
-    private AggregationQuerySpec parseAggregationQuery(String sql) throws SQLException {
-        String normalized = sql.trim();
-        if (normalized.endsWith(";")) {
-            normalized = normalized.substring(0, normalized.length() - 1).trim();
-        }
-
-        String upper = normalized.toUpperCase();
-        if (!upper.startsWith("SELECT ")) {
-            throw new SQLException("Aggregation query must be a SELECT statement");
-        }
-
-        int fromIndex = upper.indexOf(" FROM ");
-        if (fromIndex < 0) {
-            throw new SQLException("Aggregation query is missing FROM");
-        }
-
-        String selectPart = normalized.substring("SELECT ".length(), fromIndex).trim();
-        int whereIndex = upper.indexOf(" WHERE ", fromIndex);
-        int groupByIndex = upper.indexOf(" GROUP BY ", fromIndex);
-        int orderByIndex = upper.indexOf(" ORDER BY ", fromIndex);
-        int limitIndex = upper.indexOf(" LIMIT ", fromIndex);
-        int offsetIndex = upper.indexOf(" OFFSET ", fromIndex);
-
-        int fromEnd = firstPositive(whereIndex, groupByIndex, orderByIndex, limitIndex, offsetIndex, normalized.length());
-        String tableName = normalized.substring(fromIndex + " FROM ".length(), fromEnd).trim();
-        if (tableName.isEmpty()) {
-            throw new SQLException("Aggregation query table name is empty");
-        }
-
-        String whereClause = extractClause(normalized, whereIndex, " WHERE ", groupByIndex, orderByIndex, limitIndex, offsetIndex);
-        String groupByClause = extractClause(normalized, groupByIndex, " GROUP BY ", orderByIndex, limitIndex, offsetIndex);
-        String orderByClause = extractClause(normalized, orderByIndex, " ORDER BY ", limitIndex, offsetIndex);
-        String limitClause = extractClause(normalized, limitIndex, " LIMIT ", offsetIndex);
-        String offsetClause = extractClause(normalized, offsetIndex, " OFFSET ");
-
-        AggregationQuerySpec spec = new AggregationQuerySpec();
-        spec.tableName = tableName;
-        spec.aggregateExpressions = new ArrayList<>();
-        spec.groupByColumns = splitCommaSeparated(groupByClause);
-        spec.orderByColumns = new ArrayList<>();
-        spec.orderAscending = new ArrayList<>();
-        spec.limit = limitClause == null || limitClause.isEmpty() ? -1 : Integer.parseInt(limitClause.trim());
-        spec.offset = offsetClause == null || offsetClause.isEmpty() ? 0 : Integer.parseInt(offsetClause.trim());
-        spec.whereCondition = parseWhereCondition(tableName, whereClause);
-
-        List<String> selectItems = splitCommaSeparated(selectPart);
-        for (String item : selectItems) {
-            AggregateExpression aggregate = parseAggregateExpression(item);
-            if (aggregate != null) {
-                spec.aggregateExpressions.add(aggregate);
-            } else if (!spec.groupByColumns.contains(item.trim())) {
-                throw new SQLException("Non-aggregate column must appear in GROUP BY: " + item.trim());
-            }
-        }
-
-        if (spec.aggregateExpressions.isEmpty()) {
-            throw new SQLException("No aggregate functions found in aggregation query");
-        }
-
-        if (orderByClause != null && !orderByClause.isEmpty()) {
-            for (String item : splitCommaSeparated(orderByClause)) {
-                String trimmed = item.trim();
-                boolean ascending = true;
-                String upperItem = trimmed.toUpperCase();
-                if (upperItem.endsWith(" DESC")) {
-                    ascending = false;
-                    trimmed = trimmed.substring(0, trimmed.length() - 5).trim();
-                } else if (upperItem.endsWith(" ASC")) {
-                    trimmed = trimmed.substring(0, trimmed.length() - 4).trim();
-                }
-                spec.orderByColumns.add(trimmed);
-                spec.orderAscending.add(ascending);
-            }
-        }
-
-        return spec;
-    }
-
-    private Condition parseWhereCondition(String tableName, String whereClause) throws SQLException {
-        if (whereClause == null || whereClause.isEmpty()) {
-            return null;
-        }
-
-        String syntheticSql = "SELECT * FROM " + tableName + " WHERE " + whereClause;
-        SelectStatement parsed = parseSelect(syntheticSql);
-        return parsed.getWhere();
-    }
-
-    private AggregateExpression parseAggregateExpression(String selectItem) {
-        String trimmed = selectItem.trim();
-        String alias = null;
-
-        Matcher aliasMatcher = Pattern.compile("(?i)^(.*?)(?:\\s+AS\\s+)([A-Za-z_][A-Za-z0-9_]*)$").matcher(trimmed);
-        if (aliasMatcher.matches()) {
-            trimmed = aliasMatcher.group(1).trim();
-            alias = aliasMatcher.group(2).trim();
-        }
-
-        Matcher aggregateMatcher = Pattern.compile("(?i)^(COUNT|SUM|AVG|MAX|MIN)\\s*\\((\\*|[A-Za-z_][A-Za-z0-9_]*)\\)$")
-            .matcher(trimmed);
-        if (!aggregateMatcher.matches()) {
-            return null;
-        }
-
-        AggregateExpression expression = new AggregateExpression();
-        expression.function = aggregateMatcher.group(1).toUpperCase();
-        expression.column = aggregateMatcher.group(2);
-        expression.outputName = alias != null ? alias : trimmed;
-        return expression;
-    }
-
     private String extractClause(String sql, int clauseIndex, String clauseKeyword, int... followingClauseIndexes) {
         if (clauseIndex < 0) {
             return null;
@@ -1237,24 +986,6 @@ public class ParallelQueryExecutor {
         return null;
     }
 
-    private boolean evaluateRow(Row row, Condition condition) {
-        return condition.evaluate(row);
-    }
-
-    private Comparator<com.minisql.common.model.Row> createComparator(List<SelectStatement.OrderByElement> orderBy) {
-        return (left, right) -> {
-            for (SelectStatement.OrderByElement element : orderBy) {
-                Object leftValue = left.getColumn(element.getColumn());
-                Object rightValue = right.getColumn(element.getColumn());
-                int cmp = compareValues(leftValue, rightValue);
-                if (cmp != 0) {
-                    return element.isAscending() ? cmp : -cmp;
-                }
-            }
-            return 0;
-        };
-    }
-
     @SuppressWarnings("unchecked")
     private int compareValues(Object left, Object right) {
         if (left == null && right == null) {
@@ -1270,70 +1001,6 @@ public class ParallelQueryExecutor {
             return ((Comparable<Object>) left).compareTo(right);
         }
         return left.toString().compareTo(right.toString());
-    }
-
-    private List<String> determineResultColumns(SelectStatement select, Table schema) {
-        if (select.isSelectAll() || select.getColumns() == null || select.getColumns().isEmpty()) {
-            if (schema == null || schema.getColumns() == null) {
-                return Collections.emptyList();
-            }
-            List<String> columns = new ArrayList<>();
-            for (Column column : schema.getColumns()) {
-                columns.add(column.getName());
-            }
-            return columns;
-        }
-
-        List<String> columns = new ArrayList<>();
-        for (String column : select.getColumns()) {
-            if (!"*".equals(column)) {
-                columns.add(column);
-            }
-        }
-        return columns;
-    }
-
-    private List<String> determineJoinResultColumns(SelectStatement select, List<Row> rows) {
-        if (select.isSelectAll() || select.getColumns() == null || select.getColumns().isEmpty()) {
-            if (rows.isEmpty()) {
-                return Collections.emptyList();
-            }
-            return rows.get(0).getColumnNames();
-        }
-
-        List<String> columns = new ArrayList<>();
-        for (String column : select.getColumns()) {
-            if (!"*".equals(column)) {
-                columns.add(column);
-            }
-        }
-        return columns;
-    }
-
-    private List<String> extractOrderByColumns(List<SelectStatement.OrderByElement> orderBy) {
-        List<String> columns = new ArrayList<>();
-        for (SelectStatement.OrderByElement element : orderBy) {
-            columns.add(element.getColumn());
-        }
-        return columns;
-    }
-
-    private List<Boolean> extractOrderDirections(List<SelectStatement.OrderByElement> orderBy) {
-        List<Boolean> directions = new ArrayList<>();
-        for (SelectStatement.OrderByElement element : orderBy) {
-            directions.add(element.isAscending());
-        }
-        return directions;
-    }
-
-    private JoinSpec parseJoinSpec(Condition condition) throws SQLException {
-        if (condition instanceof com.minisql.sql.ast.SimpleCondition) {
-            com.minisql.sql.ast.SimpleCondition simple = (com.minisql.sql.ast.SimpleCondition) condition;
-            if ("=".equals(simple.getOperator()) || "==".equals(simple.getOperator())) {
-                return new JoinSpec(simple.getColumn(), simple.getValue());
-            }
-        }
-        throw new SQLException("Only single-column equality JOIN is supported");
     }
 
     private com.minisql.common.model.Row mergeLogicalRows(com.minisql.common.model.Row leftRow,
@@ -1367,18 +1034,6 @@ public class ParallelQueryExecutor {
             }
         }
         return merged;
-    }
-
-    private Row mergeRows(com.minisql.common.model.Row leftRow,
-                          String leftTable,
-                          com.minisql.common.model.Row rightRow,
-                          String rightTable) {
-        com.minisql.common.model.Row merged = mergeLogicalRows(leftRow, leftTable, rightRow, rightTable, null);
-        Row row = new Row();
-        for (String columnName : merged.getColumnNames()) {
-            row.addColumn(columnName, merged.getColumn(columnName));
-        }
-        return row;
     }
 
     private List<Row> mergeAndSort(List<List<Row>> allResults,
@@ -1464,16 +1119,6 @@ public class ParallelQueryExecutor {
         }
     }
 
-    private Row readRow(ResultSet rs) throws SQLException {
-        Row row = new Row();
-        ResultSetMetaData metaData = rs.getMetaData();
-        int columnCount = metaData.getColumnCount();
-        for (int i = 1; i <= columnCount; i++) {
-            row.addColumn(metaData.getColumnLabel(i), rs.getObject(i));
-        }
-        return row;
-    }
-
     public void shutdown() {
         executor.shutdown();
         for (HikariDataSource ds : connectionPools.values()) {
@@ -1501,16 +1146,6 @@ public class ParallelQueryExecutor {
         public String getTableName() { return tableName; }
         public String getServerHost() { return serverHost; }
         public int getServerPort() { return serverPort; }
-    }
-
-    private static class JoinSpec {
-        private final String leftColumn;
-        private final String rightColumn;
-
-        private JoinSpec(String leftColumn, String rightColumn) {
-            this.leftColumn = leftColumn;
-            this.rightColumn = rightColumn;
-        }
     }
 
     private static class QuerySpec {
@@ -1583,17 +1218,6 @@ public class ParallelQueryExecutor {
             expression.outputName = outputName();
             return expression;
         }
-    }
-
-    private static class AggregationQuerySpec {
-        private String tableName;
-        private Condition whereCondition;
-        private List<String> groupByColumns;
-        private List<AggregateExpression> aggregateExpressions;
-        private List<String> orderByColumns;
-        private List<Boolean> orderAscending;
-        private int limit;
-        private int offset;
     }
 
     private static class AggregateExpression {

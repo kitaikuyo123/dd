@@ -161,10 +161,6 @@ public class SqlMetricsRegistry {
         );
     }
 
-    public Map<String, Long> tableRequestTotals(long windowMs) {
-        return aggregatePerTable(windowMs, false);
-    }
-
     public Map<String, Long> tableErrorTotals(long windowMs) {
         return aggregatePerTable(windowMs, true);
     }
@@ -185,7 +181,8 @@ public class SqlMetricsRegistry {
                 ? entry.getValue().tableErrorCounts
                 : entry.getValue().tableRequestCounts;
             for (Map.Entry<String, AtomicLong> tableEntry : tableMap.entrySet()) {
-                totals.merge(tableEntry.getKey(), tableEntry.getValue().get(), Long::sum);
+                totals.merge(tableEntry.getKey(), tableEntry.getValue().get(), (a, b) -> a + b);
+
             }
         }
         return totals;

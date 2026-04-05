@@ -22,8 +22,6 @@ public class DataVerifier {
     private final MySQLConfig sourceConfig;
     private final MySQLConfig targetConfig;
 
-    private static final int BATCH_SIZE = 1000;
-
     public DataVerifier(MySQLConfig sourceConfig, MySQLConfig targetConfig) {
         this.sourceConfig = sourceConfig;
         this.targetConfig = targetConfig;
@@ -108,11 +106,6 @@ public class DataVerifier {
                 return this;
             }
 
-            Builder inconsistentKeys(List<String> keys) {
-                this.inconsistentKeys = keys;
-                return this;
-            }
-
             VerificationResult build() {
                 return new VerificationResult(this);
             }
@@ -165,90 +158,6 @@ public class DataVerifier {
     }
 
     /**
-     * 逐行验证：最精确但最慢
-     * 可以发现具体的不一致数据
-     */
-    public VerificationResult verifyRowByRow(String regionId) throws SQLException {
-        // 先验证行数
-        VerificationResult rowResult = verifyRowCount(regionId);
-        if (!rowResult.isConsistent()) {
-            return rowResult;
-        }
-
-        List<String> inconsistentKeys = new ArrayList<>();
-
-        // 获取源数据
-        Map<String, RowData> sourceData = loadAllData(sourceConfig, regionId);
-        Map<String, RowData> targetData = loadAllData(targetConfig, regionId);
-
-        // 对比
-        for (Map.Entry<String, RowData> entry : sourceData.entrySet()) {
-            String key = entry.getKey();
-            RowData sourceRow = entry.getValue();
-            RowData targetRow = targetData.get(key);
-
-            if (targetRow == null) {
-                inconsistentKeys.add(key + " (missing in target)");
-            } else if (!sourceRow.equals(targetRow)) {
-                inconsistentKeys.add(key + " (data mismatch)");
-            }
-        }
-
-        // 检查目标中多出的数据
-        for (String key : targetData.keySet()) {
-            if (!sourceData.containsKey(key)) {
-                inconsistentKeys.add(key + " (extra in target)");
-            }
-        }
-
-        boolean consistent = inconsistentKeys.isEmpty();
-
-        return new VerificationResult.Builder()
-                .consistent(consistent)
-                .message(consistent ? "All rows match" :
-                        "Found " + inconsistentKeys.size() + " inconsistent rows")
-                .inconsistentKeys(inconsistentKeys)
-                .sourceCount(sourceData.size())
-                .targetCount(targetData.size())
-                .build();
-    }
-
-    /**
-     * 增量验证：验证从某个时间点以来的数据
-     * 适用于迁移过程中的持续验证
-     */
-    public VerificationResult verifyIncremental(String regionId, long fromTimestamp) throws SQLException {
-        long sourceCount = getRowCountSince(sourceConfig, regionId, fromTimestamp);
-        long targetCount = getRowCountSince(targetConfig, regionId, fromTimestamp);
-
-        boolean consistent = sourceCount == targetCount;
-
-        if (!consistent) {
-            return new VerificationResult.Builder()
-                    .consistent(false)
-                    .message("Incremental row count mismatch since " + fromTimestamp)
-                    .sourceCount(sourceCount)
-                    .targetCount(targetCount)
-                    .build();
-        }
-
-        // 计算增量 checksum
-        String sourceChecksum = calculateChecksumSince(sourceConfig, regionId, fromTimestamp);
-        String targetChecksum = calculateChecksumSince(targetConfig, regionId, fromTimestamp);
-
-        consistent = sourceChecksum.equals(targetChecksum);
-
-        return new VerificationResult.Builder()
-                .consistent(consistent)
-                .message(consistent ? "Incremental checksum matches" : "Incremental checksum mismatch")
-                .sourceChecksum(sourceChecksum)
-                .targetChecksum(targetChecksum)
-                .sourceCount(sourceCount)
-                .targetCount(targetCount)
-                .build();
-    }
-
-    /**
      * 获取行数
      */
     private long getRowCount(MySQLConfig config, String regionId) throws SQLException {
@@ -264,24 +173,6 @@ public class DataVerifier {
                 return rs.getLong(1);
             }
             return 0;
-        }
-    }
-
-    /**
-     * 获取指定时间点之后的行数
-     */
-    private long getRowCountSince(MySQLConfig config, String regionId, long timestamp) throws SQLException {
-        String sql = "SELECT COUNT(*) FROM kv_store WHERE timestamp >= ?";
-
-        try (Connection conn = config.createDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setLong(1, timestamp);
-            try (ResultSet rs = stmt.executeQuery(sql)) {
-                if (rs.next()) {
-                    return rs.getLong(1);
-                }
-                return 0;
-            }
         }
     }
 
@@ -317,103 +208,4 @@ public class DataVerifier {
         }
     }
 
-    /**
-     * 计算指定时间点之后的 checksum
-     */
-    private String calculateChecksumSince(MySQLConfig config, String regionId, long timestamp) throws SQLException {
-        String sql = "SELECT row_key, qualifier, timestamp, value FROM kv_store " +
-                     "WHERE timestamp >= ? ORDER BY row_key, qualifier, timestamp";
-
-        try (Connection conn = config.createDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setLong(1, timestamp);
-
-            MessageDigest md = MessageDigest.getInstance("MD5");
-
-            try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    byte[] rowKey = rs.getBytes("row_key");
-                    String qualifier = rs.getString("qualifier");
-                    long ts = rs.getLong("timestamp");
-                    byte[] value = rs.getBytes("value");
-
-                    md.update(rowKey != null ? rowKey : new byte[0]);
-                    md.update(qualifier != null ? qualifier.getBytes() : new byte[0]);
-                    md.update(java.nio.ByteBuffer.allocate(8).putLong(ts).array());
-                    md.update(value != null ? value : new byte[0]);
-                }
-            }
-
-            return BytesUtil.bytesToHex(md.digest()).replace(" ", "");
-        } catch (NoSuchAlgorithmException e) {
-            throw new SQLException("MD5 algorithm not available", e);
-        }
-    }
-
-    /**
-     * 加载所有数据用于逐行对比
-     */
-    private Map<String, RowData> loadAllData(MySQLConfig config, String regionId) throws SQLException {
-        Map<String, RowData> data = new HashMap<>();
-
-        String sql = "SELECT row_key, column_family, qualifier, timestamp, value, type FROM kv_store ORDER BY row_key";
-
-        try (Connection conn = config.createDataSource().getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-
-            while (rs.next()) {
-                byte[] rowKey = rs.getBytes("row_key");
-                String key = rowKey != null ? java.util.Base64.getEncoder().encodeToString(rowKey) : "";
-
-                RowData rowData = new RowData(
-                    rs.getString("column_family"),
-                    rs.getString("qualifier"),
-                    rs.getLong("timestamp"),
-                    rs.getBytes("value"),
-                    rs.getInt("type")
-                );
-
-                data.put(key, rowData);
-            }
-        }
-
-        return data;
-    }
-
-    /**
-     * 行数据
-     */
-    private static class RowData {
-        final String columnFamily;
-        final String qualifier;
-        final long timestamp;
-        final byte[] value;
-        final int type;
-
-        RowData(String columnFamily, String qualifier, long timestamp, byte[] value, int type) {
-            this.columnFamily = columnFamily;
-            this.qualifier = qualifier;
-            this.timestamp = timestamp;
-            this.value = value;
-            this.type = type;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (!(o instanceof RowData)) return false;
-            RowData rowData = (RowData) o;
-            return timestamp == rowData.timestamp &&
-                   type == rowData.type &&
-                   Objects.equals(columnFamily, rowData.columnFamily) &&
-                   Objects.equals(qualifier, rowData.qualifier) &&
-                   Arrays.equals(value, rowData.value);
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(columnFamily, qualifier, timestamp, type, Arrays.hashCode(value));
-        }
-    }
 }

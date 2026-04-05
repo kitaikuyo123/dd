@@ -1,13 +1,11 @@
 package com.minisql.common.utils;
 
 import com.minisql.common.model.Column;
-import com.minisql.common.model.Table;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * RowKey 序列化工具类
@@ -303,104 +301,5 @@ public class RowKeySerializer {
 
     public static Long deserializeTimestamp(byte[] bytes) {
         return deserializeLong(bytes);
-    }
-
-    /**
-     * 序列化 UUID
-     * UUID 是 128 位，使用两个 long 存储
-     */
-    public static byte[] serializeUUID(UUID uuid) {
-        ByteBuffer buffer = ByteBuffer.allocate(16);
-        buffer.putLong(uuid.getMostSignificantBits());
-        buffer.putLong(uuid.getLeastSignificantBits());
-        return buffer.array();
-    }
-
-    public static UUID deserializeUUID(byte[] bytes) {
-        if (bytes == null || bytes.length != 16) {
-            throw new IllegalArgumentException("UUID must be 16 bytes");
-        }
-        ByteBuffer buffer = ByteBuffer.wrap(bytes);
-        long most = buffer.getLong();
-        long least = buffer.getLong();
-        return new UUID(most, least);
-    }
-
-    /**
-     * 根据表结构序列化行键
-     * @param rowValues 行值（按列顺序）
-     * @param table 表元数据
-     * @return 序列化后的 rowKey
-     */
-    public static byte[] serializeRowKey(List<Object> rowValues, Table table) {
-        String pkName = table.getPrimaryKey();
-        if (pkName == null || pkName.isEmpty()) {
-            throw new IllegalArgumentException("Table must have a primary key");
-        }
-
-        // 查找主键列
-        Column pkColumn = null;
-        for (Column col : table.getColumns()) {
-            if (col.getName().equals(pkName)) {
-                pkColumn = col;
-                break;
-            }
-        }
-
-        if (pkColumn == null) {
-            throw new IllegalArgumentException("Primary key column not found: " + pkName);
-        }
-
-        // 单列主键
-        if (rowValues.size() == 1) {
-            return serialize(rowValues.get(0), pkColumn.getType());
-        }
-
-        // 复合主键 - 需要找到所有主键列
-        List<Object> pkValues = new ArrayList<>();
-        List<Column.ColumnType> pkTypes = new ArrayList<>();
-
-        // 简单处理：假设复合主键的列名以 "pk_" 开头或者就是前 N 列
-        // 实际实现需要根据表的复合主键定义来
-        for (int i = 0; i < rowValues.size() && i < table.getColumns().size(); i++) {
-            Column col = table.getColumns().get(i);
-            pkValues.add(rowValues.get(i));
-            pkTypes.add(col.getType());
-        }
-
-        return serializeComposite(pkValues, pkTypes);
-    }
-
-    /**
-     * 根据表结构和列名获取值
-     * @param row Row 对象
-     * @param table 表元数据
-     * @return 序列化后的 rowKey
-     */
-    public static byte[] serializeRowKeyFromRow(com.minisql.common.model.Row row, Table table) {
-        String pkName = table.getPrimaryKey();
-        if (pkName == null || pkName.isEmpty()) {
-            throw new IllegalArgumentException("Table must have a primary key");
-        }
-
-        // 查找主键列
-        Column pkColumn = null;
-        for (Column col : table.getColumns()) {
-            if (col.getName().equals(pkName)) {
-                pkColumn = col;
-                break;
-            }
-        }
-
-        if (pkColumn == null) {
-            throw new IllegalArgumentException("Primary key column not found: " + pkName);
-        }
-
-        Object pkValue = row.getColumn(pkName);
-        if (pkValue == null) {
-            throw new IllegalArgumentException("Primary key value is null");
-        }
-
-        return serialize(pkValue, pkColumn.getType());
     }
 }

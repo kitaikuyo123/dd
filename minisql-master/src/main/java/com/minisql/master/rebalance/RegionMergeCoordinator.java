@@ -273,8 +273,6 @@ public class RegionMergeCoordinator {
      * 将合并任务加入队列
      */
     private void scheduleMerge(Region left, Region right) {
-        String mergeKey = left.getRegionId() + "_" + right.getRegionId();
-
         MergeTask task = new MergeTask(
             left.getRegionId(),
             right.getRegionId(),
@@ -512,20 +510,17 @@ public class RegionMergeCoordinator {
     private static class MergeTask {
         private final String leftRegionId;
         private final String rightRegionId;
-        private final String tableName;
         private final ServerId serverId;
 
         public MergeTask(String leftRegionId, String rightRegionId,
                          String tableName, ServerId serverId) {
             this.leftRegionId = leftRegionId;
             this.rightRegionId = rightRegionId;
-            this.tableName = tableName;
             this.serverId = serverId;
         }
 
         public String getLeftRegionId() { return leftRegionId; }
         public String getRightRegionId() { return rightRegionId; }
-        public String getTableName() { return tableName; }
         public ServerId getServerId() { return serverId; }
     }
 

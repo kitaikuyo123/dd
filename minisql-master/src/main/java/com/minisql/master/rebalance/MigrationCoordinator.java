@@ -305,13 +305,6 @@ public class MigrationCoordinator {
         return new ServerId(protoId.getHost(), protoId.getPort());
     }
 
-    private CommonProto.ServerId toProtoServerId(ServerId internalId) {
-        return CommonProto.ServerId.newBuilder()
-                .setHost(internalId.getHost())
-                .setPort(internalId.getPort())
-                .build();
-    }
-
     /**
      * 关闭执行器
      */
@@ -332,13 +325,7 @@ public class MigrationCoordinator {
      */
     private static class MigrationTaskInfo {
         private final String migrationId;
-        private final String regionId;
-        private final ServerId source;
-        private final ServerId target;
         private volatile MigrationState state;
-        private final long createTime;
-        private long startTime;
-        private long endTime;
         private String errorMessage;
         private long totalRows;
         private volatile long migratedRows;
@@ -346,24 +333,12 @@ public class MigrationCoordinator {
 
         public MigrationTaskInfo(String migrationId, String regionId, ServerId source, ServerId target) {
             this.migrationId = migrationId;
-            this.regionId = regionId;
-            this.source = source;
-            this.target = target;
             this.state = MigrationState.PENDING;
-            this.createTime = System.currentTimeMillis();
         }
 
         public String getMigrationId() { return migrationId; }
-        public String getRegionId() { return regionId; }
-        public ServerId getSource() { return source; }
-        public ServerId getTarget() { return target; }
         public MigrationState getState() { return state; }
         public void setState(MigrationState state) { this.state = state; }
-        public long getCreateTime() { return createTime; }
-        public long getStartTime() { return startTime; }
-        public void setStartTime(long startTime) { this.startTime = startTime; }
-        public long getEndTime() { return endTime; }
-        public void setEndTime(long endTime) { this.endTime = endTime; }
         public String getErrorMessage() { return errorMessage; }
         public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
         public long getTotalRows() { return totalRows; }
@@ -373,21 +348,5 @@ public class MigrationCoordinator {
         public String getCurrentStage() { return currentStage; }
         public void setCurrentStage(String currentStage) { this.currentStage = currentStage; }
 
-        public com.minisql.common.proto.MigrationProto.MigrationTask toProto() {
-            return com.minisql.common.proto.MigrationProto.MigrationTask.newBuilder()
-                    .setMigrationId(migrationId)
-                    .setRegionId(regionId)
-                    .setSource(CommonProto.ServerId.newBuilder().setHost(source.getHost()).setPort(source.getPort()).build())
-                    .setTarget(CommonProto.ServerId.newBuilder().setHost(target.getHost()).setPort(target.getPort()).build())
-                    .setState(state)
-                    .setCreateTime(createTime)
-                    .setStartTime(startTime)
-                    .setEndTime(endTime)
-                    .setErrorMessage(errorMessage != null ? errorMessage : "")
-                    .setTotalRows(totalRows)
-                    .setMigratedRows(migratedRows)
-                    .setCurrentStage(currentStage != null ? currentStage : "")
-                    .build();
-        }
     }
 }

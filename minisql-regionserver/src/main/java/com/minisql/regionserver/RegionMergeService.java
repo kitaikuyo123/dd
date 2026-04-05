@@ -131,11 +131,8 @@ public class RegionMergeService {
         checkpoint.rightRegionId = rightRegionId;
         checkpoint.leftRegion = leftRegion;
         checkpoint.rightRegion = rightRegion;
-        checkpoint.leftStorage = leftStorage;
-        checkpoint.rightStorage = rightStorage;
         checkpoint.mergedRegionId = null;
         checkpoint.mergedStorage = null;
-        checkpoint.completed = false;
 
         try {
             // 1. 创建合并后的新 Region
@@ -177,8 +174,6 @@ public class RegionMergeService {
                 }
                 logger.info("Migrated {} entries from right region", rightCount);
 
-                // 数据迁移完成，标记检查点为已完成（不可回滚）
-                checkpoint.completed = true;
 
             } catch (Exception e) {
                 logger.error("Error migrating data during merge, rolling back...", e);
@@ -268,11 +263,8 @@ public class RegionMergeService {
         String rightRegionId;
         Region leftRegion;
         Region rightRegion;
-        MySQLRegionStorage leftStorage;
-        MySQLRegionStorage rightStorage;
         String mergedRegionId;
         MySQLRegionStorage mergedStorage;
-        boolean completed;  // 数据迁移是否已完成
     }
 
     /**

@@ -1,10 +1,7 @@
 package com.minisql.sql.execution;
 
-import com.minisql.common.model.KeyValue;
-
 import java.io.IOException;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
 
 /**
  * 查询执行算子基类

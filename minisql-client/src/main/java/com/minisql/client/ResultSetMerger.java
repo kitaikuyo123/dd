@@ -7,11 +7,9 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
-import java.util.Set;
 
 /**
  * 结果集合并器
@@ -378,7 +376,6 @@ public class ResultSetMerger {
                             // AVG 需要特殊处理，存储 sum 和 count
                             // 假设 AVG 结果是一个对象数组 {sum, count}
                             if (value instanceof Map) {
-                                @SuppressWarnings("unchecked")
                                 Map<String, Object> avgData = (Map<String, Object>) value;
                                 if (avgData.containsKey("sum")) {
                                     sum += ((Number) avgData.get("sum")).doubleValue();

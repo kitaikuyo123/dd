@@ -161,10 +161,6 @@ public class Router {
         return getMaster();
     }
 
-    private ServerAddress selectBestReadServer(RegionRouteInfo region) {
-        return selectBestReadServer(region, region.getRegionId(), null, defaultReadConsistency);
-    }
-
     private ServerAddress selectBestReadServer(RegionRouteInfo region,
                                                String tableName,
                                                byte[] rowKey,
@@ -213,23 +209,6 @@ public class Router {
             return region.getPrimaryServer();
         }
         return region.getPrimaryServer();
-    }
-
-    public ServerAddress routeToAny(String tableName) {
-        List<RegionRouteInfo> regions = routeCache.get(tableName);
-        if (regions == null || regions.isEmpty()) {
-            refreshRouteCache(tableName);
-            regions = routeCache.get(tableName);
-        }
-
-        if (regions != null && !regions.isEmpty()) {
-            // 随机选择（当前实现，最简单）
-            RegionRouteInfo region = regions.get(new Random().nextInt(regions.size()));
-            return selectBestReadServer(region);
-        }
-
-        // 返回默认地址
-        return new ServerAddress("localhost", 16020);
     }
 
     /**
@@ -327,30 +306,6 @@ public class Router {
             }
             logger.warn("Failed to refresh route cache: {}", e.getMessage(), e);
         }
-    }
-
-    /**
-     * 获取表的所有 Region
-     */
-    public List<Region> getRegionsForTable(String tableName) {
-        // 确保缓存是最新的
-        refreshRouteCache(tableName);
-
-        List<RegionRouteInfo> routeInfos = routeCache.get(tableName);
-        if (routeInfos == null) {
-            return new ArrayList<>();
-        }
-
-        List<Region> regions = new ArrayList<>();
-        for (RegionRouteInfo info : routeInfos) {
-            Region region = new Region();
-            region.setRegionId(info.getRegionId());
-            region.setTableName(tableName);
-            region.setStartKey(info.getStartKey());
-            region.setEndKey(info.getEndKey());
-            regions.add(region);
-        }
-        return regions;
     }
 
     /**

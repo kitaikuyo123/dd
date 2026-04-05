@@ -1,7 +1,5 @@
 package com.minisql.client.cli;
 
-import com.minisql.client.MiniSQLConnection;
-
 import java.io.*;
 import java.sql.*;
 import java.util.*;

@@ -16,13 +16,10 @@ public class ReplicaMonitor {
 
     private static final Logger logger = LoggerFactory.getLogger(ReplicaMonitor.class);
 
-    private final ClusterManager clusterManager;
     private final ScheduledExecutorService scheduler;
     private final Map<String, List<ReplicaInfo>> regionReplicas = new ConcurrentHashMap<>();
 
     // 配置参数
-    private final long heartbeatIntervalMs;
-    private final long heartbeatTimeoutMs;
     private final long replicationLagThresholdMs;
     private final long healthCheckIntervalMs;
 
@@ -45,9 +42,6 @@ public class ReplicaMonitor {
                           long heartbeatTimeoutMs,
                           long replicationLagThresholdMs,
                           long healthCheckIntervalMs) {
-        this.clusterManager = clusterManager;
-        this.heartbeatIntervalMs = heartbeatIntervalMs;
-        this.heartbeatTimeoutMs = heartbeatTimeoutMs;
         this.replicationLagThresholdMs = replicationLagThresholdMs;
         this.healthCheckIntervalMs = healthCheckIntervalMs;
 
@@ -204,19 +198,6 @@ public class ReplicaMonitor {
      */
     public void removeCallback(FailoverCallback callback) {
         callbacks.remove(callback);
-    }
-
-    /**
-     * 通知副本故障
-     */
-    private void notifyReplicaFailed(String regionId, ServerId failedReplica) {
-        for (FailoverCallback callback : callbacks) {
-            try {
-                callback.onReplicaFailed(regionId, failedReplica);
-            } catch (Exception e) {
-                logger.error("Error in failover callback: {}", e.getMessage(), e);
-            }
-        }
     }
 
     /**

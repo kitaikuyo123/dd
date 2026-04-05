@@ -63,7 +63,7 @@ public class KeyValueVisibilityResolver {
                 if (isRowDeleteMarker(kv)) {
                     rowDeleteTimestamp = Math.max(rowDeleteTimestamp, kv.getTimestamp());
                 } else {
-                    columnDeleteTimestamps.merge(columnKey, kv.getTimestamp(), Math::max);
+                    columnDeleteTimestamps.merge(columnKey, kv.getTimestamp(), (a, b) -> Math.max(a, b));
                 }
                 return;
             }

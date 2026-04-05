@@ -4,7 +4,6 @@ import com.minisql.common.Constants;
 import com.minisql.common.model.*;
 import com.minisql.common.proto.*;
 import com.minisql.common.utils.BytesUtil;
-import com.minisql.common.utils.RowKeySerializer;
 import com.minisql.sql.SQLParser;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
@@ -335,40 +334,6 @@ public class MiniSQLConnection implements Connection {
             || isAggregationQuery(sql);
     }
 
-    private String extractTableNameFromSelect(String sql) throws SQLException {
-        String normalized = sql.trim();
-        if (normalized.endsWith(";")) {
-            normalized = normalized.substring(0, normalized.length() - 1).trim();
-        }
-
-        String upper = normalized.toUpperCase();
-        int fromIndex = upper.indexOf(" FROM ");
-        if (fromIndex < 0) {
-            throw new SQLException("SELECT query is missing FROM");
-        }
-
-        int endIndex = normalized.length();
-        for (String clause : new String[]{" WHERE ", " GROUP BY ", " ORDER BY ", " LIMIT ", " OFFSET "}) {
-            int clauseIndex = upper.indexOf(clause, fromIndex);
-            if (clauseIndex >= 0 && clauseIndex < endIndex) {
-                endIndex = clauseIndex;
-            }
-        }
-
-        String tableName = normalized.substring(fromIndex + " FROM ".length(), endIndex).trim();
-        if (tableName.isEmpty()) {
-            throw new SQLException("SELECT query table name is empty");
-        }
-        return tableName;
-    }
-
-    /**
-     * 将 Row 列表转换为 ResultSet
-     */
-    private ResultSet convertToResultSet(List<com.minisql.sql.execution.Row> rows) {
-        return convertToResultSet(rows, null, null);
-    }
-
     /**
      * 将 Row 列表转换为 ResultSet（带表名和列名信息）
      */
@@ -458,19 +423,7 @@ public class MiniSQLConnection implements Connection {
     }
 
     /**
-     * 字节数组转换为字符串（尝试多种编码）
-     */
-    private String bytesToString(byte[] bytes) {
-        if (bytes == null) return null;
-        try {
-            return new String(bytes, "UTF-8");
-        } catch (Exception e) {
-            return java.util.Base64.getEncoder().encodeToString(bytes);
-        }
-    }
-
-    /**
-     * 执行更新操作
+     * 将 Row 列表转换为 ResultSet（带表名和列名信息）
      */
     public int executeUpdate(String sql) throws SQLException {
         checkClosed();

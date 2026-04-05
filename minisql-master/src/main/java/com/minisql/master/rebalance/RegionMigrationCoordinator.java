@@ -270,8 +270,6 @@ public class RegionMigrationCoordinator {
     }
 
     private void updateMigrationState(MigrationStatus status, MigrationState state, String detail) {
-        status.state = state;
-        status.detail = detail;
         logger.info("[MIGRATION] region={} source={} target={} state={}{}",
                 status.regionId, status.sourceServer, status.targetServer, state,
                 (detail != null && !detail.isEmpty() ? " detail=" + detail : ""));
@@ -382,14 +380,11 @@ public class RegionMigrationCoordinator {
         private final String regionId;
         private final ServerId sourceServer;
         private final ServerId targetServer;
-        private volatile MigrationState state;
-        private volatile String detail;
 
         private MigrationStatus(String regionId, ServerId sourceServer, ServerId targetServer, MigrationState state) {
             this.regionId = regionId;
             this.sourceServer = sourceServer;
             this.targetServer = targetServer;
-            this.state = state;
         }
     }
 }

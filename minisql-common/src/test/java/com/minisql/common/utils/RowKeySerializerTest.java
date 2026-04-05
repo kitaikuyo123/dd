@@ -1,7 +1,6 @@
 package com.minisql.common.utils;
 
 import com.minisql.common.model.Column;
-import com.minisql.common.model.Table;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

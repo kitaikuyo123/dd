@@ -1,7 +1,5 @@
 package com.minisql.sql;
 
-import com.minisql.sql.ast.*;
-
 import java.util.ArrayList;
 import java.util.List;
 

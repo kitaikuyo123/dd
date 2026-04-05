@@ -305,10 +305,6 @@ public class HotSpotCoordinator {
             return null;
         }
 
-        long requestPressure = hotSpots.containsKey(regionId)
-            ? hotSpots.get(regionId).getRequestCount()
-            : 0L;
-
         // 只使用 ADD_READ_REPLICA 动作
         // MOVE_REGION 暂未完整实现（缺少通知 RegionServer 的逻辑），暂时禁用
         HotSpotAction addReplicaAction = new HotSpotAction(regionId, HotSpotActionType.ADD_READ_REPLICA,

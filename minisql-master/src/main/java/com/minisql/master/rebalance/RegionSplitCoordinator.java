@@ -28,9 +28,6 @@ public class RegionSplitCoordinator {
     // 分裂阈值：单个 Region 最大大小（默认 10GB）
     private static final long SPLIT_THRESHOLD_SIZE = 10L * 1024 * 1024 * 1024;
 
-    // 最小分裂大小：小于此值不分裂（避免过度分裂，默认 1GB）
-    private static final long MIN_SPLIT_SIZE = 1L * 1024 * 1024 * 1024;
-
     // 待分裂的 Region 队列
     private final BlockingQueue<SplitTask> splitQueue = new LinkedBlockingQueue<>();
 
@@ -443,22 +440,17 @@ public class RegionSplitCoordinator {
      */
     private static class SplitTask {
         private final String regionId;
-        private final String tableName;
         private final ServerId serverId;
-        private final ClusterManager.RegionLoad load;
 
         public SplitTask(String regionId, String tableName,
                          ServerId serverId, ClusterManager.RegionLoad load) {
             this.regionId = regionId;
-            this.tableName = tableName;
             this.serverId = serverId;
-            this.load = load;
         }
 
         public String getRegionId() { return regionId; }
-        public String getTableName() { return tableName; }
         public ServerId getServerId() { return serverId; }
-        public ClusterManager.RegionLoad getLoad() { return load; }
+
     }
 
     /**

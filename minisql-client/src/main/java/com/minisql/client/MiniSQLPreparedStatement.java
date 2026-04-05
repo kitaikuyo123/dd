@@ -16,12 +16,10 @@ import java.util.Map;
 public class MiniSQLPreparedStatement extends MiniSQLStatement implements PreparedStatement {
 
     private final String originalSql;
-    private final MiniSQLConnection connection;
     private final Map<Integer, Object> parameters;
 
     public MiniSQLPreparedStatement(MiniSQLConnection connection, String sql) {
         super(connection);
-        this.connection = connection;
         this.originalSql = sql;
         this.parameters = new HashMap<>();
     }

@@ -19,7 +19,6 @@ public class JoinOperator extends Operator {
 
     private final Operator left;
     private final Operator right;
-    private final QueryPlan.JoinType joinType;
     private final JoinCondition condition;
     private final JoinAlgorithm algorithm;
 
@@ -36,7 +35,6 @@ public class JoinOperator extends Operator {
                         JoinCondition condition, JoinAlgorithm algorithm) {
         this.left = left;
         this.right = right;
-        this.joinType = joinType;
         this.condition = condition;
         this.algorithm = algorithm;
     }
