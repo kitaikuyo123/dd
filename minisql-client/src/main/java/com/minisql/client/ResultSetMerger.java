@@ -316,9 +316,7 @@ public class ResultSetMerger {
     public static class AggregationState {
         private long count = 0;
         private double sum = 0;
-        private Object max = null;
-        private Object min = null;
-        private java.util.Set<Object> distinctValues = new java.util.HashSet<>();
+        private Object max, min;
         private final List<AggregateFunction> functions;
 
         AggregationState(List<AggregateFunction> functions) {

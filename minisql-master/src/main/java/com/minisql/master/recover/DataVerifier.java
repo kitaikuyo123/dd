@@ -1,5 +1,6 @@
 package com.minisql.master.recover;
 
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.storage.MySQLConfig;
 
 import java.security.MessageDigest;
@@ -310,7 +311,7 @@ public class DataVerifier {
                 md.update(value != null ? value : new byte[0]);
             }
 
-            return bytesToHex(md.digest());
+            return BytesUtil.bytesToHex(md.digest()).replace(" ", "");
         } catch (NoSuchAlgorithmException e) {
             throw new SQLException("MD5 algorithm not available", e);
         }
@@ -343,7 +344,7 @@ public class DataVerifier {
                 }
             }
 
-            return bytesToHex(md.digest());
+            return BytesUtil.bytesToHex(md.digest()).replace(" ", "");
         } catch (NoSuchAlgorithmException e) {
             throw new SQLException("MD5 algorithm not available", e);
         }
@@ -414,16 +415,5 @@ public class DataVerifier {
         public int hashCode() {
             return Objects.hash(columnFamily, qualifier, timestamp, type, Arrays.hashCode(value));
         }
-    }
-
-    /**
-     * byte 数组转十六进制字符串
-     */
-    private String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 }

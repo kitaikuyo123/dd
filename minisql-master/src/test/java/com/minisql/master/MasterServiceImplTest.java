@@ -6,7 +6,6 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.model.Table;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.MasterProto;
-import com.minisql.master.detect.ServerFailedEvent;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.recover.FailoverCoordinator;
 import com.minisql.master.recover.RecoveryCoordinator;
@@ -221,7 +220,7 @@ class MasterServiceImplTest {
             lifecycleManager
         );
 
-        service.handleServerFailureEvent(new ServerFailedEvent(failedPrimary, List.of(region.getRegionId())));
+        service.recoverRegionAfterServerFailure(region.getRegionId(), failedPrimary, true);
 
         waitFor(() -> failoverCoordinator.triggeredRegionId != null
             && recoveryCoordinator.bootstrappedRegionId != null, 1000L);

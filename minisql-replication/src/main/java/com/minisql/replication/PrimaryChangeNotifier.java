@@ -9,6 +9,8 @@ import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
@@ -17,6 +19,8 @@ import java.util.concurrent.TimeUnit;
  * Publishes primary changes to ZooKeeper and Master.
  */
 public class PrimaryChangeNotifier {
+
+    private static final Logger logger = LoggerFactory.getLogger(PrimaryChangeNotifier.class);
 
     private ZkClient zkClient;
 
@@ -55,10 +59,10 @@ public class PrimaryChangeNotifier {
                     .build()
             );
             if (!response.getStatus().getSuccess()) {
-                System.err.println("Master notification failed: " + response.getStatus().getMessage());
+                logger.warn("Master notification failed: {}", response.getStatus().getMessage());
             }
         } catch (Exception e) {
-            System.err.println("Failed to notify Master about primary change: " + e.getMessage());
+            logger.warn("Failed to notify Master about primary change: {}", e.getMessage());
         } finally {
             channel.shutdown();
         }
@@ -74,7 +78,7 @@ public class PrimaryChangeNotifier {
                 return ZkPayloads.decodeLeaderAddress(zkClient.getData(masterPath));
             }
         } catch (Exception e) {
-            System.err.println("Failed to read master address from ZooKeeper: " + e.getMessage());
+            logger.warn("Failed to read master address from ZooKeeper: {}", e.getMessage());
         }
         return null;
     }

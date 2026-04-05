@@ -124,12 +124,6 @@ public class KeyValueConverter {
      * @return rowKey 字节数组
      */
     public static byte[] createRowKey(Object pkValue, Table schema) {
-        // 优先使用分区键
-        List<String> partitionKeys = schema.getPartitionKeys();
-        if (partitionKeys != null && !partitionKeys.isEmpty()) {
-            return createRowKeyFromPartitionKeys(partitionKeys, schema);
-        }
-
         // 向后兼容：单列主键
         String pkName = schema.getPrimaryKey();
         if (pkName == null || pkName.isEmpty()) {
@@ -212,15 +206,6 @@ public class KeyValueConverter {
     }
 
     /**
-     * 从分区键创建 RowKey（内部方法）
-     */
-    private static byte[] createRowKeyFromPartitionKeys(List<String> partitionKeys, Table schema) {
-        // 这个方法需要实际的分区键值，通常由调用者提供
-        // 这里提供一个基于 Row 的实现在上面
-        throw new UnsupportedOperationException("Use createRowKeyFromRow() instead");
-    }
-
-    /**
      * 从 Row 中提取主键值
      */
     public static Object extractPrimaryKeyValue(Row row, Table schema) {
@@ -261,15 +246,6 @@ public class KeyValueConverter {
      */
     private static byte[] serializeValue(Object value, Column.ColumnType type) {
         return RowKeySerializer.serialize(value, type);
-    }
-
-    private static String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X ", b));
-        }
-        return sb.toString();
     }
 
     /**

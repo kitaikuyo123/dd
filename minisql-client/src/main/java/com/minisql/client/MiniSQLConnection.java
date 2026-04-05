@@ -3,6 +3,7 @@ package com.minisql.client;
 import com.minisql.common.Constants;
 import com.minisql.common.model.*;
 import com.minisql.common.proto.*;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.common.utils.RowKeySerializer;
 import com.minisql.sql.SQLParser;
 import com.minisql.zookeeper.ZkClient;
@@ -30,8 +31,6 @@ public class MiniSQLConnection implements Connection {
 
     private static final Logger logger = LoggerFactory.getLogger(MiniSQLConnection.class);
 
-    // private final String url;
-    // private final Properties info;
     private boolean closed = false;
     private boolean autoCommit = true;
 
@@ -41,9 +40,6 @@ public class MiniSQLConnection implements Connection {
 
     // ZooKeeper 客户端
     private ZkClient zkClient;
-
-    // Master 连接管理器（支持自动重连）
-    private MasterConnectionManager masterConnectionManager;
 
     // Master 连接（直接使用）
     private ManagedChannel masterChannel;
@@ -75,8 +71,6 @@ public class MiniSQLConnection implements Connection {
     });
 
     public MiniSQLConnection(String url, Properties info) throws SQLException {
-        // this.url = url;
-        // this.info = info;
         this.router = new Router();
 
         // 解析 URL 获取 ZooKeeper 地址
@@ -1192,10 +1186,6 @@ public class MiniSQLConnection implements Connection {
     }
 
     // Getter methods
-    public ZkClient getZkClient() {
-        return zkClient;
-    }
-
     public Router getRouter() {
         return router;
     }
@@ -1369,7 +1359,7 @@ public class MiniSQLConnection implements Connection {
         if (regions != null && !regions.isEmpty()) {
             // 根据 rowKey 找到对应的 Region
             for (Router.RegionRouteInfo region : regions) {
-                if (isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
+                if (BytesUtil.isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
                     return region.getRegionId();
                 }
             }
@@ -1379,31 +1369,6 @@ public class MiniSQLConnection implements Connection {
 
         // 兜底：返回硬编码的 RegionId（可能会导致错误，但保持向后兼容）
         return "region-" + tableName;
-    }
-
-    /**
-     * 检查 rowKey 是否在指定范围内
-     */
-    private boolean isKeyInRange(byte[] rowKey, byte[] startKey, byte[] endKey) {
-        if (startKey != null && compareBytes(rowKey, startKey) < 0) {
-            return false;
-        }
-        if (endKey != null && compareBytes(rowKey, endKey) >= 0) {
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * 比较字节数组
-     */
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = (a[i] & 0xFF) - (b[i] & 0xFF);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
     }
 
     private String detectSqlType(String sql) {

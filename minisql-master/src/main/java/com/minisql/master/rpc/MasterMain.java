@@ -3,11 +3,6 @@ package com.minisql.master.rpc;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
-import com.minisql.master.detect.ClusterEventCoordinator;
-import com.minisql.master.detect.HotSpotActionEvent;
-import com.minisql.master.detect.RegionSplitSuggestedEvent;
-import com.minisql.master.detect.ServerFailedEvent;
-import com.minisql.master.detect.ServerFailureDetector;
 import com.minisql.master.monitoring.MonitorHttpServer;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.monitoring.SqlConsoleService;
@@ -57,8 +52,6 @@ public class MasterMain {
     private MetadataManager metadataManager;
     private LoadBalancer loadBalancer;
     private ReplicationCoordinator replicationCoordinator;
-    private ServerFailureDetector serverFailureDetector;
-    private ClusterEventCoordinator clusterEventCoordinator;
     private ReplicaMonitor replicaMonitor;
     private FailoverCoordinator failoverCoordinator;
     private RecoveryCoordinator recoveryCoordinator;
@@ -215,10 +208,6 @@ public class MasterMain {
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
 
-        serverFailureDetector = new ServerFailureDetector(clusterManager, metadataManager, loadBalancer);
-        serverFailureDetector.setLifecycleManager(replicaLifecycleManager);
-        serverFailureDetector.setMonitoringService(monitoringService);
-
         dataRepairCoordinator = new DataRepairCoordinator(clusterManager, metadataManager);
         logger.info("Components initialized (replication factor: {})", replicationFactor);
     }
@@ -299,15 +288,6 @@ public class MasterMain {
         serviceImpl.setZkClient(zkClient);
         serviceImpl.setLeader(false);
 
-        clusterEventCoordinator = new ClusterEventCoordinator();
-        clusterEventCoordinator.registerHandler(HotSpotActionEvent.class, event -> serviceImpl.handleHotSpotAction(event.getAction()));
-        clusterEventCoordinator.registerHandler(RegionSplitSuggestedEvent.class, serviceImpl::handleRegionSplitSuggestion);
-        clusterEventCoordinator.registerHandler(ServerFailedEvent.class, serviceImpl::handleServerFailureEvent);
-        clusterEventCoordinator.registerDetector(serverFailureDetector);
-        clusterEventCoordinator.registerDetector(serviceImpl.getRegionSplitDetector());
-        clusterEventCoordinator.registerDetector(serviceImpl.getHotSpotDetector());
-        clusterEventCoordinator.start();
-
         grpcServer = ServerBuilder.forPort(port)
             .addService(serviceImpl)
             .build()
@@ -368,7 +348,12 @@ public class MasterMain {
                 clusterManager.removeServer(serverId);
                 logger.warn("RegionServer removed from ZooKeeper: {} affectedRegions={}", serverId, affectedRegions);
                 if (serviceImpl != null && !affectedRegions.isEmpty()) {
-                    serviceImpl.handleServerFailureEvent(new ServerFailedEvent(serverId, affectedRegions));
+                    // 处理每个受影响的 Region
+                    for (String regionId : affectedRegions) {
+                        ServerId primaryServer = clusterManager.getPrimaryServerForRegion(regionId);
+                        boolean primaryFailed = serverId.equals(primaryServer);
+                        serviceImpl.recoverRegionAfterServerFailure(regionId, serverId, primaryFailed);
+                    }
                 }
             }
         });
@@ -427,9 +412,6 @@ public class MasterMain {
         }
         if (failoverCoordinator != null) {
             failoverCoordinator.shutdown();
-        }
-        if (clusterEventCoordinator != null) {
-            clusterEventCoordinator.stop();
         }
         if (replicaMonitor != null) {
             replicaMonitor.stop();

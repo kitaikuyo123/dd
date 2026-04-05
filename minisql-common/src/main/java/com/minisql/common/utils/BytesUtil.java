@@ -142,4 +142,42 @@ public class BytesUtil {
         }
         return true;
     }
+
+    /**
+     * 将字节数组转换为十六进制字符串
+     * @param bytes 字节数组
+     * @return 十六进制字符串，每个字节用两位表示，空格分隔
+     */
+    public static String bytesToHex(byte[] bytes) {
+        if (bytes == null) {
+            return "null";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02X ", b));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 检查 key 是否在指定范围内
+     * @param key 要检查的键
+     * @param startKey 范围起始键（包含），null 表示无下界
+     * @param endKey 范围结束键（不包含），null 表示无上界
+     * @return 如果 key 在范围内返回 true
+     */
+    public static boolean isKeyInRange(byte[] key, byte[] startKey, byte[] endKey) {
+        if (key == null) {
+            return false;
+        }
+        // 检查下界
+        if (startKey != null && compareTo(key, startKey) < 0) {
+            return false;
+        }
+        // 检查上界
+        if (endKey != null && compareTo(key, endKey) >= 0) {
+            return false;
+        }
+        return true;
+    }
 }

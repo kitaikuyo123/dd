@@ -17,12 +17,15 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Persistent write-ahead log for replication.
  */
 public class ReplicationWAL implements AutoCloseable {
 
+    private static final Logger logger = LoggerFactory.getLogger(ReplicationWAL.class);
     private static final Gson GSON = new Gson();
     private static final Type MUTATION_LIST_TYPE = new TypeToken<List<MutationRecord>>() { }.getType();
 
@@ -70,7 +73,7 @@ public class ReplicationWAL implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
-            System.err.println("Failed to load sequenceId for region " + regionId + ": " + e.getMessage());
+            logger.warn("Failed to load sequenceId for region {}: {}", regionId, e.getMessage());
         }
 
         sequenceIdCache.put(regionId, 0L);
@@ -194,7 +197,7 @@ public class ReplicationWAL implements AutoCloseable {
             try {
                 ((AutoCloseable) dataSource).close();
             } catch (Exception e) {
-                System.err.println("Failed to close WAL data source: " + e.getMessage());
+                logger.warn("Failed to close WAL data source: {}", e.getMessage());
             }
         }
     }

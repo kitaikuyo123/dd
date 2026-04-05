@@ -8,6 +8,8 @@ import com.minisql.master.recover.DataVerifier;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.storage.MySQLConfig;
 import io.grpc.stub.StreamObserver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,6 +23,8 @@ import static com.minisql.common.proto.MigrationProto.*;
  * 负责调度和管理 Region 迁移任务
  */
 public class MigrationCoordinator {
+
+    private static final Logger logger = LoggerFactory.getLogger(MigrationCoordinator.class);
 
     private final ClusterManager clusterManager;
     private final ExecutorService executor;
@@ -193,7 +197,7 @@ public class MigrationCoordinator {
             throw new RuntimeException("Data verification failed: " + checksumResult.getMessage());
         }
 
-        System.out.println("Data verification completed successfully for region: " + regionId);
+        logger.info("Data verification completed successfully for region: {}", regionId);
     }
 
     /**

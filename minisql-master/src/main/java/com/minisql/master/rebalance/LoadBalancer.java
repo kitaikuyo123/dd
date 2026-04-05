@@ -41,8 +41,7 @@ public class LoadBalancer {
      */
     public static class LoadCalculator {
 
-        // 权重配置 (剔除 CPU，重分配权重)
-        private static final double CPU_WEIGHT = 0.0;
+        // 权重配置
         private static final double MEMORY_WEIGHT = 0.3;
         private static final double DISK_WEIGHT = 0.3;
         private static final double REGION_COUNT_WEIGHT = 0.2;
@@ -66,28 +65,24 @@ public class LoadBalancer {
                 return regionLoads.size() * 10.0;
             }
 
-            // 1. CPU 使用率（0-100）
-            double cpuScore = metrics.getCpuUsage();
-
-            // 2. 内存使用率（0-100）
+            // 1. 内存使用率（0-100）
             double memoryScore = metrics.getMemoryUsage();
 
-            // 3. 磁盘使用率（0-100）
+            // 2. 磁盘使用率（0-100）
             double diskUsage = 0;
             if (metrics.getTotalSpace() > 0) {
                 diskUsage = 100.0 * (metrics.getTotalSpace() - metrics.getAvailableSpace()) / metrics.getTotalSpace();
             }
             double diskScore = diskUsage;
 
-            // 4. Region 数量分数（假设最大承载 100 个 Region）
+            // 3. Region 数量分数（假设最大承载 100 个 Region）
             double regionScore = Math.min(100, regionLoads.size() * 100.0 / 100);
 
-            // 5. 请求负载分数
+            // 4. 请求负载分数
             double requestScore = calculateRequestScore(server);
 
             // 加权计算综合分数
-            return cpuScore * CPU_WEIGHT +
-                   memoryScore * MEMORY_WEIGHT +
+            return memoryScore * MEMORY_WEIGHT +
                    diskScore * DISK_WEIGHT +
                    regionScore * REGION_COUNT_WEIGHT +
                    requestScore * REQUEST_WEIGHT;

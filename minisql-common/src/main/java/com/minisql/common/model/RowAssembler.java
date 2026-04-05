@@ -246,15 +246,6 @@ public class RowAssembler {
         return RowKeySerializer.deserialize(valueBytes, type);
     }
 
-    private static String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X ", b));
-        }
-        return sb.toString();
-    }
-
     /**
      * 查找列类型
      */

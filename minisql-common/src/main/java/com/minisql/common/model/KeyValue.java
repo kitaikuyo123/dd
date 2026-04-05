@@ -1,5 +1,7 @@
 package com.minisql.common.model;
 
+import com.minisql.common.utils.BytesUtil;
+
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Objects;
@@ -171,7 +173,7 @@ public class KeyValue implements Serializable, Comparable<KeyValue> {
     @Override
     public int compareTo(KeyValue other) {
         // 先比较rowKey
-        int cmp = compareBytes(this.rowKey, other.rowKey);
+        int cmp = BytesUtil.compareTo(this.rowKey, other.rowKey);
         if (cmp != 0) return cmp;
 
         // 再比较family
@@ -184,15 +186,6 @@ public class KeyValue implements Serializable, Comparable<KeyValue> {
 
         // 最后比较timestamp（倒序，新的在前）
         return Long.compare(other.timestamp, this.timestamp);
-    }
-
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = Byte.compare(a[i], b[i]);
-            if (cmp != 0) return cmp;
-        }
-        return Integer.compare(a.length, b.length);
     }
 
     @Override

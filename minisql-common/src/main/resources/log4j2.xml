@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    MiniSQL Log4j2 配置文件
+
+    放在 minisql-common/src/main/resources/ 目录下，
+    因为 minisql-common 是所有模块的基础依赖，
+    这样所有模块都能共享同一个日志配置。
+
+    日志级别说明：
+    - TRACE: 最详细的调试信息
+    - DEBUG: 调试信息
+    - INFO: 重要业务信息（默认级别）
+    - WARN: 警告但不影响运行
+    - ERROR: 错误需要关注
+    - FATAL: 严重错误
+-->
+<Configuration status="WARN">
+
+    <!-- 定义变量 -->
+    <Properties>
+        <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</Property>
+        <Property name="LOG_DIR">logs</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- 控制台输出 -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+        </Console>
+
+        <!-- 滚动文件输出（可选，用于生产环境） -->
+        <!--
+        <RollingFile name="File" fileName="${LOG_DIR}/minisql.log"
+                     filePattern="${LOG_DIR}/minisql-%d{yyyy-MM-dd}-%i.log">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <SizeBasedTriggeringPolicy size="100MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+        -->
+    </Appenders>
+
+    <Loggers>
+        <!-- MiniSQL 包日志 - INFO 级别 -->
+        <Logger name="com.minisql" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- Master 模块日志 -->
+        <Logger name="com.minisql.master" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- RegionServer 模块日志 -->
+        <Logger name="com.minisql.regionserver" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- 复制模块日志 -->
+        <Logger name="com.minisql.replication" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- 客户端模块日志 -->
+        <Logger name="com.minisql.client" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- SQL 解析模块日志 -->
+        <Logger name="com.minisql.sql" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- 存储模块日志 -->
+        <Logger name="com.minisql.storage" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- ZooKeeper 相关日志 - 降低级别避免过多输出 -->
+        <Logger name="org.apache.zookeeper" level="WARN" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+        <Logger name="org.apache.curator" level="WARN" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- gRPC 相关日志 - 降低级别 -->
+        <Logger name="io.grpc" level="WARN" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- Hikari 连接池日志 -->
+        <Logger name="com.zaxxer.hikari" level="WARN" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- 根日志配置 - INFO 级别 -->
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+        </Root>
+    </Loggers>
+</Configuration>

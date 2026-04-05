@@ -5,6 +5,8 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.model.Table;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.zookeeper.ZkClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +23,8 @@ import java.util.List;
  * 负责模块：开发者 A
  */
 public class MetadataManager {
+
+    private static final Logger logger = LoggerFactory.getLogger(MetadataManager.class);
 
     // 表元数据：tableName -> Table
     private final ConcurrentMap<String, Table> tables = new ConcurrentHashMap<>();
@@ -71,7 +75,7 @@ public class MetadataManager {
                 zkClient.createPersistent(TABLES_BASE, new byte[0]);
             }
         } catch (Exception e) {
-            System.err.println("Failed to initialize ZK paths: " + e.getMessage());
+            logger.warn("Failed to initialize ZK paths: {}", e.getMessage(), e);
         }
     }
 
@@ -118,18 +122,18 @@ public class MetadataManager {
                                     regions.put(regionId, region);
                                 }
                             } catch (Exception e) {
-                                System.err.println("Failed to load region " + regionId + ": " + e.getMessage());
+                                logger.warn("Failed to load region {}: {}", regionId, e.getMessage(), e);
                             }
                         }
                     }
                 } catch (Exception e) {
-                    System.err.println("Failed to load table " + tableName + ": " + e.getMessage());
+                    logger.warn("Failed to load table {}: {}", tableName, e.getMessage(), e);
                 }
             }
 
-            System.out.println("Loaded " + tables.size() + " tables and " + regions.size() + " regions from ZooKeeper");
+            logger.info("Loaded {} tables and {} regions from ZooKeeper", tables.size(), regions.size());
         } catch (Exception e) {
-            System.err.println("Failed to load metadata from ZK: " + e.getMessage());
+            logger.error("Failed to load metadata from ZK: {}", e.getMessage(), e);
         }
     }
 
@@ -165,7 +169,7 @@ public class MetadataManager {
         }
 
         tables.put(table.getTableName(), table);
-        System.out.println("Table created: " + table.getTableName());
+        logger.info("Table created: {}", table.getTableName());
     }
 
     /**
@@ -182,11 +186,11 @@ public class MetadataManager {
                     zkClient.delete(tablePath);
                 }
             } catch (Exception e) {
-                System.err.println("Failed to delete table from ZK: " + e.getMessage());
+                logger.warn("Failed to delete table from ZK: {}", e.getMessage(), e);
             }
         }
 
-        System.out.println("Table deleted: " + tableName);
+        logger.info("Table deleted: {}", tableName);
     }
 
     /**
@@ -235,7 +239,7 @@ public class MetadataManager {
                     zkClient.createPersistent(regionPath, data);
                 }
             } catch (Exception e) {
-                System.err.println("Failed to persist region to ZK: " + e.getMessage());
+                logger.warn("Failed to persist region to ZK: {}", e.getMessage(), e);
             }
         }
     }
@@ -262,7 +266,7 @@ public class MetadataManager {
         }
 
         if (zkClient == null) {
-            System.out.println("ZooKeeper client not initialized, region registered in memory only");
+            logger.warn("ZooKeeper client not initialized, region registered in memory only");
             return;
         }
 
@@ -281,16 +285,15 @@ public class MetadataManager {
                 String serverAddress = primaryServer.getHost() + ":" + primaryServer.getPort();
                 byte[] primaryData = serverAddress.getBytes(StandardCharsets.UTF_8);
                 upsertPersistentNode(primaryPath, primaryData);
-                System.out.println("Primary server " + serverAddress + " registered for region " + regionId);
+                logger.info("Primary server {} registered for region {}", serverAddress, regionId);
             }
 
             byte[] replicasData = encodeReplicas(region.getReplicas()).getBytes(StandardCharsets.UTF_8);
             upsertPersistentNode(replicasPath, replicasData);
 
-            System.out.println("Region " + regionId + " registered for table " + tableName);
+            logger.info("Region {} registered for table {}", regionId, tableName);
         } catch (Exception e) {
-            System.err.println("Failed to persist region for table to ZK: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Failed to persist region for table to ZK: {}", e.getMessage(), e);
         }
     }
 
@@ -333,7 +336,7 @@ public class MetadataManager {
                     }
                 }
             } catch (Exception e) {
-                System.err.println("Failed to delete region from ZK: " + e.getMessage());
+                logger.warn("Failed to delete region from ZK: {}", e.getMessage(), e);
             }
         }
     }
@@ -419,7 +422,7 @@ public class MetadataManager {
 
             return builder.build().toByteArray();
         } catch (Exception e) {
-            System.err.println("Failed to serialize table: " + e.getMessage());
+            logger.warn("Failed to serialize table: {}", e.getMessage(), e);
             return new byte[0];
         }
     }
@@ -460,7 +463,7 @@ public class MetadataManager {
             }
             return table;
         } catch (Exception e) {
-            System.err.println("Failed to deserialize table: " + e.getMessage());
+            logger.warn("Failed to deserialize table: {}", e.getMessage(), e);
             return null;
         }
     }
@@ -485,7 +488,7 @@ public class MetadataManager {
                           encodeReplicas(region.getReplicas());
             return data.getBytes(StandardCharsets.UTF_8);
         } catch (Exception e) {
-            System.err.println("Failed to serialize region: " + e.getMessage());
+            logger.warn("Failed to serialize region: {}", e.getMessage(), e);
             return new byte[0];
         }
     }
@@ -529,7 +532,7 @@ public class MetadataManager {
 
             return region;
         } catch (Exception e) {
-            System.err.println("Failed to deserialize region: " + e.getMessage());
+            logger.warn("Failed to deserialize region: {}", e.getMessage(), e);
             // 尝试旧的 Java 序列化格式
             return deserializeJavaSerializedRegion(data);
         }
@@ -543,7 +546,7 @@ public class MetadataManager {
              ObjectInputStream ois = new ObjectInputStream(bais)) {
             return (Region) ois.readObject();
         } catch (Exception e) {
-            System.err.println("Failed to deserialize Java serialized region: " + e.getMessage());
+            logger.warn("Failed to deserialize Java serialized region: {}", e.getMessage(), e);
             return null;
         }
     }
@@ -577,7 +580,7 @@ public class MetadataManager {
                 }
             }
         } catch (Exception e) {
-            System.err.println("Failed to restore replica topology for " + region.getRegionId() + ": " + e.getMessage());
+            logger.warn("Failed to restore replica topology for {}: {}", region.getRegionId(), e.getMessage(), e);
         }
     }
 

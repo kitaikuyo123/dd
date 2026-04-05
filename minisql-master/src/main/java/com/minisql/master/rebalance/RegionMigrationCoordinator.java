@@ -10,6 +10,8 @@ import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +22,8 @@ import java.util.concurrent.TimeUnit;
  * on RPC entrypoints and high-level coordination.
  */
 public class RegionMigrationCoordinator {
+
+    private static final Logger logger = LoggerFactory.getLogger(RegionMigrationCoordinator.class);
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -50,8 +54,8 @@ public class RegionMigrationCoordinator {
 
     public void execute(LoadBalancer.BalanceAction action) {
         DistributedLock lock = null;
-        System.out.println("Executing balance action: move " + action.getRegionId() +
-            " from " + action.getSource() + " to " + action.getTarget());
+        logger.info("Executing balance action: move {} from {} to {}",
+            action.getRegionId(), action.getSource(), action.getTarget());
 
         MigrationStatus migrationStatus = new MigrationStatus(
             action.getRegionId(), action.getSource(), action.getTarget(), MigrationState.OPENING_TARGET);
@@ -154,7 +158,7 @@ public class RegionMigrationCoordinator {
                 "Source replica closed after balance");
 
             updateMigrationState(migrationStatus, MigrationState.COMPLETED, "Migration completed");
-            System.out.println("Migration completed for region: " + regionId);
+            logger.info("Migration completed for region: {}", regionId);
         } catch (Exception e) {
             failMigration(migrationStatus, "Failed to execute balance action: " + e.getMessage());
         } finally {
@@ -181,7 +185,7 @@ public class RegionMigrationCoordinator {
                 lock.release();
             }
         } catch (Exception e) {
-            System.err.println("Failed to release migration lock: " + e.getMessage());
+            logger.warn("Failed to release migration lock: {}", e.getMessage(), e);
         }
     }
 
@@ -191,7 +195,7 @@ public class RegionMigrationCoordinator {
                 commandClient.startMigration(sourceServer, regionId, targetServer, TimeUnit.MINUTES.toMillis(1));
             return response.getStatus().getSuccess() ? response.getSourceSequenceId() : -1L;
         } catch (Exception e) {
-            System.err.println("Failed to notify server start migration: " + e.getMessage());
+            logger.error("Failed to notify server start migration: {}", e.getMessage(), e);
             return -1L;
         }
     }
@@ -203,7 +207,7 @@ public class RegionMigrationCoordinator {
                 commandClient.finalizeMigration(sourceServer, regionId, targetServer, fromSequenceId);
             return response.getStatus().getSuccess() ? response.getSourceSequenceId() : -1L;
         } catch (Exception e) {
-            System.err.println("Failed to finalize migration on source server: " + e.getMessage());
+            logger.error("Failed to finalize migration on source server: {}", e.getMessage(), e);
             return -1L;
         }
     }
@@ -212,7 +216,7 @@ public class RegionMigrationCoordinator {
         try {
             return commandClient.abortMigration(sourceServer, regionId).getStatus().getSuccess();
         } catch (Exception e) {
-            System.err.println("Failed to abort migration on source server: " + e.getMessage());
+            logger.error("Failed to abort migration on source server: {}", e.getMessage(), e);
             return false;
         }
     }
@@ -237,8 +241,8 @@ public class RegionMigrationCoordinator {
                 Thread.currentThread().interrupt();
                 return false;
             } catch (Exception e) {
-                System.err.println("Failed to verify replication sync for region " + regionId +
-                    " on target " + targetServer + ": " + e.getMessage());
+                logger.warn("Failed to verify replication sync for region {} on target {}: {}",
+                    regionId, targetServer, e.getMessage(), e);
             }
         }
 
@@ -268,11 +272,9 @@ public class RegionMigrationCoordinator {
     private void updateMigrationState(MigrationStatus status, MigrationState state, String detail) {
         status.state = state;
         status.detail = detail;
-        System.out.println("[MIGRATION] region=" + status.regionId +
-            " source=" + status.sourceServer +
-            " target=" + status.targetServer +
-            " state=" + state +
-            (detail != null && !detail.isEmpty() ? " detail=" + detail : ""));
+        logger.info("[MIGRATION] region={} source={} target={} state={}{}",
+                status.regionId, status.sourceServer, status.targetServer, state,
+                (detail != null && !detail.isEmpty() ? " detail=" + detail : ""));
         if (state == MigrationState.OPENING_TARGET || state == MigrationState.INITIAL_SYNC) {
             recordEvent("REGION_MIGRATION_STARTED", "INFO", status.regionId, status.sourceServer,
                 status.targetServer, "Region migration started", detail);
@@ -284,12 +286,12 @@ public class RegionMigrationCoordinator {
 
     private void failMigration(MigrationStatus status, String detail) {
         updateMigrationState(status, MigrationState.ROLLED_BACK, detail);
-        System.err.println("[MIGRATION] region=" + status.regionId + " failed: " + detail);
+        logger.warn("[MIGRATION] region={} failed: {}", status.regionId, detail);
     }
 
     private void failMigrationRequiresManualIntervention(MigrationStatus status, String detail) {
         updateMigrationState(status, MigrationState.FAILED_REQUIRES_MANUAL_INTERVENTION, detail);
-        System.err.println("[MIGRATION] region=" + status.regionId + " requires manual intervention: " + detail);
+        logger.warn("[MIGRATION] region={} requires manual intervention: {}", status.regionId, detail);
     }
 
     private boolean notifyServerPromoteToPrimary(ServerId serverId, String regionId) {
@@ -303,44 +305,44 @@ public class RegionMigrationCoordinator {
             }
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to notify server promote to primary: " + e.getMessage());
+            logger.error("Failed to notify server promote to primary: {}", e.getMessage(), e);
             return false;
         }
     }
 
     private boolean notifyServerOpenRegionSync(ServerId serverId, Region region) {
-        System.out.println("Synchronously notifying " + serverId + " to open region " + region.getRegionId());
+        logger.info("Synchronously notifying {} to open region {}", serverId, region.getRegionId());
 
         try {
             RegionServerProto.OpenRegionResponse response = commandClient.openRegion(serverId, region, false);
             if (response.getStatus().getSuccess()) {
-                System.out.println("Region " + region.getRegionId() + " opened successfully on " + serverId);
+                logger.info("Region {} opened successfully on {}", region.getRegionId(), serverId);
                 return true;
             }
-            System.err.println("Failed to open region " + region.getRegionId() + ": " + response.getStatus().getMessage());
+            logger.warn("Failed to open region {}: {}", region.getRegionId(), response.getStatus().getMessage());
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to notify server open region: " + e.getMessage());
+            logger.error("Failed to notify server open region: {}", e.getMessage(), e);
             return false;
         }
     }
 
     private boolean notifyServerCloseRegionSync(ServerId serverId, String regionId, boolean dropTable) {
-        System.out.println("Synchronously notifying " + serverId + " to close region " + regionId +
-            (dropTable ? " and drop table" : ""));
+        logger.info("Synchronously notifying {} to close region {}{}",
+            serverId, regionId, (dropTable ? " and drop table" : ""));
 
         try {
             RegionServerProto.CloseRegionResponse response =
                 commandClient.closeRegion(serverId, regionId, false, dropTable);
             if (response.getStatus().getSuccess()) {
-                System.out.println("Region " + regionId + " closed successfully on " + serverId +
-                    (dropTable ? " and table dropped" : ""));
+                logger.info("Region {} closed successfully on {}{}",
+                    regionId, serverId, (dropTable ? " and table dropped" : ""));
                 return true;
             }
-            System.err.println("Failed to close region " + regionId + ": " + response.getStatus().getMessage());
+            logger.warn("Failed to close region {}: {}", regionId, response.getStatus().getMessage());
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to synchronously close region " + regionId + " on " + serverId + ": " + e.getMessage());
+            logger.error("Failed to synchronously close region {} on {}: {}", regionId, serverId, e.getMessage(), e);
             return false;
         }
     }

@@ -15,10 +15,14 @@ import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.CompoundCondition;
 import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.ast.SimpleCondition;
+import com.minisql.sql.execution.QueryPlan.JoinType;
 import com.minisql.sql.execution.Row;
 import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -35,8 +39,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,7 +49,7 @@ import java.util.regex.Pattern;
  */
 public class ParallelQueryExecutor {
 
-    private static final Logger logger = Logger.getLogger(ParallelQueryExecutor.class.getName());
+    private static final Logger logger = LoggerFactory.getLogger(ParallelQueryExecutor.class);
 
     private final ExecutorService executor;
     private final MasterServiceGrpc.MasterServiceBlockingStub masterStub;
@@ -788,7 +790,7 @@ public class ParallelQueryExecutor {
         int innerJoinIndex = upper.indexOf(" INNER JOIN ");
         int plainJoinIndex = upper.indexOf(" JOIN ");
         int joinIndex = -1;
-        String joinType = JoinType.INNER;
+        JoinType joinType = JoinType.INNER;
 
         if (leftJoinIndex >= 0) {
             joinIndex = leftJoinIndex;
@@ -811,7 +813,7 @@ public class ParallelQueryExecutor {
         TableSource leftSource = parseTableSource(fromPart.substring(0, joinIndex).trim());
         spec.tableName = leftSource.tableName;
         spec.tableAlias = leftSource.alias;
-        String joinKeyword = JoinType.LEFT.equals(joinType) ? " LEFT JOIN "
+        String joinKeyword = joinType == com.minisql.sql.execution.QueryPlan.JoinType.LEFT ? " LEFT JOIN "
             : (innerJoinIndex >= 0 ? " INNER JOIN " : " JOIN ");
         String joinPart = fromPart.substring(joinIndex + joinKeyword.length()).trim();
         int onIndex = joinPart.toUpperCase().indexOf(" ON ");
@@ -820,7 +822,7 @@ public class ParallelQueryExecutor {
         }
 
         JoinQuerySpec joinSpec = new JoinQuerySpec();
-        joinSpec.joinType = joinType;
+        joinSpec.joinType = joinType.name();
         TableSource rightSource = parseTableSource(joinPart.substring(0, onIndex).trim());
         joinSpec.rightTable = rightSource.tableName;
         joinSpec.rightAlias = rightSource.alias;
@@ -1414,10 +1416,10 @@ public class ParallelQueryExecutor {
                 locations.add(RegionLocation.fromProto(response));
                 return locations;
             }
-            logger.warning("Failed to get region location for table " + tableName +
+            logger.warn("Failed to get region location for table " + tableName +
                 ": " + response.getStatus().getMessage());
         } catch (Exception e) {
-            logger.log(Level.WARNING, "Exception while getting region location for table: " + tableName, e);
+            logger.warn("Exception while getting region location for table: {}", tableName, e);
         }
         return new ArrayList<>();
     }
@@ -1429,8 +1431,8 @@ public class ParallelQueryExecutor {
             );
 
             if (!response.getStatus().getSuccess()) {
-                logger.warning("Failed to get regions for table " + tableName +
-                    ": " + response.getStatus().getMessage());
+                logger.warn("Failed to get regions for table {}: {}",
+                    tableName, response.getStatus().getMessage());
                 return new ArrayList<>();
             }
 
@@ -1449,7 +1451,7 @@ public class ParallelQueryExecutor {
                     location.serverHost = replica.getHost();
                     location.serverPort = replica.getPort();
                 } else {
-                    logger.warning("Skipping region " + location.regionId + ": no server address available");
+                    logger.warn("Skipping region {}: no server address available", location.regionId);
                     continue;
                 }
 
@@ -1457,7 +1459,7 @@ public class ParallelQueryExecutor {
             }
             return locations;
         } catch (Exception e) {
-            logger.log(Level.WARNING, "Exception while getting regions for table: " + tableName, e);
+            logger.warn("Exception while getting regions for table: {}", tableName, e);
             return new ArrayList<>();
         }
     }
@@ -1533,14 +1535,14 @@ public class ParallelQueryExecutor {
     }
 
     private static class JoinQuerySpec {
-        private String joinType = JoinType.INNER;
+        private String joinType = JoinType.INNER.name();
         private String rightTable;
         private String rightAlias;
         private List<String> leftConditions;
         private List<String> rightConditions;
 
         private boolean isLeftJoin() {
-            return JoinType.LEFT.equalsIgnoreCase(joinType);
+            return JoinType.LEFT.name().equalsIgnoreCase(joinType);
         }
     }
 
@@ -1551,14 +1553,6 @@ public class ParallelQueryExecutor {
         private TableSource(String tableName, String alias) {
             this.tableName = tableName;
             this.alias = alias;
-        }
-    }
-
-    private static final class JoinType {
-        private static final String INNER = "INNER";
-        private static final String LEFT = "LEFT";
-
-        private JoinType() {
         }
     }
 

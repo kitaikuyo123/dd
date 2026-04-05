@@ -106,18 +106,6 @@ public class RegionMergeService {
     }
 
     /**
-     * 估算 Region 大小（已废弃，使用 MySQLRegionStorage.getStoreFileSize()）
-     */
-    @Deprecated
-    public long estimateRegionSize(String regionId) {
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
-        if (storage != null) {
-            return storage.getStoreFileSize();
-        }
-        return 0;
-    }
-
-    /**
      * 执行 Region 合并（带事务回滚机制）
      */
     public RegionMergeResult mergeRegions(String leftRegionId, String rightRegionId) throws Exception {
@@ -285,18 +273,6 @@ public class RegionMergeService {
         String mergedRegionId;
         MySQLRegionStorage mergedStorage;
         boolean completed;  // 数据迁移是否已完成
-    }
-
-    /**
-     * 字节数组转十六进制（用于日志）
-     */
-    private String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /**

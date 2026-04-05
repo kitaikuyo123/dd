@@ -17,26 +17,17 @@ public interface StorageEngine {
     List<KeyValue> get(byte[] key);
 
     default Iterator<KeyValue> scan(byte[] startKey, byte[] endKey) {
-        return scan(StorageScanRequest.newBuilder()
+        return scan(StorageScanFilter.newBuilder()
             .startKey(startKey)
             .endKey(endKey)
             .build());
     }
 
-    default Iterator<KeyValue> scan(StorageScanRequest request) {
-        return scan((StorageScanFilter) request);
-    }
-
     default Iterator<KeyValue> scan(StorageScanFilter filter) {
         if (filter == null) {
-            return scan(new StorageScanRequest(null, null, null, null));
+            return scan(new StorageScanFilter(null, null, null, null));
         }
-        return scan(new StorageScanRequest(
-            filter.getStartKey(),
-            filter.getEndKey(),
-            filter.getColumnPredicates(),
-            filter.getProjectedQualifiers()
-        ));
+        return scan(filter);
     }
 
     void delete(byte[] key);

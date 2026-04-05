@@ -28,7 +28,7 @@ class RowKeySerializerTest {
 
         // 验证保序性
         for (int i = 0; i < values.length - 1; i++) {
-            assertTrue(compareBytes(serialized[i], serialized[i + 1]) < 0,
+            assertTrue(BytesUtil.compareTo(serialized[i], serialized[i + 1]) < 0,
                 "Order not preserved: " + values[i] + " < " + values[i + 1]);
         }
     }
@@ -45,7 +45,7 @@ class RowKeySerializerTest {
 
         // 验证保序性
         for (int i = 0; i < values.length - 1; i++) {
-            assertTrue(compareBytes(serialized[i], serialized[i + 1]) < 0,
+            assertTrue(BytesUtil.compareTo(serialized[i], serialized[i + 1]) < 0,
                 "Order not preserved: " + values[i] + " < " + values[i + 1]);
         }
     }
@@ -62,7 +62,7 @@ class RowKeySerializerTest {
 
         // 验证保序性
         for (int i = 0; i < values.length - 1; i++) {
-            assertTrue(compareBytes(serialized[i], serialized[i + 1]) < 0,
+            assertTrue(BytesUtil.compareTo(serialized[i], serialized[i + 1]) < 0,
                 "Order not preserved: " + values[i] + " < " + values[i + 1]);
         }
     }
@@ -82,7 +82,7 @@ class RowKeySerializerTest {
         byte[] key2 = RowKeySerializer.serializeComposite(values2, types);
 
         // user001 应该小于 user002
-        assertTrue(compareBytes(key1, key2) < 0);
+        assertTrue(BytesUtil.compareTo(key1, key2) < 0);
     }
 
     @Test
@@ -96,7 +96,7 @@ class RowKeySerializerTest {
         byte[] key2 = RowKeySerializer.serializeComposite(values2, types);
 
         // 相同 user_id，不同的 bucket，100 < 200
-        assertTrue(compareBytes(key1, key2) < 0);
+        assertTrue(BytesUtil.compareTo(key1, key2) < 0);
     }
 
     @Test
@@ -174,17 +174,5 @@ class RowKeySerializerTest {
 
         String deserialized = RowKeySerializer.deserializeString(nullBytes);
         assertNull(deserialized);
-    }
-
-    /**
-     * 字节数组比较（字典序）
-     */
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = (a[i] & 0xFF) - (b[i] & 0xFF);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
     }
 }

@@ -1,6 +1,8 @@
 package com.minisql.master.recover;
 
 import com.minisql.storage.MySQLConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.List;
@@ -12,6 +14,7 @@ import java.util.Map;
  */
 public class DataImporter {
 
+    private static final Logger logger = LoggerFactory.getLogger(DataImporter.class);
     private final MySQLConfig mysqlConfig;
     private static final int BATCH_SIZE = 500;
 
@@ -94,7 +97,7 @@ public class DataImporter {
             conn.setAutoCommit(true);
         }
 
-        System.out.println("Imported data to region: " + regionId);
+        logger.info("Imported data to region: {}", regionId);
     }
 
     /**
@@ -144,7 +147,7 @@ public class DataImporter {
                 conn.commit();
 
                 if (isLastBatch) {
-                    System.out.println("Final batch imported to region: " + regionId);
+                    logger.info("Final batch imported to region: {}", regionId);
                 }
             }
 

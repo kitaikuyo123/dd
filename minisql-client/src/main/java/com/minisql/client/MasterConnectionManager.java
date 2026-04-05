@@ -7,6 +7,8 @@ import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.util.concurrent.TimeUnit;
@@ -17,6 +19,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 负责管理与 Master 的连接，支持自动重连
  */
 public class MasterConnectionManager {
+
+    private static final Logger logger = LoggerFactory.getLogger(MasterConnectionManager.class);
 
     private final ZkClient zkClient;
     private final AtomicReference<ManagedChannel> channelRef = new AtomicReference<>();
@@ -97,13 +101,13 @@ public class MasterConnectionManager {
         } catch (StatusRuntimeException e) {
             // 如果是 UNAVAILABLE，说明连接有问题
             if (e.getStatus().getCode() == io.grpc.Status.Code.UNAVAILABLE) {
-                System.out.println("Master connection is unhealthy: " + e.getMessage());
+                logger.warn("Master connection is unhealthy: {}", e.getMessage());
                 return false;
             }
             // 其他错误（如 NOT_FOUND）说明连接正常，只是请求有问题
             return true;
         } catch (Exception e) {
-            System.out.println("Health check failed: " + e.getMessage());
+            logger.warn("Health check failed: {}", e.getMessage());
             return false;
         }
     }
@@ -127,10 +131,11 @@ public class MasterConnectionManager {
             try {
                 connectToMaster(newMasterAddress);
                 currentMasterAddress = newMasterAddress;
-                System.out.println("Connected to Master: " + newMasterAddress);
+                logger.info("Connected to Master: {}", newMasterAddress);
                 return;
             } catch (Exception e) {
-                System.err.println("Failed to connect to Master (attempt " + (i + 1) + "/" + maxRetries + "): " + e.getMessage());
+                logger.warn("Failed to connect to Master (attempt {}/{}): {}",
+                    (i + 1), maxRetries, e.getMessage());
 
                 if (i < maxRetries - 1) {
                     try {
@@ -201,7 +206,7 @@ public class MasterConnectionManager {
                 return ZkPayloads.decodeLeaderAddress(data);
             }
         } catch (Exception e) {
-            System.err.println("Failed to get Master address from ZooKeeper: " + e.getMessage());
+            logger.warn("Failed to get Master address from ZooKeeper: {}", e.getMessage());
         }
         return null;
     }
@@ -218,6 +223,6 @@ public class MasterConnectionManager {
      */
     public void close() {
         closeCurrentConnection();
-        System.out.println("MasterConnectionManager closed");
+        logger.info("MasterConnectionManager closed");
     }
 }

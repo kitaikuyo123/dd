@@ -8,6 +8,8 @@ import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -20,6 +22,8 @@ import java.util.concurrent.TimeUnit;
  * gRPC implementation of the replication transport abstraction.
  */
 public class GrpcReplicationTransportClient implements ReplicationTransportClient {
+
+    private static final Logger logger = LoggerFactory.getLogger(GrpcReplicationTransportClient.class);
 
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
@@ -43,7 +47,7 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
             );
             return response.getStatus().getSuccess();
         } catch (Exception e) {
-            System.err.println("Replication RPC failed to " + replica + ": " + e.getMessage());
+            logger.warn("Replication RPC failed to {}: {}", replica, e.getMessage());
             return false;
         }
     }
@@ -92,14 +96,14 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
                         .build()
                 );
                 if (!response.getStatus().getSuccess()) {
-                    System.err.println("Snapshot apply failed on " + replica + " for region " + regionId +
-                        ": " + response.getStatus().getMessage());
+                    logger.warn("Snapshot apply failed on {} for region {}: {}",
+                        replica, regionId, response.getStatus().getMessage());
                     return false;
                 }
             }
             return true;
         } catch (Exception e) {
-            System.err.println("Snapshot send failed to " + replica + ": " + e.getMessage());
+            logger.warn("Snapshot send failed to {}: {}", replica, e.getMessage());
             return false;
         }
     }

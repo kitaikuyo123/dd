@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(findstr :3306)",
+      "Bash(mvn test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(find d:/aLabs/dd -name \"*.java\" -type f -exec grep -l \"class.*Test\" {} \\\\;)",
+      "Bash(mvn compile:*)"
+    ]
+  }
+}

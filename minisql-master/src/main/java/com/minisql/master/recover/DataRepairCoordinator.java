@@ -7,6 +7,8 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -17,6 +19,7 @@ import java.util.concurrent.*;
  */
 public class DataRepairCoordinator {
 
+    private static final Logger logger = LoggerFactory.getLogger(DataRepairCoordinator.class);
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
     private final ExecutorService repairExecutor;
@@ -65,14 +68,14 @@ public class DataRepairCoordinator {
 
         // 检查是否已在修复中
         if (activeRepairs.containsKey(regionId)) {
-            System.out.println("Repair already in progress for region: " + regionId);
+            logger.info("Repair already in progress for region: {}", regionId);
             return activeRepairs.get(regionId).getTaskId();
         }
 
         RepairTask task = new RepairTask(taskId, regionId, corruptedServer);
         activeRepairs.put(regionId, task);
 
-        System.out.println("Scheduled repair task " + taskId + " for region " + regionId);
+        logger.info("Scheduled repair task {} for region {}", taskId, regionId);
 
         // 异步执行修复
         repairExecutor.submit(() -> executeRepair(task));
@@ -91,7 +94,7 @@ public class DataRepairCoordinator {
             task.setStatus(RepairStatus.IN_PROGRESS);
             task.setStartTime(System.currentTimeMillis());
 
-            System.out.println("Starting repair for region " + regionId);
+            logger.info("Starting repair for region {}", regionId);
 
             // 1. 获取 Region 信息
             Region region = metadataManager.getRegion(regionId);
@@ -108,12 +111,12 @@ public class DataRepairCoordinator {
 
             // 3. 选择最佳副本（复制进度最快的）
             ServerId sourceReplica = selectBestSourceReplica(regionId, healthyReplicas);
-            System.out.println("Selected source replica for repair: " + sourceReplica);
+            logger.info("Selected source replica for repair: {}", sourceReplica);
 
             // 4. 如果损坏的是主副本，先进行故障转移
             ServerId currentPrimary = clusterManager.getPrimaryServerForRegion(regionId);
             if (corruptedServer.equals(currentPrimary)) {
-                System.out.println("Corrupted server is primary, performing failover");
+                logger.info("Corrupted server is primary, performing failover");
                 failoverPrimary(regionId, sourceReplica);
             }
 
@@ -122,10 +125,10 @@ public class DataRepairCoordinator {
 
             if (syncSuccess) {
                 task.setStatus(RepairStatus.COMPLETED);
-                System.out.println("Repair completed successfully for region " + regionId);
+                logger.info("Repair completed successfully for region {}", regionId);
             } else {
                 task.setStatus(RepairStatus.FAILED);
-                System.err.println("Repair failed for region " + regionId);
+                logger.error("Repair failed for region {}", regionId);
             }
 
             // 6. 记录修复历史
@@ -141,7 +144,7 @@ public class DataRepairCoordinator {
             repairHistory.add(record);
 
         } catch (Exception e) {
-            System.err.println("Error repairing region " + regionId + ": " + e.getMessage());
+            logger.error("Error repairing region {}: {}", regionId, e.getMessage());
             task.setStatus(RepairStatus.FAILED);
             task.setErrorMessage(e.getMessage());
         } finally {
@@ -217,16 +220,16 @@ public class DataRepairCoordinator {
                 RegionServerProto.PromoteResponse response = stub.promoteToPrimary(request);
 
                 if (response.getStatus().getSuccess()) {
-                    System.out.println("Failover successful, " + newPrimary + " is now primary for " + regionId);
+                    logger.info("Failover successful, {} is now primary for {}", newPrimary, regionId);
                 } else {
-                    System.err.println("Failover failed: " + response.getStatus().getMessage());
+                    logger.error("Failover failed: {}", response.getStatus().getMessage());
                 }
 
             } finally {
                 channel.shutdown();
             }
         } catch (Exception e) {
-            System.err.println("Error during failover: " + e.getMessage());
+            logger.error("Error during failover: {}", e.getMessage());
         }
     }
 
@@ -256,12 +259,12 @@ public class DataRepairCoordinator {
                 RegionServerProto.MigrateResponse response = stub.startMigration(request);
 
                 if (response.getStatus().getSuccess()) {
-                    System.out.println("Full sync triggered successfully from " + sourceServer + " to " + targetServer);
+                    logger.info("Full sync triggered successfully from {} to {}", sourceServer, targetServer);
 
                     // 等待同步完成（简化实现）
                     return waitForSyncCompletion(regionId, targetServer);
                 } else {
-                    System.err.println("Failed to trigger full sync: " + response.getStatus().getMessage());
+                    logger.error("Failed to trigger full sync: {}", response.getStatus().getMessage());
                     return false;
                 }
 
@@ -269,7 +272,7 @@ public class DataRepairCoordinator {
                 channel.shutdown();
             }
         } catch (Exception e) {
-            System.err.println("Error triggering full sync: " + e.getMessage());
+            logger.error("Error triggering full sync: {}", e.getMessage());
             return false;
         }
     }

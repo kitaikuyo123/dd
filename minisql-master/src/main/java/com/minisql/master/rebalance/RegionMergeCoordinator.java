@@ -3,6 +3,7 @@ package com.minisql.master.rebalance;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.*;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
@@ -10,6 +11,8 @@ import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -19,6 +22,8 @@ import java.util.concurrent.*;
  * 负责监控 Region 大小，自动触发合并，防止 Region 碎片化
  */
 public class RegionMergeCoordinator {
+
+    private static final Logger logger = LoggerFactory.getLogger(RegionMergeCoordinator.class);
 
     // 合并阈值：单个 Region 小于此值可考虑合并（默认 100MB）
     private static final long MERGE_THRESHOLD_SIZE = 100L * 1024 * 1024;
@@ -97,7 +102,7 @@ public class RegionMergeCoordinator {
         // 启动合并处理器
         mergeExecutor.submit(this::processMergeTasks);
 
-        System.out.println("RegionMergeCoordinator started");
+        logger.info("RegionMergeCoordinator started");
     }
 
     /**
@@ -111,7 +116,7 @@ public class RegionMergeCoordinator {
         }
         mergeExecutor.shutdown();
 
-        System.out.println("RegionMergeCoordinator stopped");
+        logger.info("RegionMergeCoordinator stopped");
     }
 
     /**
@@ -145,7 +150,7 @@ public class RegionMergeCoordinator {
                 List<Region> regions = new ArrayList<>(metadataManager.getRegionsForTable(tableName));
 
                 // 按 startKey 排序
-                regions.sort(Comparator.comparing(Region::getStartKey, this::compareBytes));
+                regions.sort(Comparator.comparing(Region::getStartKey, BytesUtil::compareTo));
 
                 // 检查相邻的 Region 是否可以合并
                 for (int i = 0; i < regions.size() - 1; i++) {
@@ -158,7 +163,7 @@ public class RegionMergeCoordinator {
                 }
             }
         } catch (Exception e) {
-            System.err.println("Error checking merges: " + e.getMessage());
+            logger.error("Error checking merges: {}", e.getMessage(), e);
         }
     }
 
@@ -278,8 +283,8 @@ public class RegionMergeCoordinator {
         );
 
         if (mergeQueue.offer(task)) {
-            System.out.println("Scheduled merge for regions: " + left.getRegionId() +
-                " and " + right.getRegionId() + " (table: " + left.getTableName() + ")");
+            logger.info("Scheduled merge for regions: {} and {} (table: {})",
+                left.getRegionId(), right.getRegionId(), left.getTableName());
         }
     }
 
@@ -297,7 +302,7 @@ public class RegionMergeCoordinator {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                System.err.println("Error processing merge task: " + e.getMessage());
+                logger.error("Error processing merge task: {}", e.getMessage(), e);
             }
         }
     }
@@ -313,7 +318,7 @@ public class RegionMergeCoordinator {
 
         // 标记为正在合并
         if (!mergingRegions.add(leftRegionId) || !mergingRegions.add(rightRegionId)) {
-            System.out.println("Regions " + leftRegionId + " or " + rightRegionId + " are already merging, skip");
+            logger.warn("Regions {} or {} are already merging, skip", leftRegionId, rightRegionId);
             mergingRegions.remove(leftRegionId);
             mergingRegions.remove(rightRegionId);
             return;
@@ -324,7 +329,7 @@ public class RegionMergeCoordinator {
             String secondLockRegion = leftRegionId.compareTo(rightRegionId) <= 0 ? rightRegionId : leftRegionId;
             leftLock = acquireRegionLock(firstLockRegion);
             rightLock = acquireRegionLock(secondLockRegion);
-            System.out.println("Starting merge for regions: " + leftRegionId + " and " + rightRegionId);
+            logger.info("Starting merge for regions: {} and {}", leftRegionId, rightRegionId);
             recordEvent("REGION_MERGE_STARTED", "INFO", leftRegionId, task.getServerId(),
                 "Region merge started", rightRegionId);
 
@@ -333,21 +338,20 @@ public class RegionMergeCoordinator {
                 task.getServerId(), leftRegionId, rightRegionId);
 
             if (result == null) {
-                System.err.println("Merge failed for regions: " + leftRegionId + " and " + rightRegionId);
+                logger.warn("Merge failed for regions: {} and {}", leftRegionId, rightRegionId);
                 return;
             }
 
             // 2. 更新元数据
             updateMetadataAfterMerge(leftRegionId, rightRegionId, result);
 
-            System.out.println("Merge completed: " + leftRegionId + " + " + rightRegionId +
-                " -> " + result.getMergedRegion().getRegionId());
+            logger.info("Merge completed: {} + {} -> {}", leftRegionId, rightRegionId,
+                result.getMergedRegion().getRegionId());
             recordEvent("REGION_MERGE_COMPLETED", "INFO", leftRegionId, task.getServerId(),
                 "Region merge completed", result.getMergedRegion().getRegionId());
 
         } catch (Exception e) {
-            System.err.println("Error merging regions " + leftRegionId + " and " + rightRegionId + ": " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Error merging regions {} and {}: {}", leftRegionId, rightRegionId, e.getMessage(), e);
         } finally {
             releaseLock(rightLock);
             releaseLock(leftLock);
@@ -381,7 +385,7 @@ public class RegionMergeCoordinator {
                 return new MergeResult(convertProtoToRegion(response.getMergedRegion()));
             }
         } catch (Exception e) {
-            System.err.println("Failed to merge regions on server: " + e.getMessage());
+            logger.error("Failed to merge regions on server: {}", e.getMessage(), e);
         } finally {
             if (channel != null) {
                 channel.shutdown();
@@ -421,18 +425,18 @@ public class RegionMergeCoordinator {
         Region right = metadataManager.getRegion(rightRegionId);
 
         if (left == null || right == null) {
-            System.err.println("Region not found: " + leftRegionId + " or " + rightRegionId);
+            logger.warn("Region not found: {} or {}", leftRegionId, rightRegionId);
             return false;
         }
 
         if (!left.getTableName().equals(right.getTableName())) {
-            System.err.println("Regions are not in the same table");
+            logger.warn("Regions are not in the same table");
             return false;
         }
 
         ServerId serverId = clusterManager.getPrimaryServerForRegion(leftRegionId);
         if (serverId == null) {
-            System.err.println("No server assigned to region: " + leftRegionId);
+            logger.warn("No server assigned to region: {}", leftRegionId);
             return false;
         }
 
@@ -459,7 +463,7 @@ public class RegionMergeCoordinator {
                 lock.release();
             }
         } catch (Exception e) {
-            System.err.println("Failed to release merge lock: " + e.getMessage());
+            logger.warn("Failed to release merge lock: {}", e.getMessage(), e);
         }
     }
 
@@ -500,22 +504,6 @@ public class RegionMergeCoordinator {
         region.setStartKey(proto.getStartKey().toByteArray());
         region.setEndKey(proto.getEndKey().toByteArray());
         return region;
-    }
-
-    /**
-     * 比较字节数组
-     */
-    private int compareBytes(byte[] a, byte[] b) {
-        if (a == null && b == null) return 0;
-        if (a == null) return -1;
-        if (b == null) return 1;
-
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = (a[i] & 0xFF) - (b[i] & 0xFF);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
     }
 
     /**

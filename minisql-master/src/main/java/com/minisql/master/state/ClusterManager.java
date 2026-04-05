@@ -5,6 +5,8 @@ import com.minisql.common.model.ServerId;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.storage.MySQLConfig;
 import com.minisql.zookeeper.ZkClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 负责模块：开发者 A
  */
 public class ClusterManager {
+
+    private static final Logger logger = LoggerFactory.getLogger(ClusterManager.class);
 
     private String serverKey(ServerId serverId) {
         return serverId.getHost() + ":" + serverId.getPort();
@@ -71,7 +75,7 @@ public class ClusterManager {
                 zkClient.createPersistent(regionServersPath, new byte[0]);
             }
         } catch (Exception e) {
-            System.err.println("Failed to initialize ZK paths: " + e.getMessage());
+            logger.warn("Failed to initialize ZK paths: {}", e.getMessage(), e);
         }
     }
 
@@ -81,7 +85,7 @@ public class ClusterManager {
     public void registerServer(ServerId serverId, long timestamp) {
         ServerInfo info = new ServerInfo(serverId, timestamp);
         activeServers.put(serverKey(serverId), info);
-        System.out.println("RegionServer registered: " + serverId);
+        logger.info("RegionServer registered: {}", serverId);
     }
 
     /**
@@ -169,7 +173,7 @@ public class ClusterManager {
     public void registerServer(ServerId serverId) {
         ServerInfo info = new ServerInfo(serverId, System.currentTimeMillis());
         activeServers.put(serverKey(serverId), info);
-        System.out.println("RegionServer registered: " + serverId);
+        logger.info("RegionServer registered: {}", serverId);
     }
 
     /**
@@ -196,7 +200,7 @@ public class ClusterManager {
             Set<String> regions = tableRegions.computeIfAbsent(region.getTableName(), k -> ConcurrentHashMap.newKeySet());
             regions.add(region.getRegionId());
 
-            System.out.println("Region " + region.getRegionId() + " assigned to " + targetServer);
+            logger.info("Region {} assigned to {}", region.getRegionId(), targetServer);
         }
 
         return targetServer;
@@ -218,7 +222,7 @@ public class ClusterManager {
         ServerId newServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
         if (newServer != null) {
             oldAssignment.setServerId(newServer);
-            System.out.println("Region " + regionId + " reassigned to " + newServer);
+            logger.info("Region {} reassigned to {}", regionId, newServer);
         }
 
         return newServer;
@@ -249,7 +253,7 @@ public class ClusterManager {
      */
     public void removeServer(ServerId serverId) {
         activeServers.remove(serverKey(serverId));
-        System.out.println("RegionServer removed: " + serverId);
+        logger.info("RegionServer removed: {}", serverId);
     }
 
     /**
@@ -303,12 +307,17 @@ public class ClusterManager {
 
     /**
      * 更新 Region 分配
+     * 如果 assignment 不存在，则创建新的 assignment
      */
     public void updateRegionAssignment(String regionId, com.minisql.common.model.ServerId serverId) {
         RegionAssignment assignment = regionAssignments.get(regionId);
         if (assignment != null) {
             assignment.setServerId(serverId);
-            System.out.println("Region assignment updated: " + regionId + " -> " + serverId);
+            logger.info("Region assignment updated: {} -> {}", regionId, serverId);
+        } else {
+            // assignment 不存在（可能在 failover 前被 unassignRegion 移除），创建新的
+            regionAssignments.put(regionId, new RegionAssignment(regionId, serverId));
+            logger.info("Region assignment created: {} -> {}", regionId, serverId);
         }
     }
 
@@ -363,7 +372,7 @@ public class ClusterManager {
         RegionAssignment assignment = regionAssignments.get(regionId);
         if (assignment != null) {
             assignment.setServerId(newPrimary);
-            System.out.println("Promoted " + newPrimary + " to primary for region " + regionId);
+            logger.info("Promoted {} to primary for region {}", newPrimary, regionId);
         }
     }
 
@@ -392,7 +401,7 @@ public class ClusterManager {
      */
     public void updateFencingToken(String regionId, long fencingToken) {
         regionFencingTokens.put(regionId, fencingToken);
-        System.out.println("Updated fencing token for region " + regionId + " to " + fencingToken);
+        logger.info("Updated fencing token for region {} to {}", regionId, fencingToken);
     }
 
     /**
@@ -417,7 +426,7 @@ public class ClusterManager {
      */
     public void registerMySQLConfig(ServerId serverId, MySQLConfig config) {
         serverMySQLConfigs.put(serverKey(serverId), config);
-        System.out.println("MySQL config registered for server: " + serverId);
+        logger.info("MySQL config registered for server: {}", serverId);
     }
 
     /**

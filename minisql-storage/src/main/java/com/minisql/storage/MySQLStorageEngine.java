@@ -129,7 +129,7 @@ public class MySQLStorageEngine implements StorageEngine {
     }
 
     @Override
-    public Iterator<KeyValue> scan(StorageScanRequest request) {
+    public Iterator<KeyValue> scan(StorageScanFilter request) {
         if (request == null || (!request.hasColumnPredicates() && !request.hasProjectedQualifiers())) {
             return scanRange(request == null ? null : request.getStartKey(), request == null ? null : request.getEndKey());
         }

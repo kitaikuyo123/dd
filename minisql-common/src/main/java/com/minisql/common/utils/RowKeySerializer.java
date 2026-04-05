@@ -23,6 +23,14 @@ import java.util.UUID;
  */
 public class RowKeySerializer {
 
+    // Bit masks for serialization
+    private static final int INT_SIGN_BIT_MASK = 0x80000000;
+    private static final long LONG_SIGN_BIT_MASK = 0x8000000000000000L;
+    private static final int FLOAT_NEGATIVE_MASK = 0xFFFFFFFF;
+    private static final int FLOAT_SIGN_BIT_MASK = 0x80000000;
+    private static final long DOUBLE_NEGATIVE_MASK = 0xFFFFFFFFFFFFFFFFL;
+    private static final long DOUBLE_SIGN_BIT_MASK = 0x8000000000000000L;
+
     /**
      * 将单个值序列化为字节数组
      * @param value 值对象
@@ -157,12 +165,12 @@ public class RowKeySerializer {
     public static byte[] serializeInt(int value) {
         // 将 int 转换为无符号序保序的格式
         // XOR 符号位，使得负数也能正确排序
-        return BytesUtil.toBytes(value ^ 0x80000000);
+        return BytesUtil.toBytes(value ^ INT_SIGN_BIT_MASK);
     }
 
     public static int deserializeInt(byte[] bytes) {
         int value = BytesUtil.toInt(bytes);
-        return value ^ 0x80000000;
+        return value ^ INT_SIGN_BIT_MASK;
     }
 
     /**
@@ -170,12 +178,12 @@ public class RowKeySerializer {
      */
     public static byte[] serializeLong(long value) {
         // XOR 符号位，保证保序
-        return BytesUtil.toBytes(value ^ 0x8000000000000000L);
+        return BytesUtil.toBytes(value ^ LONG_SIGN_BIT_MASK);
     }
 
     public static long deserializeLong(byte[] bytes) {
         long value = BytesUtil.toLong(bytes);
-        return value ^ 0x8000000000000000L;
+        return value ^ LONG_SIGN_BIT_MASK;
     }
 
     /**
@@ -187,9 +195,9 @@ public class RowKeySerializer {
         // 调整位模式以保证保序
         int adjusted = bits;
         if (bits < 0) {
-            adjusted = bits ^ 0xFFFFFFFF;
+            adjusted = bits ^ FLOAT_NEGATIVE_MASK;
         } else {
-            adjusted = bits ^ 0x80000000;
+            adjusted = bits ^ FLOAT_SIGN_BIT_MASK;
         }
         return BytesUtil.toBytes(adjusted);
     }
@@ -197,10 +205,10 @@ public class RowKeySerializer {
     public static float deserializeFloat(byte[] bytes) {
         int bits = BytesUtil.toInt(bytes);
         int adjusted = bits;
-        if ((bits & 0x80000000) == 0) {
-            adjusted = bits ^ 0x80000000;
+        if ((bits & FLOAT_SIGN_BIT_MASK) == 0) {
+            adjusted = bits ^ FLOAT_SIGN_BIT_MASK;
         } else {
-            adjusted = bits ^ 0xFFFFFFFF;
+            adjusted = bits ^ FLOAT_NEGATIVE_MASK;
         }
         return Float.intBitsToFloat(adjusted);
     }
@@ -213,9 +221,9 @@ public class RowKeySerializer {
         // 调整位模式以保证保序
         long adjusted = bits;
         if (bits < 0) {
-            adjusted = bits ^ 0xFFFFFFFFFFFFFFFFL;
+            adjusted = bits ^ DOUBLE_NEGATIVE_MASK;
         } else {
-            adjusted = bits ^ 0x8000000000000000L;
+            adjusted = bits ^ DOUBLE_SIGN_BIT_MASK;
         }
         return BytesUtil.toBytes(adjusted);
     }
@@ -223,10 +231,10 @@ public class RowKeySerializer {
     public static double deserializeDouble(byte[] bytes) {
         long bits = BytesUtil.toLong(bytes);
         long adjusted = bits;
-        if ((bits & 0x8000000000000000L) == 0) {
-            adjusted = bits ^ 0x8000000000000000L;
+        if ((bits & DOUBLE_SIGN_BIT_MASK) == 0) {
+            adjusted = bits ^ DOUBLE_SIGN_BIT_MASK;
         } else {
-            adjusted = bits ^ 0xFFFFFFFFFFFFFFFFL;
+            adjusted = bits ^ DOUBLE_NEGATIVE_MASK;
         }
         return Double.longBitsToDouble(adjusted);
     }

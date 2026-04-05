@@ -1,6 +1,8 @@
 package com.minisql.master.recover;
 
 import com.minisql.storage.MySQLConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -14,6 +16,7 @@ import java.util.Map;
  */
 public class DataExporter {
 
+    private static final Logger logger = LoggerFactory.getLogger(DataExporter.class);
     private final MySQLConfig mysqlConfig;
     private static final int BATCH_SIZE = 1000;
 
@@ -71,7 +74,7 @@ public class DataExporter {
             }
         }
 
-        System.out.println("Exported " + rowKeys.size() + " rows from region: " + regionId);
+        logger.info("Exported {} rows from region: {}", rowKeys.size(), regionId);
 
         return new ExportResult(totalCount, rowKeys, data);
     }

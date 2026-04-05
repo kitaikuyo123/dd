@@ -20,9 +20,6 @@ public final class Constants {
     public static final String ZK_TABLE_LOCKS_PATH = ZK_LOCKS_PATH + "/tables";
     public static final String ZK_REGION_LOCKS_PATH = ZK_LOCKS_PATH + "/regions";
 
-    // Temporary compatibility alias for call sites still moving off the legacy path.
-    public static final String ZK_MASTER_PATH = ZK_MASTER_LEADER_PATH;
-
     // Default ports
     public static final int DEFAULT_MASTER_PORT = 16000;
     public static final int DEFAULT_REGIONSERVER_PORT = 16020;

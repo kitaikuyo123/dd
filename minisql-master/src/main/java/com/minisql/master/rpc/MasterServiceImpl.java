@@ -1,8 +1,8 @@
 package com.minisql.master.rpc;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.*;
 import com.minisql.common.proto.*;
-import com.minisql.master.detect.*;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.rebalance.*;
 import com.minisql.master.recover.*;
@@ -11,6 +11,8 @@ import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
 import io.grpc.stub.StreamObserver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -31,14 +33,14 @@ import java.util.stream.Collectors;
  */
 public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
+    private static final Logger logger = LoggerFactory.getLogger(MasterServiceImpl.class);
+
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
     private final LoadBalancer loadBalancer;
     private final RegionSplitCoordinator splitCoordinator;
     private final RegionMergeCoordinator mergeCoordinator;
     private final HotSpotCoordinator hotSpotCoordinator;
-    private final ClusterDetector regionSplitDetector;
-    private final ClusterDetector hotSpotDetector;
     private final ReplicationCoordinator replicationCoordinator;
     private final ReplicaMonitor replicaMonitor;
     private final FailoverCoordinator failoverCoordinator;
@@ -50,6 +52,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private final java.util.Set<String> recoveringRegions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private MonitoringService monitoringService;
     private ScheduledExecutorService balanceScheduler;
+    private ScheduledExecutorService hotSpotScheduler;
+    private ScheduledExecutorService regionSplitScheduler;
+    private ScheduledExecutorService serverFailureCheckScheduler;
+    private final Map<String, Long> regionSplitCooldownUntilMs = new ConcurrentHashMap<>();
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
 
@@ -92,8 +98,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
-        this.regionSplitDetector = new RegionSplitDetector(clusterManager, metadataManager, splitCoordinator);
-        this.hotSpotDetector = new HotSpotDetector(hotSpotCoordinator);
         this.serverFailureRecoveryExecutor = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "ServerFailure-Recovery");
             t.setDaemon(true);
@@ -104,8 +108,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         // 启动自动合并检查
         mergeCoordinator.start();
 
-        // 启动定期负载均衡检查（每 5 分钟一次）
+        // 启动定期调度器
         startLoadBalanceScheduler();
+        startHotSpotScheduler();
+        startRegionSplitScheduler();
+        startServerFailureCheckScheduler();
     }
 
     public void setMonitoringService(MonitoringService monitoringService) {
@@ -142,20 +149,137 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             5, 5, TimeUnit.MINUTES
         );
 
-        System.out.println("LoadBalance scheduler started, interval: 5 minutes");
+        logger.info("LoadBalance scheduler started, interval: 5 minutes");
     }
 
-    public ClusterDetector getRegionSplitDetector() {
-        return regionSplitDetector;
+    /**
+     * 启动热点检测调度器
+     */
+    private void startHotSpotScheduler() {
+        hotSpotScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "HotSpot-Detector");
+            t.setDaemon(true);
+            return t;
+        });
+        hotSpotScheduler.scheduleAtFixedRate(
+            this::checkHotSpots,
+            10, 10, TimeUnit.SECONDS
+        );
     }
 
-    public ClusterDetector getHotSpotDetector() {
-        return hotSpotDetector;
+    /**
+     * 启动 Region 分裂检测调度器
+     */
+    private void startRegionSplitScheduler() {
+        regionSplitScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "RegionSplit-Detector");
+            t.setDaemon(true);
+            return t;
+        });
+        regionSplitScheduler.scheduleWithFixedDelay(
+            this::checkRegionSplitSuggestions,
+            30, 30, TimeUnit.SECONDS
+        );
+    }
+
+    /**
+     * 启动服务器失败检测调度器
+     */
+    private void startServerFailureCheckScheduler() {
+        long heartbeatTimeoutMs = Constants.DEFAULT_HEARTBEAT_TIMEOUT_MS;
+        long checkIntervalMs = Constants.DEFAULT_HEARTBEAT_INTERVAL_MS * 2;
+        serverFailureCheckScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "ServerFailure-Detector");
+            t.setDaemon(true);
+            return t;
+        });
+        serverFailureCheckScheduler.scheduleAtFixedRate(
+            () -> checkFailedServers(heartbeatTimeoutMs),
+            checkIntervalMs, checkIntervalMs, TimeUnit.MILLISECONDS
+        );
+    }
+
+    /**
+     * 检查并执行热点动作
+     */
+    private void checkHotSpots() {
+        try {
+            List<HotSpotCoordinator.HotSpotAction> actions = hotSpotCoordinator.planPendingActions();
+            if (!actions.isEmpty()) {
+                executeHotSpotActions(actions);
+            }
+        } catch (Exception e) {
+            logger.warn("Error checking hot spots: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 检查 Region 分裂建议
+     */
+    private void checkRegionSplitSuggestions() {
+        long now = System.currentTimeMillis();
+        regionSplitCooldownUntilMs.entrySet().removeIf(entry -> entry.getValue() <= now);
+
+        try {
+            for (ClusterManager.ServerInfo serverInfo : clusterManager.getActiveServers()) {
+                for (Map.Entry<String, ClusterManager.RegionLoad> entry : serverInfo.getRegionLoads().entrySet()) {
+                    String regionId = entry.getKey();
+                    if (regionSplitCooldownUntilMs.getOrDefault(regionId, 0L) > now
+                        || splitCoordinator.getSplittingRegions().contains(regionId)) {
+                        continue;
+                    }
+
+                    ClusterManager.RegionLoad load = entry.getValue();
+                    if (!splitCoordinator.shouldSplit(load)) {
+                        continue;
+                    }
+
+                    Region region = metadataManager.getRegion(regionId);
+                    if (region == null) {
+                        continue;
+                    }
+
+                    ServerId serverId = serverInfo.getServerId();
+                    splitCoordinator.scheduleSplit(regionId, region.getTableName(), serverId, load);
+                    regionSplitCooldownUntilMs.put(regionId, now + TimeUnit.MINUTES.toMillis(10));
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Error checking region split suggestions: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 检查失败的服务器
+     */
+    private void checkFailedServers(long heartbeatTimeoutMs) {
+        try {
+            List<ServerId> staleServers = clusterManager.detectStaleMetricServers(heartbeatTimeoutMs);
+            if (staleServers.isEmpty()) {
+                return;
+            }
+
+            for (ServerId staleServer : staleServers) {
+                recordEvent("METRICS_STALE", "WARN", null, null, null, staleServer,
+                    "Heartbeat metrics are stale; ZooKeeper membership remains authoritative", null);
+            }
+        } catch (Exception e) {
+            logger.warn("Error checking failed servers: {}", e.getMessage());
+        }
     }
 
     public void shutdown() {
         if (balanceScheduler != null) {
             balanceScheduler.shutdownNow();
+        }
+        if (hotSpotScheduler != null) {
+            hotSpotScheduler.shutdownNow();
+        }
+        if (regionSplitScheduler != null) {
+            regionSplitScheduler.shutdownNow();
+        }
+        if (serverFailureCheckScheduler != null) {
+            serverFailureCheckScheduler.shutdownNow();
         }
         serverFailureRecoveryExecutor.shutdownNow();
         mergeCoordinator.stop();
@@ -175,12 +299,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             List<LoadBalancer.BalanceAction> actions = loadBalancer.computeBalanceActions(servers);
 
             if (!actions.isEmpty()) {
-                System.out.println("Load balance triggered: " + actions.size() + " actions");
+                logger.info("Load balance triggered: {} actions", actions.size());
                 executeBalanceActions(actions);
             }
         } catch (Exception e) {
-            System.err.println("Error running load balance: " + e.getMessage());
-            e.printStackTrace();
+            logger.warn("Error running load balance: {}", e.getMessage(), e);
         }
     }
 
@@ -191,12 +314,12 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         for (LoadBalancer.BalanceAction action : actions) {
             try {
                 if (action == null) {
-                    System.err.println("Skipping null balance action");
+                    logger.warn("Skipping null balance action");
                     continue;
                 }
                 migrationCoordinator.execute(action);
             } catch (Exception e) {
-                System.err.println("Error executing balance action for " + action.getRegionId() + ": " + e.getMessage());
+                logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
             }
         }
     }
@@ -205,7 +328,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         for (HotSpotCoordinator.HotSpotAction action : actions) {
             try {
                 if (action == null) {
-                    System.err.println("Skipping null hot spot action");
+                    logger.warn("Skipping null hot spot action");
                     continue;
                 }
                 recordEvent("HOTSPOT_DETECTED", "INFO", action.getRegionId(), null,
@@ -213,51 +336,24 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     "Hot spot action queued: " + action.getType(), null);
                 hotSpotCoordinator.executeAction(action);
             } catch (Exception e) {
-                System.err.println("Error executing hot spot action for " + action.getRegionId() +
-                    ": " + e.getMessage());
+                logger.warn("Error executing hot spot action for {}: {}",
+                    action.getRegionId(), e.getMessage());
             }
         }
     }
 
-    public void handleHotSpotAction(HotSpotCoordinator.HotSpotAction action) {
-        executeHotSpotActions(java.util.Collections.singletonList(action));
-    }
-
-    public void handleServerFailureEvent(ServerFailedEvent event) {
-        if (event == null) {
-            return;
-        }
-        for (String regionId : event.getAffectedRegionIds()) {
-            boolean primaryFailed = removeFailedReplicaFromMetadata(regionId, event.getFailedServer());
-            lifecycleManager.transition(regionId, event.getFailedServer(),
-                ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
-                "Server failure event received");
-            serverFailureRecoveryExecutor.submit(() ->
-                recoverRegionAfterServerFailure(regionId, event.getFailedServer(), primaryFailed));
-        }
-    }
-
-    public boolean handleRegionSplitSuggestion(RegionSplitSuggestedEvent event) {
-        return splitCoordinator.scheduleSplit(
-            event.getRegionId(),
-            event.getTableName(),
-            event.getServerId(),
-            event.getRegionLoad()
-        );
-    }
-
-    private void recoverRegionAfterServerFailure(String regionId, ServerId failedServer, boolean primaryFailed) {
+    public void recoverRegionAfterServerFailure(String regionId, ServerId failedServer, boolean primaryFailed) {
         if (!recoveringRegions.add(regionId)) {
             return;
         }
 
         try {
-            System.out.println("Starting recovery for region via event: " + regionId);
+            logger.info("Starting recovery for region via event: {}", regionId);
             recordEvent("RECOVERY_STARTED", "INFO", regionId, null, failedServer, null,
                 "Server failure event started region recovery", null);
             Region region = metadataManager.getRegion(regionId);
             if (region == null) {
-                System.err.println("Region not found in metadata: " + regionId);
+                logger.warn("Region not found in metadata: {}", regionId);
                 return;
             }
 
@@ -293,7 +389,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 "ServerFailureEvent recovery failed: " + e.getMessage());
             recordEvent("RECOVERY_FAILED", "ERROR", regionId, null, failedServer, null,
                 "Server failure event recovery failed", e.getMessage());
-            System.err.println("Failed to recover region " + regionId + ": " + e.getMessage());
+            logger.warn("Failed to recover region {}: {}", regionId, e.getMessage());
         } finally {
             recoveringRegions.remove(regionId);
         }
@@ -346,7 +442,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
 
         if (candidates.isEmpty()) {
-            System.out.println("No available server for new replica of region: " + regionId);
+            logger.info("No available server for new replica of region: {}", regionId);
             return null;
         }
 
@@ -374,11 +470,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             ServerId serverId = convertServerId(request.getServerId());
             long seqId = serverSequenceId.incrementAndGet();
 
-            System.out.println("Received register request from: " + serverId);
+            logger.info("Received register request from: {}", serverId);
 
             clusterManager.registerServer(serverId, request.getTimestamp());
-            System.out.println("[REGISTER] clusterId=" + clusterId +
-                ", activeServers=" + clusterManager.getActiveServersList().stream()
+            logger.info("[REGISTER] clusterId={}, activeServers={}", clusterId,
+                clusterManager.getActiveServersList().stream()
                     .map(info -> info.getServerId().toString())
                     .collect(Collectors.toList()));
 
@@ -391,7 +487,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         mysqlConfigProto.getPassword()
                 ).maxPoolSize(mysqlConfigProto.getMaxPoolSize()).build();
                 clusterManager.registerMySQLConfig(serverId, mysqlConfig);
-                System.out.println("MySQL config registered for server: " + serverId);
+                logger.info("MySQL config registered for server: {}", serverId);
             }
 
             MasterProto.RegisterResponse response = MasterProto.RegisterResponse.newBuilder()
@@ -400,7 +496,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 .setServerSequenceId(seqId)
                 .build();
 
-            System.out.println("Sending register response to: " + serverId);
+            logger.info("Sending register response to: {}", serverId);
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
@@ -408,12 +504,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 recoveryCoordinator.reconcileRecoveredServer(serverId);
             }
 
-            System.out.println("RegionServer registered: " + serverId);
+            logger.info("RegionServer registered: {}", serverId);
             recordEvent("SERVER_REGISTERED", "INFO", null, null, serverId, null,
                 "RegionServer registered", null);
         } catch (Exception e) {
-            System.err.println("Error registering RegionServer: " + e.getMessage());
-            e.printStackTrace();
+            logger.warn("Error registering RegionServer: {}", e.getMessage(), e);
             responseObserver.onNext(MasterProto.RegisterResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
@@ -497,8 +592,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
-            System.err.println("[HEARTBEAT] Error: " + e.getMessage());
-            e.printStackTrace();
+            logger.warn("[HEARTBEAT] Error: {}", e.getMessage(), e);
             responseObserver.onNext(MasterProto.HeartbeatResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
@@ -521,7 +615,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             clusterManager.updateRegionState(regionId, convertRegionState(state));
 
             if (state == CommonProto.RegionState.CLOSED && !request.getErrorMessage().isEmpty()) {
-                System.err.println("Region " + regionId + " failed: " + request.getErrorMessage());
+                logger.warn("Region {} failed: {}", regionId, request.getErrorMessage());
                 // 触发故障恢复
                 handleRegionFailure(regionId);
             }
@@ -606,8 +700,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             String tableName = protoSchema.getTableName();
             lock = acquireTableLock(tableName);
 
-            System.out.println("[CREATE TABLE] Start creating table: " + tableName);
-            System.out.println("[CREATE TABLE] Columns count: " + protoSchema.getColumnsCount());
+            logger.info("[CREATE TABLE] Start creating table: {}", tableName);
+            logger.info("[CREATE TABLE] Columns count: {}", protoSchema.getColumnsCount());
 
             if (metadataManager.tableExists(tableName)) {
                 responseObserver.onNext(MasterProto.CreateTableResponse.newBuilder()
@@ -628,37 +722,36 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     column.setName(columnSchema.getName());
                     String columnTypeStr = columnSchema.getType();
                     com.minisql.common.model.Column.ColumnType columnType = convertColumnType(columnTypeStr);
-                    System.out.println("[CREATE TABLE] Column: " + columnSchema.getName() +
-                        ", Type: " + columnTypeStr + " -> " + columnType);
+                    logger.info("[CREATE TABLE] Column: {}, Type: {} -> {}", columnSchema.getName(), columnTypeStr, columnType);
                     column.setType(columnType);
                     column.setLength(columnSchema.getMaxLength());
                     column.setNullable(columnSchema.getNullable());
                     table.addColumn(column);
                 }
             } else {
-                System.out.println("[CREATE TABLE] WARNING: No columns defined!");
+                logger.warn("[CREATE TABLE] WARNING: No columns defined!");
             }
 
             // 设置主键（如果有）- 支持复合主键
             // 优先使用 partitionKeys + clusteringKeys
             if (protoSchema.getPartitionKeysCount() > 0) {
                 table.setPartitionKeys(protoSchema.getPartitionKeysList());
-                System.out.println("[CREATE TABLE] Partition keys: " + protoSchema.getPartitionKeysList());
+                logger.info("[CREATE TABLE] Partition keys: {}", protoSchema.getPartitionKeysList());
             }
             if (protoSchema.getClusteringKeysCount() > 0) {
                 table.setClusteringKeys(protoSchema.getClusteringKeysList());
-                System.out.println("[CREATE TABLE] Clustering keys: " + protoSchema.getClusteringKeysList());
+                logger.info("[CREATE TABLE] Clustering keys: {}", protoSchema.getClusteringKeysList());
             }
             // 向后兼容：如果只有 primaryKey，使用它
             String primaryKey = protoSchema.getPrimaryKey();
             if (primaryKey != null && !primaryKey.isEmpty()) {
                 table.setPrimaryKey(primaryKey);
-                System.out.println("[CREATE TABLE] Primary key (legacy): " + primaryKey);
+                logger.info("[CREATE TABLE] Primary key (legacy): {}", primaryKey);
             } else if (table.getColumns() != null && !table.getColumns().isEmpty()) {
                 // 如果没有显式指定主键，默认使用第一个列作为主键
                 String firstColumn = table.getColumns().get(0).getName();
                 table.setPrimaryKey(firstColumn);
-                System.out.println("[CREATE TABLE] No primary key specified, using first column: " + firstColumn);
+                logger.info("[CREATE TABLE] No primary key specified, using first column: {}", firstColumn);
             }
 
 
@@ -675,24 +768,24 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 : null;
 
             List<Region> regions = splitIntoRegions(tableName, numRegions, startKey, endKey);
-            System.out.println("[CREATE TABLE] Split into " + regions.size() + " regions");
+            logger.info("[CREATE TABLE] Split into {} regions", regions.size());
 
             // 检查可用的 RegionServer
             Collection<ClusterManager.ServerInfo> activeServers = clusterManager.getActiveServers();
-            System.out.println("[CREATE TABLE] Active RegionServers count: " + activeServers.size());
-            System.out.println("[CREATE TABLE] clusterId=" + clusterId +
-                ", activeServers=" + activeServers.stream()
+            logger.info("[CREATE TABLE] Active RegionServers count: {}", activeServers.size());
+            logger.info("[CREATE TABLE] clusterId={}, activeServers={}", clusterId,
+                activeServers.stream()
                     .map(server -> server.getServerId().toString())
                     .collect(Collectors.toList()));
             for (ClusterManager.ServerInfo server : activeServers) {
-                System.out.println("[CREATE TABLE]   - " + server.getServerId());
+                logger.info("[CREATE TABLE]   - {}", server.getServerId());
             }
             if (activeServers.isEmpty()) {
                 throw new IllegalStateException("No active RegionServer available for table " + tableName);
             }
             metadataManager.createTable(table);
             tablePersisted = true;
-            System.out.println("[CREATE TABLE] Table metadata created successfully");
+            logger.info("[CREATE TABLE] Table metadata created successfully");
 
             // 分配 Region 到 RegionServer（带副本）
             List<CommonProto.RegionInfo> regionInfos = new ArrayList<>();
@@ -710,9 +803,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     region.setPrimary(primaryServer);
                     region.setReplicas(new ArrayList<>(selectedServers));
 
-                    System.out.println("[CREATE TABLE] Region " + region.getRegionId() +
-                        " -> Primary: " + primaryServer +
-                        ", Replicas: " + (selectedServers.size() > 1 ? selectedServers.subList(1, selectedServers.size()) : "none"));
+                    logger.info("[CREATE TABLE] Region {} -> Primary: {}, Replicas: {}",
+                        region.getRegionId(), primaryServer,
+                        (selectedServers.size() > 1 ? selectedServers.subList(1, selectedServers.size()) : "none"));
 
                     // 分配主副本到主服务器
                     clusterManager.assignRegionToServer(region.getRegionId(), primaryServer);
@@ -729,24 +822,23 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     // 创建副本组（如果选择了多个服务器）
                     if (selectedServers.size() > 1 && replicationCoordinator != null) {
                         replicationCoordinator.createReplicaGroup(region, selectedServers);
-                        System.out.println("[CREATE TABLE] Replica group created for region " +
-                            region.getRegionId() + " with " + selectedServers.size() + " servers");
+                        logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
+                            region.getRegionId(), selectedServers.size());
                         if (selectedServers.size() < replicationFactor) {
-                            System.out.println("[CREATE TABLE] WARNING: Region " + region.getRegionId() +
-                                " initialized with " + selectedServers.size() +
-                                " replicas, below target replication factor " + replicationFactor);
+                            logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
+                                region.getRegionId(), selectedServers.size(), replicationFactor);
                         }
                         if (recoveryCoordinator != null) {
                             for (int i = 1; i < selectedServers.size(); i++) {
                                 ServerId replicaServer = selectedServers.get(i);
-                                System.out.println("[CREATE TABLE] Bootstrapping replica " + replicaServer +
-                                    " for region " + region.getRegionId());
+                                logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
+                                    replicaServer, region.getRegionId());
                                 recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
                             }
                         }
                     } else if (selectedServers.size() == 1) {
-                        System.out.println("[CREATE TABLE] WARNING: Region " + region.getRegionId() +
-                            " initialized with primary only; no secondary replica available at create time");
+                        logger.warn("[CREATE TABLE] WARNING: Region {} initialized with primary only; no secondary replica available at create time",
+                            region.getRegionId());
                     }
 
                     // 获取 MySQL 配置
@@ -775,7 +867,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
-            System.out.println("[CREATE TABLE] Table created successfully: " + tableName);
+            logger.info("[CREATE TABLE] Table created successfully: {}", tableName);
         } catch (Exception e) {
             for (Region region : createdRegions) {
                 try {
@@ -788,8 +880,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     }
                     for (ServerId serverId : targetServers) {
                         if (!notifyServerCloseRegionSync(serverId, region.getRegionId(), false)) {
-                            System.err.println("[CREATE TABLE] Failed to rollback region close for " +
-                                region.getRegionId() + " on " + serverId);
+                            logger.warn("[CREATE TABLE] Failed to rollback region close for {} on {}",
+                                region.getRegionId(), serverId);
                         }
                     }
                     clusterManager.removeRegionMetadata(region.getTableName(), region.getRegionId());
@@ -804,20 +896,19 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     }
                     metadataManager.removeRegion(region.getRegionId());
                 } catch (Exception cleanupError) {
-                    System.err.println("[CREATE TABLE] Failed to rollback region " +
-                        region.getRegionId() + ": " + cleanupError.getMessage());
+                    logger.error("[CREATE TABLE] Failed to rollback region {}: {}",
+                        region.getRegionId(), cleanupError.getMessage(), cleanupError);
                 }
             }
             if (tablePersisted) {
                 try {
                     metadataManager.deleteTable(request.getSchema().getTableName());
                 } catch (Exception cleanupError) {
-                    System.err.println("[CREATE TABLE] Failed to rollback table " +
-                        request.getSchema().getTableName() + ": " + cleanupError.getMessage());
+                    logger.error("[CREATE TABLE] Failed to rollback table {}: {}",
+                        request.getSchema().getTableName(), cleanupError.getMessage(), cleanupError);
                 }
             }
-            System.err.println("[CREATE TABLE] ERROR: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("[CREATE TABLE] ERROR: {}", e.getMessage(), e);
             responseObserver.onNext(MasterProto.CreateTableResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build());
@@ -890,7 +981,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 .build());
             responseObserver.onCompleted();
 
-            System.out.println("Table deleted: " + tableName);
+            logger.info("Table deleted: {}", tableName);
         } catch (Exception e) {
             responseObserver.onNext(MasterProto.DeleteTableResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
@@ -1275,7 +1366,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 lock.release();
             }
         } catch (Exception e) {
-            System.err.println("Failed to release distributed lock: " + e.getMessage());
+            logger.warn("Failed to release distributed lock: {}", e.getMessage(), e);
         }
     }
 
@@ -1435,7 +1526,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             throw new IllegalStateException("FailoverCoordinator is required for region failure handling");
         }
 
-        System.out.println("Handling failure for region via FailoverCoordinator: " + regionId);
+        logger.info("Handling failure for region via FailoverCoordinator: {}", regionId);
         failoverCoordinator.triggerEmergencyFailover(regionId);
     }
 
@@ -1461,8 +1552,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 response.getLastAppliedSequenceId()
             );
         } catch (Exception e) {
-            System.err.println("Failed to fetch replication lag for region " + regionId +
-                " on " + serverId + ": " + e.getMessage());
+            logger.warn("Failed to fetch replication lag for region {} on {}: {}", regionId, serverId, e.getMessage(), e);
             return ReplicationLagSnapshot.empty();
         }
     }
@@ -1495,7 +1585,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             }
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to notify server promote to primary: " + e.getMessage());
+            logger.error("Failed to notify server promote to primary: {}", e.getMessage(), e);
             return false;
         }
     }
@@ -1505,40 +1595,38 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
      * @return 是否成功打开
      */
     private boolean notifyServerOpenRegionSync(ServerId serverId, Region region) {
-        System.out.println("Synchronously notifying " + serverId + " to open region " + region.getRegionId());
+        logger.info("Synchronously notifying {} to open region {}", serverId, region.getRegionId());
 
         try {
             RegionServerProto.OpenRegionResponse response = commandClient.openRegion(serverId, region, false);
             if (response.getStatus().getSuccess()) {
-                System.out.println("Region " + region.getRegionId() + " opened successfully on " + serverId);
+                logger.info("Region {} opened successfully on {}", region.getRegionId(), serverId);
                 return true;
             }
-            System.err.println("Failed to open region " + region.getRegionId() + ": " + response.getStatus().getMessage());
+            logger.warn("Failed to open region {}: {}", region.getRegionId(), response.getStatus().getMessage());
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to notify server open region: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Failed to notify server open region: {}", e.getMessage(), e);
             return false;
         }
     }
 
     private boolean notifyServerCloseRegionSync(ServerId serverId, String regionId, boolean dropTable) {
-        System.out.println("Synchronously notifying " + serverId + " to close region " + regionId +
-            (dropTable ? " and drop table" : ""));
+        logger.info("Synchronously notifying {} to close region {}{}",
+            serverId, regionId, (dropTable ? " and drop table" : ""));
 
         try {
             RegionServerProto.CloseRegionResponse response =
                 commandClient.closeRegion(serverId, regionId, false, dropTable);
             if (response.getStatus().getSuccess()) {
-                System.out.println("Region " + regionId + " closed successfully on " + serverId +
-                    (dropTable ? " and table dropped" : ""));
+                logger.info("Region {} closed successfully on {}{}",
+                    regionId, serverId, (dropTable ? " and table dropped" : ""));
                 return true;
             }
-            System.err.println("Failed to close region " + regionId + ": " + response.getStatus().getMessage());
+            logger.warn("Failed to close region {}: {}", regionId, response.getStatus().getMessage());
             return false;
         } catch (Exception e) {
-            System.err.println("Failed to synchronously close region " + regionId + " on " + serverId + ": " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Failed to synchronously close region {} on {}: {}", regionId, serverId, e.getMessage(), e);
             return false;
         }
     }

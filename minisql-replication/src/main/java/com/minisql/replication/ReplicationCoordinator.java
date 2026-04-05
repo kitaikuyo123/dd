@@ -5,6 +5,8 @@ import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.storage.MySQLConfig;
 import com.minisql.zookeeper.ZkClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,15 +20,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * Coordinates replication lifecycle while delegating storage, transport and failover concerns.
  */
 public class ReplicationCoordinator {
 
-    private static final Logger LOGGER = Logger.getLogger(ReplicationCoordinator.class.getName());
+    private static final Logger logger = LoggerFactory.getLogger(ReplicationCoordinator.class);
 
     private final ReplicationConfig config;
     private final ReplicationWAL wal;
@@ -124,8 +124,8 @@ public class ReplicationCoordinator {
         replicationQueues.put(region.getRegionId(), new LinkedBlockingQueue<>());
         startReplicationWorker(region.getRegionId());
         registry.recordPrimaryProgress(region.getRegionId(), currentSequenceId(region.getRegionId()));
-        System.out.println("Replica group created for region: " + region.getRegionId() +
-            " with " + group.getReplicas().size() + " replicas");
+        logger.info("Replica group created for region: {} with {} replicas",
+            region.getRegionId(), group.getReplicas().size());
     }
 
     public ReplicationLogEntry logMutations(String regionId, List<KeyValue> mutations) {
@@ -169,7 +169,7 @@ public class ReplicationCoordinator {
         try {
             return replicate(regionId, mutations).get(config.getReplicationTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
-            System.err.println("Synchronous replication failed for region " + regionId + ": " + e.getMessage());
+            logger.warn("Synchronous replication failed for region {}: {}", regionId, e.getMessage());
             return false;
         }
     }
@@ -178,7 +178,7 @@ public class ReplicationCoordinator {
         try {
             return replicate(regionId, entry).get(config.getReplicationTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
-            System.err.println("Synchronous replication failed for region " + regionId + ": " + e.getMessage());
+            logger.warn("Synchronous replication failed for region {}: {}", regionId, e.getMessage());
             return false;
         }
     }
@@ -245,7 +245,7 @@ public class ReplicationCoordinator {
             try {
                 wal.deleteRegion(regionId);
             } catch (Exception e) {
-                System.err.println("Failed to delete WAL for region " + regionId + ": " + e.getMessage());
+                logger.warn("Failed to delete WAL for region {}: {}", regionId, e.getMessage());
             }
         }
     }
@@ -356,7 +356,7 @@ public class ReplicationCoordinator {
                             wal.markAsApplied(regionId, task.entry.getSequenceId(),
                                 result.replica.getHost() + ":" + result.replica.getPort());
                         } catch (Exception e) {
-                            System.err.println("Failed to mark WAL as applied: " + e.getMessage());
+                            logger.warn("Failed to mark WAL as applied: {}", e.getMessage());
                         }
                     }
                 }
@@ -383,12 +383,8 @@ public class ReplicationCoordinator {
             }
             long timeSinceLastUpdate = System.currentTimeMillis() - state.getLastUpdateTime();
             if (timeSinceLastUpdate > config.getHealthCheckIntervalMs() * 3L && group.getReplicas().size() > 1) {
-                LOGGER.log(
-                    Level.FINE,
-                    "Replication health check observed stale primary progress for region {0}, " +
-                        "but automatic failover is owned by the master control plane",
-                    regionId
-                );
+                logger.debug("Replication health check observed stale primary progress for region {}, " +
+                    "but automatic failover is owned by the master control plane", regionId);
             }
         }
     }
@@ -398,10 +394,8 @@ public class ReplicationCoordinator {
             try {
                 return wal.getCurrentSequenceId(regionId);
             } catch (Exception e) {
-                LOGGER.log(Level.FINE,
-                    "Falling back to in-memory replication progress for region " + regionId +
-                        " because WAL is unavailable",
-                    e);
+                logger.debug("Falling back to in-memory replication progress for region {} " +
+                    "because WAL is unavailable", regionId, e);
             }
         }
         ReplicaGroup group = registry.getReplicaGroup(regionId);

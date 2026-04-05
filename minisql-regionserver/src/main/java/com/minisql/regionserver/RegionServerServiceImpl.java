@@ -8,6 +8,7 @@ import com.minisql.common.model.RowAssembler;
 import com.minisql.common.model.Table;
 import com.minisql.common.model.Column;
 import com.minisql.common.proto.*;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationLogEntry;
 import com.minisql.replication.ReplicationWAL;
@@ -68,7 +69,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 logger.info("[RegionServer.put] KeyValue: rowKey={}, family={}, qualifier={}, value.length={}, value={}",
                     new String(kv.getRowKey()), kv.getFamily(), kv.getQualifier(),
                     kv.getValue() != null ? kv.getValue().length : 0,
-                    kv.getValue() != null ? bytesToHex(kv.getValue()) : "null");
+                    kv.getValue() != null ? BytesUtil.bytesToHex(kv.getValue()) : "null");
                 keyValues.add(kv);
             }
 
@@ -1021,32 +1022,6 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         }
     }
 
-    /**
-     * 处理 SQL 更新请求
-     */
-    @Override
-    public void executeUpdate(RegionServerProto.ExecuteUpdateRequest request,
-                              StreamObserver<RegionServerProto.ExecuteUpdateResponse> responseObserver) {
-        try {
-            String regionId = request.getRegionId();
-            String sql = request.getSql();
-
-            logger.info("Received executeUpdate request for region: {}, sql: {}", regionId, sql);
-
-            throw new UnsupportedOperationException(
-                "RegionServer SQL updates are disabled because logical SQL cannot be safely rewritten to the physical kv_store schema. " +
-                    "Use the typed mutation path instead.");
-        } catch (Exception e) {
-            logger.error("Error processing executeUpdate request", e);
-            RegionServerProto.ExecuteUpdateResponse response = RegionServerProto.ExecuteUpdateResponse.newBuilder()
-                .setStatus(createErrorStatus("Update failed: " + e.getMessage()))
-                .build();
-
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        }
-    }
-
     private long performMigrationCatchup(String regionId, ServerId targetServer) throws Exception {
         ReplicationWAL wal = regionServer.getWal();
         long snapshotSequenceId = wal != null ? wal.getCurrentSequenceId(regionId) : 0L;
@@ -1289,17 +1264,5 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
         logger.debug("SQL converted: {} -> {}", sql, result);
         return result;
-    }
-
-    /**
-     * 将字节数组转换为十六进制字符串
-     */
-    private String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X ", b));
-        }
-        return sb.toString();
     }
 }

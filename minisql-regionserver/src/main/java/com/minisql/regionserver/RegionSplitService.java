@@ -2,6 +2,7 @@ package com.minisql.regionserver;
 
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
+import com.minisql.common.utils.BytesUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -112,7 +113,7 @@ public class RegionSplitService {
             throw new IOException("Region not found: " + regionId);
         }
 
-        logger.info("Splitting region: {} at key: {}", regionId, bytesToHex(splitKey));
+        logger.info("Splitting region: {} at key: {}", regionId, BytesUtil.bytesToHex(splitKey));
 
         // 1. 创建两个新 Region 元数据
         String leftRegionId = oldRegion.getTableName() + "_l_" + UUID.randomUUID().toString().substring(0, 6);
@@ -175,18 +176,6 @@ public class RegionSplitService {
         result.setSplitKey(splitKey);
 
         return result;
-    }
-
-    /**
-     * 字节数组转十六进制（用于日志）
-     */
-    private String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /**

@@ -8,10 +8,13 @@ import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,6 +26,8 @@ import java.util.concurrent.TimeUnit;
  * 负责模块: 开发者C
  */
 public class Router {
+
+    private static final Logger logger = LoggerFactory.getLogger(Router.class);
 
     private static final long DEFAULT_LAG_CACHE_TTL_MS = 2000L;
     private static final long DEFAULT_CIRCUIT_BREAKER_MS = 5000L;
@@ -218,15 +223,9 @@ public class Router {
         }
 
         if (regions != null && !regions.isEmpty()) {
-            // 策略1：简单的轮询
-            // return roundRobinSelect(regions);
-
-            // 策略2：随机选择（当前实现，最简单）
+            // 随机选择（当前实现，最简单）
             RegionRouteInfo region = regions.get(new Random().nextInt(regions.size()));
             return selectBestReadServer(region);
-
-            // 策略3：选择Region数据量最小的（需要ZK支持）
-            // return selectByRegionSize(regions);
         }
 
         // 返回默认地址
@@ -234,21 +233,11 @@ public class Router {
     }
 
     /**
-     * 轮询选择（均匀分布请求）
-     */
-    private int roundRobinIndex = 0;
-    private ServerAddress roundRobinSelect(List<RegionRouteInfo> regions) {
-        if (regions.isEmpty()) return null;
-        int index = (roundRobinIndex++) % regions.size();
-        return regions.get(index).getPrimaryServer();
-    }
-
-    /**
      * 根据 rowKey 查找对应的 Region
      */
     private RegionRouteInfo findRegionByKey(List<RegionRouteInfo> regions, byte[] rowKey) {
         for (RegionRouteInfo region : regions) {
-            if (isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
+            if (BytesUtil.isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
                 return region;
             }
         }
@@ -256,37 +245,11 @@ public class Router {
     }
 
     /**
-     * 检查 rowKey 是否在指定范围内
-     */
-    private boolean isKeyInRange(byte[] rowKey, byte[] startKey, byte[] endKey) {
-        // startKey <= rowKey < endKey
-        if (startKey != null && compareBytes(rowKey, startKey) < 0) {
-            return false;
-        }
-        if (endKey != null && compareBytes(rowKey, endKey) >= 0) {
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * 比较字节数组
-     */
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = (a[i] & 0xFF) - (b[i] & 0xFF);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
-    }
-
-    /**
      * 刷新路由缓存
      */
     public void refreshRouteCache(String tableName) {
         if (!isZkUsable()) {
-            System.err.println("No ZooKeeper connection available");
+            logger.warn("No ZooKeeper connection available");
             return;
         }
 
@@ -296,14 +259,14 @@ public class Router {
 
             // 检查表是否存在
             if (!zkClient.exists(tablePath)) {
-                System.err.println("Table not found in ZooKeeper: " + tableName);
+                logger.warn("Table not found in ZooKeeper: {}", tableName);
                 return;
             }
 
             // 获取所有 Region
             String regionsPath = tablePath + "/regions";
             if (!zkClient.exists(regionsPath)) {
-                System.err.println("No regions found for table: " + tableName);
+                logger.warn("No regions found for table: {}", tableName);
                 return;
             }
             ensureTableWatcher(tableName, regionsPath);
@@ -344,7 +307,7 @@ public class Router {
                         }
                     }
                 } catch (Exception e) {
-                    System.err.println("Failed to load region " + regionId + ": " + e.getMessage());
+                    logger.warn("Failed to load region {}: {}", regionId, e.getMessage());
                 }
             }
 
@@ -362,8 +325,7 @@ public class Router {
             if (isZkStoppedError(e)) {
                 return;
             }
-            System.err.println("Failed to refresh route cache: " + e.getMessage());
-            e.printStackTrace();
+            logger.warn("Failed to refresh route cache: {}", e.getMessage(), e);
         }
     }
 
@@ -451,7 +413,7 @@ public class Router {
                 return true;
             }
         } catch (Exception e) {
-            System.err.println("Failed to refresh route cache from Master: " + e.getMessage());
+            logger.warn("Failed to refresh route cache from Master: {}", e.getMessage());
         } finally {
             if (channel != null) {
                 channel.shutdown();
@@ -492,8 +454,8 @@ public class Router {
             }
         } catch (Exception e) {
             circuitBreakerUntil.put(cacheKey, now + circuitBreakerWindowMs);
-            System.err.println("Failed to fetch replication lag from " + candidate +
-                " for region " + regionId + ": " + e.getMessage());
+            logger.warn("Failed to fetch replication lag from {} for region {}: {}",
+                candidate, regionId, e.getMessage());
         } finally {
             if (channel != null) {
                 channel.shutdown();
@@ -564,16 +526,14 @@ public class Router {
                 }
             } else {
                 // 数据格式异常，记录日志并返回 null
-                System.err.println("Invalid region data format for " + tableName + "/" + regionId +
-                                  ": expected 4 parts, got " + parts.length +
-                                  ", data: " + dataStr);
+                logger.warn("Invalid region data format for {}/{}: expected 4 parts, got {}, data: {}",
+                    tableName, regionId, parts.length, dataStr);
                 return null;
             }
 
             return region;
         } catch (Exception e) {
-            System.err.println("Failed to parse region data for " + tableName + "/" + regionId + ": " + e.getMessage());
-            e.printStackTrace();
+            logger.warn("Failed to parse region data for {}/{}: {}", tableName, regionId, e.getMessage(), e);
             return null;
         }
     }
@@ -600,7 +560,7 @@ public class Router {
                 if (isZkStoppedError(e)) {
                     return masterAddress;
                 }
-                System.err.println("Failed to get master from ZooKeeper: " + e.getMessage());
+                logger.warn("Failed to get master from ZooKeeper: {}", e.getMessage());
             }
         }
 
@@ -676,7 +636,7 @@ public class Router {
                         if (isZkStoppedError(e)) {
                             return;
                         }
-                        System.err.println("Failed to refresh table watcher cache for " + tableName + ": " + e.getMessage());
+                        logger.warn("Failed to refresh table watcher cache for {}: {}", tableName, e.getMessage());
                     }
                 });
             } catch (Exception e) {
@@ -684,7 +644,7 @@ public class Router {
                 if (isZkStoppedError(e)) {
                     return;
                 }
-                System.err.println("Failed to watch regions for table " + tableName + ": " + e.getMessage());
+                logger.warn("Failed to watch regions for table {}: {}", tableName, e.getMessage());
             }
         }
     }
@@ -704,7 +664,7 @@ public class Router {
                 if (isZkStoppedError(e)) {
                     return;
                 }
-                System.err.println("Failed to watch region path " + regionPath + ": " + e.getMessage());
+                logger.warn("Failed to watch region path {}: {}", regionPath, e.getMessage());
             }
             registerNodeWatcher(primaryPath, tableName, regionPath);
             registerNodeWatcher(replicasPath, tableName, regionPath);
@@ -731,14 +691,14 @@ public class Router {
                     if (isZkStoppedError(e)) {
                         return;
                     }
-                    System.err.println("Failed to refresh route cache for watcher " + nodePath + ": " + e.getMessage());
+                    logger.warn("Failed to refresh route cache for watcher {}: {}", nodePath, e.getMessage());
                 }
             });
         } catch (Exception e) {
             if (isZkStoppedError(e)) {
                 return;
             }
-            System.err.println("Failed to register watcher for " + nodePath + ": " + e.getMessage());
+            logger.warn("Failed to register watcher for {}: {}", nodePath, e.getMessage());
         }
     }
 

@@ -1,5 +1,7 @@
 package com.minisql.common.model;
 
+import com.minisql.common.utils.BytesUtil;
+
 import java.io.Serializable;
 import java.util.*;
 
@@ -55,9 +57,7 @@ public class Region implements Serializable, Comparable<Region> {
      * 检查key是否属于该Region
      */
     public boolean contains(byte[] key) {
-        int cmpStart = compareBytes(key, startKey);
-        int cmpEnd = compareBytes(key, endKey);
-        return cmpStart >= 0 && cmpEnd < 0;
+        return BytesUtil.isKeyInRange(key, startKey, endKey);
     }
 
     /**
@@ -96,15 +96,6 @@ public class Region implements Serializable, Comparable<Region> {
     public void recordWrite() {
         this.writeRequestCount++;
         this.lastUpdateTime = System.currentTimeMillis();
-    }
-
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = Byte.compare(a[i], b[i]);
-            if (cmp != 0) return cmp;
-        }
-        return Integer.compare(a.length, b.length);
     }
 
     // Getters and Setters
@@ -205,7 +196,7 @@ public class Region implements Serializable, Comparable<Region> {
 
     @Override
     public int compareTo(Region other) {
-        return compareBytes(this.startKey, other.startKey);
+        return BytesUtil.compareTo(this.startKey, other.startKey);
     }
 
     @Override

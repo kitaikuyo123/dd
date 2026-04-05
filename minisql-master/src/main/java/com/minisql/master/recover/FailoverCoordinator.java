@@ -245,14 +245,14 @@ public class FailoverCoordinator {
      */
     private void executeFailover(String regionId) {
         DistributedLock lock = null;
-        System.out.println("Starting failover for region: " + regionId);
+        logger.info("Starting failover for region: {}", regionId);
 
         try {
             lock = acquireRegionLock(regionId);
             // 1. 选择新的主副本
             ReplicaInfo newPrimary = selectNewPrimary(regionId);
             if (newPrimary == null) {
-                System.err.println("No suitable replica found for failover in region: " + regionId);
+                logger.error("No suitable replica found for failover in region: {}", regionId);
                 recordEvent("FAILOVER_TRIGGERED", "ERROR", regionId, null, null, null,
                     "Failover aborted: no suitable replica", null);
                 return;
@@ -266,8 +266,8 @@ public class FailoverCoordinator {
                 lifecycleManager.transition(regionId, newPrimary.getServerId(),
                     ReplicaLifecycleManager.ReplicaLifecycleState.FAILED,
                     "Failover candidate is not caught up");
-                System.err.println("Refusing to promote lagging replica " + newPrimary.getServerId() +
-                        " for region: " + regionId);
+                logger.error("Refusing to promote lagging replica {} for region: {}",
+                        newPrimary.getServerId(), regionId);
                 return;
             }
             lifecycleManager.transition(regionId, newPrimary.getServerId(),
@@ -277,8 +277,8 @@ public class FailoverCoordinator {
                 lifecycleManager.transition(regionId, newPrimary.getServerId(),
                     ReplicaLifecycleManager.ReplicaLifecycleState.FAILED,
                     "Promotion RPC failed");
-                System.err.println("Failed to promote replica " + newPrimary.getServerId() +
-                        " for region: " + regionId);
+                logger.error("Failed to promote replica {} for region: {}",
+                        newPrimary.getServerId(), regionId);
                 recordEvent("FAILOVER_TRIGGERED", "ERROR", regionId, null, null, toServerName(newPrimary.getServerId()),
                     "Failover promotion RPC failed", null);
                 return;
@@ -346,8 +346,8 @@ public class FailoverCoordinator {
 
         // 验证候选副本的复制延迟
         if (candidate.getReplicationLag() > failoverTimeoutMs) {
-            System.err.println("Candidate replica has too much lag: " +
-                             candidate.getReplicationLag() + "ms");
+            logger.warn("Candidate replica has too much lag: {}ms",
+                             candidate.getReplicationLag());
             // 尝试寻找下一个最佳候选
             return findNextBestCandidate(regionId, candidate);
         }
@@ -409,7 +409,7 @@ public class FailoverCoordinator {
     private void notifyFailoverComplete(String regionId, ReplicaInfo newPrimary) {
         // 这里可以添加通知其他组件的逻辑
         // 例如：通过 gRPC 通知 RegionServer、更新负载均衡器等
-        System.out.println("Notifying components about failover completion for region: " + regionId);
+        logger.info("Notifying components about failover completion for region: {}", regionId);
     }
 
     private void recordEvent(String type, String severity, String regionId, String tableName,
@@ -428,8 +428,7 @@ public class FailoverCoordinator {
      */
     public void manualFailover(String regionId, ServerId targetPrimary) {
         DistributedLock lock = null;
-        System.out.println("Manual failover requested for region: " + regionId +
-                         " to: " + targetPrimary);
+        logger.info("Manual failover requested for region: {} to: {}", regionId, targetPrimary);
 
         try {
             lock = acquireRegionLock(regionId);
@@ -443,16 +442,16 @@ public class FailoverCoordinator {
             }
 
             if (targetReplica == null) {
-                System.err.println("Target replica not found: " + targetPrimary);
+                logger.error("Target replica not found: {}", targetPrimary);
                 return;
             }
 
             if (!isCandidateCaughtUp(regionId, targetPrimary)) {
-                System.err.println("Target replica is not caught up enough for manual failover: " + targetPrimary);
+                logger.error("Target replica is not caught up enough for manual failover: {}", targetPrimary);
                 return;
             }
             if (!promoteReplica(regionId, targetPrimary)) {
-                System.err.println("Failed to promote target replica: " + targetPrimary);
+                logger.error("Failed to promote target replica: {}", targetPrimary);
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, targetPrimary);

@@ -33,6 +33,13 @@ public class StorageScanFilter {
         return new Builder();
     }
 
+    /**
+     * Alias for builder() for compatibility
+     */
+    public static Builder newBuilder() {
+        return builder();
+    }
+
     public byte[] getStartKey() {
         return copy(startKey);
     }

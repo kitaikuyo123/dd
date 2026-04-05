@@ -3,6 +3,7 @@ package com.minisql.master.rebalance;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.*;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.rpc.GrpcRegionServerCommandClient;
 import com.minisql.master.rpc.RegionServerCommandClient;
@@ -92,7 +93,7 @@ public class RegionSplitCoordinator {
         // 启动分裂处理器
         splitExecutor.submit(this::processSplitTasks);
 
-        System.out.println("RegionSplitCoordinator started");
+        logger.info("RegionSplitCoordinator started");
     }
 
     /**
@@ -102,7 +103,7 @@ public class RegionSplitCoordinator {
         running = false;
         splitExecutor.shutdown();
 
-        System.out.println("RegionSplitCoordinator stopped");
+        logger.info("RegionSplitCoordinator stopped");
     }
 
     /**
@@ -120,8 +121,8 @@ public class RegionSplitCoordinator {
         SplitTask task = new SplitTask(regionId, tableName, serverId, load);
         boolean offered = splitQueue.offer(task);
         if (offered) {
-            System.out.println("Scheduled split for region: " + regionId +
-                " (size: " + formatSize(load.getStoreFileSize() + load.getMemStoreSize()) + ")");
+            logger.info("Scheduled split for region: {} (size: {})",
+                regionId, formatSize(load.getStoreFileSize() + load.getMemStoreSize()));
         }
         return offered;
     }
@@ -140,7 +141,7 @@ public class RegionSplitCoordinator {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                System.err.println("Error processing split task: " + e.getMessage());
+                logger.error("Error processing split task: {}", e.getMessage(), e);
             }
         }
     }
@@ -154,29 +155,29 @@ public class RegionSplitCoordinator {
 
         // 标记为正在分裂
         if (!splittingRegions.add(regionId)) {
-            System.out.println("Region " + regionId + " is already splitting, skip");
+            logger.warn("Region {} is already splitting, skip", regionId);
             return;
         }
 
         try {
             lock = acquireRegionLock(regionId);
-            System.out.println("Starting split for region: " + regionId);
+            logger.info("Starting split for region: {}", regionId);
 
             // 1. 获取分裂点（从 RegionServer 获取）
             byte[] splitKey = getSplitKeyFromServer(task.getServerId(), regionId);
             if (splitKey == null) {
-                System.err.println("Failed to get split key for region: " + regionId);
+                logger.warn("Failed to get split key for region: {}", regionId);
                 return;
             }
 
-            System.out.println("Split key for region " + regionId + ": " + bytesToHex(splitKey));
+            logger.info("Split key for region {}: {}", regionId, BytesUtil.bytesToHex(splitKey));
 
             // 2. 通知 RegionServer 执行分裂
             recordEvent("REGION_SPLIT_STARTED", "INFO", regionId, task.getServerId(),
                 "Region split started", null);
             SplitResult result = notifyServerSplitRegion(task.getServerId(), regionId, splitKey);
             if (result == null) {
-                System.err.println("Split failed for region: " + regionId);
+                logger.warn("Split failed for region: {}", regionId);
                 return;
             }
 
@@ -192,16 +193,15 @@ public class RegionSplitCoordinator {
                 migrateRegion(result.getRightRegion().getRegionId(), leftServer, rightServer);
             }
 
-            System.out.println("Split completed for region: " + regionId +
-                    " -> " + result.getLeftRegion().getRegionId() + " (on " + leftServer + "), " +
-                    result.getRightRegion().getRegionId() + " (on " + rightServer + ")");
+            logger.info("Split completed for region: {} -> {} (on {}), {} (on {})",
+                    regionId, result.getLeftRegion().getRegionId(), leftServer,
+                    result.getRightRegion().getRegionId(), rightServer);
             recordEvent("REGION_SPLIT_COMPLETED", "INFO", regionId, task.getServerId(),
                 "Region split completed",
                 result.getLeftRegion().getRegionId() + "," + result.getRightRegion().getRegionId());
 
         } catch (Exception e) {
-            System.err.println("Error splitting region " + regionId + ": " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Error splitting region {}: {}", regionId, e.getMessage(), e);
         } finally {
             releaseLock(lock);
             splittingRegions.remove(regionId);
@@ -218,7 +218,7 @@ public class RegionSplitCoordinator {
                 return response.getSplitKey().toByteArray();
             }
         } catch (Exception e) {
-            System.err.println("Failed to get split key from server: " + e.getMessage());
+            logger.error("Failed to get split key from server: {}", e.getMessage(), e);
         }
         return null;
     }
@@ -236,7 +236,7 @@ public class RegionSplitCoordinator {
                 );
             }
         } catch (Exception e) {
-            System.err.println("Failed to split region on server: " + e.getMessage());
+            logger.error("Failed to split region on server: {}", e.getMessage(), e);
         }
         return null;
     }
@@ -366,7 +366,7 @@ public class RegionSplitCoordinator {
     public boolean checkAndSplitRegion(String regionId) {
         Region region = metadataManager.getRegion(regionId);
         if (region == null) {
-            System.err.println("Region not found: " + regionId);
+            logger.warn("Region not found: {}", regionId);
             return false;
         }
 
@@ -377,7 +377,7 @@ public class RegionSplitCoordinator {
 
         ServerId serverId = clusterManager.getPrimaryServerForRegion(regionId);
         if (serverId == null) {
-            System.err.println("No server assigned to region: " + regionId);
+            logger.warn("No server assigned to region: {}", regionId);
             return false;
         }
 
@@ -436,15 +436,6 @@ public class RegionSplitCoordinator {
             return String.format("%.2f KB", size / 1024.0);
         }
         return size + " B";
-    }
-
-    private String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "null";
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /**

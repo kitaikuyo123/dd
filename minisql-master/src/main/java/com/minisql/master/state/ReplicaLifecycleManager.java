@@ -1,6 +1,8 @@
 package com.minisql.master.state;
 
 import com.minisql.common.model.ServerId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,6 +12,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * and failover paths so all orchestration flows report into a single state map.
  */
 public class ReplicaLifecycleManager {
+
+    private static final Logger logger = LoggerFactory.getLogger(ReplicaLifecycleManager.class);
 
     public enum ReplicaLifecycleState {
         BOOTSTRAPPING,
@@ -80,9 +84,8 @@ public class ReplicaLifecycleManager {
             return current;
         });
 
-        System.out.println("[REPLICA-LIFECYCLE] region=" + regionId +
-            " server=" + serverId +
-            " state=" + state +
+        logger.info("[REPLICA-LIFECYCLE] region={} server={} state={}{}",
+            regionId, serverId, state,
             (detail != null && !detail.isEmpty() ? " detail=" + detail : ""));
     }
 

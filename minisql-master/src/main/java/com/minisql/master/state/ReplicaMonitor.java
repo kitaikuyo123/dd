@@ -2,6 +2,8 @@ package com.minisql.master.state;
 
 import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -11,6 +13,8 @@ import java.util.concurrent.*;
  * 负责维护 Region 副本的运行态指标；成员存活与故障收敛以 ZooKeeper 为准。
  */
 public class ReplicaMonitor {
+
+    private static final Logger logger = LoggerFactory.getLogger(ReplicaMonitor.class);
 
     private final ClusterManager clusterManager;
     private final ScheduledExecutorService scheduler;
@@ -64,7 +68,7 @@ public class ReplicaMonitor {
             healthCheckIntervalMs,
             TimeUnit.MILLISECONDS
         );
-        System.out.println("ReplicaMonitor started with health check interval: " + healthCheckIntervalMs + "ms");
+        logger.info("ReplicaMonitor started with health check interval: {}ms", healthCheckIntervalMs);
     }
 
     /**
@@ -80,7 +84,7 @@ public class ReplicaMonitor {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        System.out.println("ReplicaMonitor stopped");
+        logger.info("ReplicaMonitor stopped");
     }
 
     /**
@@ -90,7 +94,7 @@ public class ReplicaMonitor {
         List<ReplicaInfo> replicas = regionReplicas.computeIfAbsent(regionId, k -> new CopyOnWriteArrayList<>());
         replicas.removeIf(existing -> existing.getServerId().equals(replica.getServerId()));
         replicas.add(replica);
-        System.out.println("Replica registered: " + replica);
+        logger.info("Replica registered: {}", replica);
     }
 
     /**
@@ -100,13 +104,13 @@ public class ReplicaMonitor {
         List<ReplicaInfo> replicas = regionReplicas.get(regionId);
         if (replicas != null) {
             replicas.removeIf(r -> r.getServerId().equals(serverId));
-            System.out.println("Replica removed: " + serverId + " from region: " + regionId);
+            logger.info("Replica removed: {} from region: {}", serverId, regionId);
         }
     }
 
     public void removeRegion(String regionId) {
         if (regionReplicas.remove(regionId) != null) {
-            System.out.println("Replica monitor removed region: " + regionId);
+            logger.info("Replica monitor removed region: {}", regionId);
         }
     }
 
@@ -210,7 +214,7 @@ public class ReplicaMonitor {
             try {
                 callback.onReplicaFailed(regionId, failedReplica);
             } catch (Exception e) {
-                System.err.println("Error in failover callback: " + e.getMessage());
+                logger.error("Error in failover callback: {}", e.getMessage(), e);
             }
         }
     }
@@ -223,7 +227,7 @@ public class ReplicaMonitor {
             try {
                 callback.onReplicaLagging(regionId, laggingReplica, lagMs);
             } catch (Exception e) {
-                System.err.println("Error in lag callback: " + e.getMessage());
+                logger.error("Error in lag callback: {}", e.getMessage(), e);
             }
         }
     }
@@ -233,7 +237,7 @@ public class ReplicaMonitor {
             try {
                 callback.onReplicaRecovered(regionId, recoveredReplica);
             } catch (Exception e) {
-                System.err.println("Error in recovery callback: " + e.getMessage());
+                logger.error("Error in recovery callback: {}", e.getMessage(), e);
             }
         }
     }
@@ -326,7 +330,7 @@ public class ReplicaMonitor {
                     // 提升新的主副本
                     replica.setState(ReplicaInfo.ReplicaState.PRIMARY);
                     replica.setLastPromotionTime(System.currentTimeMillis());
-                    System.out.println("Promoted " + serverId + " to primary for region: " + regionId);
+                    logger.info("Promoted {} to primary for region: {}", serverId, regionId);
                     return;
                 }
             }

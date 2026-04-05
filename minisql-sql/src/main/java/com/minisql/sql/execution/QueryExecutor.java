@@ -3,12 +3,16 @@ package com.minisql.sql.execution;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 查询执行器
  * 执行查询计划并返回结果
  */
 public class QueryExecutor {
+
+    private static final Logger logger = LoggerFactory.getLogger(QueryExecutor.class);
 
     private final ExecutionContext context;
     private final PlanConverter planConverter;

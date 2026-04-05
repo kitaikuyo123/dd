@@ -12,6 +12,8 @@ import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
 import com.minisql.replication.ReplicaGroup;
 import com.minisql.replication.ReplicationCoordinator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import java.util.concurrent.Executors;
  */
 public class RecoveryCoordinator {
 
+    private static final Logger logger = LoggerFactory.getLogger(RecoveryCoordinator.class);
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
     private final ReplicaMonitor replicaMonitor;
@@ -249,7 +252,7 @@ public class RecoveryCoordinator {
                 lifecycleManager.transition(regionId, replica,
                     ReplicaLifecycleManager.ReplicaLifecycleState.FAILED,
                     "Replica recovery failed: " + e.getMessage());
-                System.err.println("Replica recovery failed for region " + regionId + " on " + replica + ": " + e.getMessage());
+                logger.error("Replica recovery failed for region {} on {}: {}", regionId, replica, e.getMessage());
             } finally {
                 inFlightRecoveries.remove(taskKey);
             }
