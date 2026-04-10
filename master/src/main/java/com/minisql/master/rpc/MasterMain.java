@@ -7,6 +7,7 @@ import com.minisql.master.monitoring.MonitorHttpServer;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.monitoring.SqlConsoleService;
 import com.minisql.master.rebalance.LoadBalancer;
+import com.minisql.master.rebalance.HotSpotCoordinator;
 import com.minisql.master.recover.DataRepairCoordinator;
 import com.minisql.master.recover.FailoverCoordinator;
 import com.minisql.master.recover.RecoveryCoordinator;
@@ -62,6 +63,8 @@ public class MasterMain {
     private MasterServiceImpl serviceImpl;
     private ServerId masterServerId;
     private Properties config;
+    private long hotSpotDetectorIntervalMs = 10_000L;
+    private HotSpotCoordinator.HotSpotSettings hotSpotSettings;
 
     public static void main(String[] args) {
         MasterMain master = new MasterMain();
@@ -181,6 +184,26 @@ public class MasterMain {
         LoadBalancer.Strategy strategy = LoadBalancer.Strategy.fromString(
             config.getProperty("load.balance.strategy", "load_based"));
         loadBalancer.setStrategy(strategy);
+        hotSpotDetectorIntervalMs = parseLongProperty(config, "hotspot.detector.interval.ms", 10_000L);
+        long hotSpotReadThreshold = parseLongProperty(config, "hotspot.read.threshold.per.interval", 200L);
+        long hotSpotWriteThreshold = parseLongProperty(config, "hotspot.write.threshold.per.interval", 100L);
+        double hotSpotGrowthThreshold = parseDoubleProperty(config, "hotspot.growth.threshold", 1.2d);
+        int hotSpotTargetReadReplicaCount = parseIntProperty(config, "hotspot.target.read.replica.count", 3);
+        long hotSpotCooldownMs = parseLongProperty(config, "hotspot.cooldown.ms", TimeUnit.MINUTES.toMillis(5));
+        hotSpotSettings = new HotSpotCoordinator.HotSpotSettings(
+            hotSpotReadThreshold,
+            hotSpotWriteThreshold,
+            hotSpotGrowthThreshold,
+            hotSpotTargetReadReplicaCount,
+            hotSpotCooldownMs);
+        logger.info(
+            "Configured hotspot properties: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
+            hotSpotDetectorIntervalMs,
+            hotSpotReadThreshold,
+            hotSpotWriteThreshold,
+            hotSpotGrowthThreshold,
+            hotSpotTargetReadReplicaCount,
+            hotSpotCooldownMs);
 
         clusterManager = new ClusterManager(loadBalancer);
         clusterManager.setZkClient(zkClient);
@@ -285,7 +308,9 @@ public class MasterMain {
             failoverCoordinator,
             recoveryCoordinator,
             replicaLifecycleManager,
-            config
+            new GrpcRegionServerCommandClient(clusterManager),
+            hotSpotDetectorIntervalMs,
+            hotSpotSettings
         );
         serviceImpl.setMonitoringService(monitoringService);
         serviceImpl.setZkClient(zkClient);
@@ -391,7 +416,44 @@ public class MasterMain {
             return null;
         }
     }
+    private long parseLongProperty(Properties config, String key, long defaultValue) {
+        String value = config.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid long property {}={}, fallback to {}", key, value, defaultValue);
+            return defaultValue;
+        }
+    }
 
+    private int parseIntProperty(Properties config, String key, int defaultValue) {
+        String value = config.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid int property {}={}, fallback to {}", key, value, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    private double parseDoubleProperty(Properties config, String key, double defaultValue) {
+        String value = config.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid double property {}={}, fallback to {}", key, value, defaultValue);
+            return defaultValue;
+        }
+    }
     private void addShutdownHook() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down Master...");
