@@ -68,7 +68,7 @@ class LoadCalculatorTest {
 
     @Test
     @DisplayName("测试判断服务器是否过载")
-    void testIsOverloaded() {
+    void testIsOverloaded() throws Exception {
         LoadCalculator calculator = new LoadCalculator();
 
         ServerId idleServer = new ServerId("host1", 8080);
@@ -87,9 +87,9 @@ class LoadCalculatorTest {
         // 设置高负载指标使服务器过载（需要超过 80 分）
         ClusterManager.ServerMetrics busyMetrics = new ClusterManager.ServerMetrics();
         busyMetrics.setCpuUsage(90.0);
-        busyMetrics.setMemoryUsage(85.0);
+        busyMetrics.setMemoryUsage(95.0);
         busyMetrics.setTotalSpace(1000L);
-        busyMetrics.setAvailableSpace(10L);  // 99% 磁盘使用率
+        busyMetrics.setAvailableSpace(5L);  // 99.5% 磁盘使用率
         busyInfo.setMetrics(busyMetrics);
 
         // 添加 Region 负载增加分数（每个 Region 约 1 分）
@@ -102,7 +102,21 @@ class LoadCalculatorTest {
             busyInfo.updateRegionLoad("region-" + i, load);
         }
 
+        // 第一次调用建立请求基线（requestScore 为 0，因为无历史数据算不出 QPS）
         assertFalse(calculator.isOverloaded(idleInfo));
+        assertFalse(calculator.isOverloaded(busyInfo));
+
+        // 模拟请求增长，使 requestScore 贡献足够分数以触发过载
+        Thread.sleep(50);
+        for (int i = 0; i < 10; i++) {
+            ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
+            load.setRegionId("region-" + i);
+            load.setReadRequests(20000);
+            load.setWriteRequests(10000);
+            load.setStoreFileSize(100 * 1024 * 1024);
+            busyInfo.updateRegionLoad("region-" + i, load);
+        }
+
         assertTrue(calculator.isOverloaded(busyInfo));
     }
 

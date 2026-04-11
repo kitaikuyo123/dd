@@ -40,6 +40,11 @@ class HotSpotCoordinatorTest {
         MetadataManager metadataManager = new MetadataManager();
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager, createRegionSplitCoordinator(), null);
 
+        // Configure thresholds suitable for test intervals (~10ms)
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(
+            20, 10, 3, 300000
+        ));
+
         ServerId primary = new ServerId("primary-host", 16020);
         ServerId target = new ServerId("target-host", 16021);
         clusterManager.registerServer(primary);
@@ -49,10 +54,11 @@ class HotSpotCoordinatorTest {
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        recordReadHistory(manager, region.getRegionId(), 0, 12000, 25000);
+        // Deltas: 25, 25 per ~10ms interval → above readThreshold of 20
+        recordReadHistory(manager, region.getRegionId(), 0, 25, 50);
         invokeHotSpotDetection(manager);
 
-        List<HotSpotCoordinator.HotSpotAction> actions = manager.drainPendingActions();
+        List<HotSpotCoordinator.HotSpotAction> actions = manager.planPendingActions();
         assertEquals(1, actions.size());
         assertEquals(HotSpotCoordinator.HotSpotActionType.ADD_READ_REPLICA, actions.get(0).getType());
         assertEquals(target, actions.get(0).getTargetServer());
@@ -70,6 +76,8 @@ class HotSpotCoordinatorTest {
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
             createRegionSplitCoordinator(), null);
 
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
         ServerId primary = new ServerId("primary-host", 16020);
         clusterManager.registerServer(primary);
 
@@ -77,13 +85,12 @@ class HotSpotCoordinatorTest {
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        // 记录写请求历史（超过阈值 100，但增长平稳以避免触发 GROWING 类型）
-        // 使用递增但增长比例较小的数据
-        recordWriteHistory(manager, region.getRegionId(), 1000, 1050, 1180);
+        // Deltas: 15, 15 per ~10ms → constant, above writeThreshold of 10, not growing
+        recordWriteHistory(manager, region.getRegionId(), 0, 15, 30);
 
         invokeHotSpotDetection(manager);
 
-        List<HotSpotCoordinator.HotSpotAction> actions = manager.drainPendingActions();
+        List<HotSpotCoordinator.HotSpotAction> actions = manager.planPendingActions();
         assertEquals(1, actions.size());
         assertEquals(HotSpotCoordinator.HotSpotActionType.SPLIT_REGION, actions.get(0).getType());
 
@@ -100,6 +107,8 @@ class HotSpotCoordinatorTest {
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
             createRegionSplitCoordinator(), null);
 
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
         ServerId primary = new ServerId("primary-host", 16020);
         clusterManager.registerServer(primary);
 
@@ -107,18 +116,18 @@ class HotSpotCoordinatorTest {
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        // 记录写请求历史（快速增长触发 GROWING 类型）
-        recordWriteHistory(manager, region.getRegionId(), 0, 50, 180);
+        // Deltas: 15, 35 per ~10ms → growing (ratio 2.33 > 1.2), above writeThreshold of 10
+        recordWriteHistory(manager, region.getRegionId(), 0, 15, 50);
 
         invokeHotSpotDetection(manager);
 
-        List<HotSpotCoordinator.HotSpotAction> actions = manager.drainPendingActions();
+        List<HotSpotCoordinator.HotSpotAction> actions = manager.planPendingActions();
         assertEquals(1, actions.size());
         assertEquals(HotSpotCoordinator.HotSpotActionType.SPLIT_REGION, actions.get(0).getType());
 
         Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
         assertTrue(currentHotSpots.containsKey(region.getRegionId()));
-        assertEquals(HotSpotCoordinator.HotSpotType.WRITE_GROWING, currentHotSpots.get(region.getRegionId()).getType());
+        assertEquals(HotSpotCoordinator.HotSpotType.WRITE, currentHotSpots.get(region.getRegionId()).getType());
     }
 
     @Test
@@ -129,6 +138,8 @@ class HotSpotCoordinatorTest {
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
             createRegionSplitCoordinator(), null);
 
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
         ServerId primary = new ServerId("primary-host", 16020);
         ServerId target = new ServerId("target-host", 16021);
         clusterManager.registerServer(primary);
@@ -138,22 +149,22 @@ class HotSpotCoordinatorTest {
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        // 第一次检测
-        recordReadHistory(manager, region.getRegionId(), 0, 12000, 25000);
+        // First detection
+        recordReadHistory(manager, region.getRegionId(), 0, 25, 50);
         invokeHotSpotDetection(manager);
 
-        List<HotSpotCoordinator.HotSpotAction> firstActions = manager.drainPendingActions();
+        List<HotSpotCoordinator.HotSpotAction> firstActions = manager.planPendingActions();
         assertEquals(1, firstActions.size());
 
-        // 第二次检测（冷却期内）
-        recordReadHistory(manager, region.getRegionId(), 30000, 40000, 55000);
+        // Second detection (during cooldown)
+        recordReadHistory(manager, region.getRegionId(), 60, 85, 110);
         invokeHotSpotDetection(manager);
 
-        // 冷却期内不应产生新动作
-        List<HotSpotCoordinator.HotSpotAction> secondActions = manager.drainPendingActions();
+        // No new actions during cooldown
+        List<HotSpotCoordinator.HotSpotAction> secondActions = manager.planPendingActions();
         assertTrue(secondActions.isEmpty());
 
-        // 但热点状态应该更新
+        // But hotspot status should still be updated
         Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
         assertTrue(currentHotSpots.containsKey(region.getRegionId()));
     }
@@ -166,6 +177,9 @@ class HotSpotCoordinatorTest {
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
             createRegionSplitCoordinator(), null);
 
+        // Short cooldown so it expires between detections
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 50));
+
         ServerId primary = new ServerId("primary-host", 16020);
         ServerId target = new ServerId("target-host", 16021);
         clusterManager.registerServer(primary);
@@ -175,22 +189,20 @@ class HotSpotCoordinatorTest {
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        // 先产生热点
-        recordReadHistory(manager, region.getRegionId(), 0, 12000, 25000);
+        // First: trigger hotspot
+        recordReadHistory(manager, region.getRegionId(), 0, 25, 50);
         invokeHotSpotDetection(manager);
         assertTrue(manager.getCurrentHotSpots().containsKey(region.getRegionId()));
 
-        // 模拟冷却期过期
-        Thread.sleep(100);
-        manager.configure(new HotSpotCoordinator.HotSpotSettings(
-            200, 100, 1.2, 3, 50)); // 设置很短的冷却期 50ms
+        // Wait for cooldown to expire
         Thread.sleep(100);
 
-        // 负载恢复正常（低于阈值）
-        recordReadHistory(manager, region.getRegionId(), 25000, 25010, 25020);
+        // Load returns to normal (delta of 1 per interval, below threshold of 20)
+        // Adding more low-load snapshots dilutes the old high-delta average below threshold
+        recordReadHistory(manager, region.getRegionId(), 50, 51, 52, 53, 54);
         invokeHotSpotDetection(manager);
 
-        // 热点应该被移除
+        // Hotspot should be removed
         assertFalse(manager.getCurrentHotSpots().containsKey(region.getRegionId()));
     }
 
@@ -202,6 +214,8 @@ class HotSpotCoordinatorTest {
         HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
             createRegionSplitCoordinator(), null);
 
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
         ServerId primary = new ServerId("primary-host", 16020);
         ServerId staleServer = new ServerId("stale-host", 16021);
         ServerId healthyServer = new ServerId("healthy-host", 16022);
@@ -209,27 +223,213 @@ class HotSpotCoordinatorTest {
         clusterManager.registerServer(staleServer);
         clusterManager.registerServer(healthyServer);
 
-        // 模拟 staleServer 心跳过期
+        // Simulate stale server heartbeat expiry
         ClusterManager.ServerInfo staleInfo = clusterManager.getActiveServersList().stream()
             .filter(s -> s.getServerId().equals(staleServer))
             .findFirst()
             .orElse(null);
         if (staleInfo != null) {
-            staleInfo.setLastHeartbeat(System.currentTimeMillis() - 120000); // 2 分钟前
+            staleInfo.setLastHeartbeat(System.currentTimeMillis() - 120000);
         }
 
         Region region = createRegion("region-stale-test", "users", primary);
         metadataManager.registerRegion(region);
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
 
-        recordReadHistory(manager, region.getRegionId(), 0, 12000, 25000);
+        recordReadHistory(manager, region.getRegionId(), 0, 25, 50);
         invokeHotSpotDetection(manager);
 
-        List<HotSpotCoordinator.HotSpotAction> actions = manager.drainPendingActions();
+        List<HotSpotCoordinator.HotSpotAction> actions = manager.planPendingActions();
         assertEquals(1, actions.size());
-        // 应该选择健康服务器，而不是过期服务器
         assertEquals(healthyServer, actions.get(0).getTargetServer());
     }
+
+    @Test
+    @DisplayName("constant load should not be classified as growing")
+    void testConstantLoadNotGrowing() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-constant", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // Deltas: 25, 25, 25 → constant. Growth ratio = 1.0 < 1.2
+        recordReadHistory(manager, region.getRegionId(), 0, 25, 50, 75);
+
+        invokeHotSpotDetection(manager);
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertTrue(currentHotSpots.containsKey(region.getRegionId()));
+        assertEquals(HotSpotCoordinator.HotSpotType.READ, currentHotSpots.get(region.getRegionId()).getType());
+    }
+
+    @Test
+    @DisplayName("write hotspot takes priority over read when both exceed thresholds and write is more severe")
+    void testWritePriorityOverRead() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        // readThreshold=20, writeThreshold=10, growthThreshold=2.0 for margin
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-both-hot", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // Constant raw deltas: readDelta=30 (severity 1.5), writeDelta=25 (severity 2.5) → write wins
+        // Use 6 snapshots for stable average despite timing jitter
+        recordMixedHistory(manager, region.getRegionId(),
+            new long[][]{{0, 0}, {30, 25}, {60, 50}, {90, 75}, {120, 100}, {150, 125}});
+
+        invokeHotSpotDetection(manager);
+
+        List<HotSpotCoordinator.HotSpotAction> actions = manager.planPendingActions();
+        assertEquals(1, actions.size());
+        // Write hotspot → SPLIT_REGION
+        assertEquals(HotSpotCoordinator.HotSpotActionType.SPLIT_REGION, actions.get(0).getType());
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertTrue(currentHotSpots.containsKey(region.getRegionId()));
+        assertEquals(HotSpotCoordinator.HotSpotType.WRITE, currentHotSpots.get(region.getRegionId()).getType());
+    }
+
+    @Test
+    @DisplayName("combined read+write pressure triggers hotspot even when neither alone exceeds threshold")
+    void testCombinedReadWriteHotSpot() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        // readThreshold=20, writeThreshold=10
+        // combined threshold = 0.7 * (20+10) = 21 per interval
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-combined", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // readDelta=15 (below 20), writeDelta=8 (below 10), combined=23 (above 21)
+        recordMixedHistory(manager, region.getRegionId(),
+            new long[][]{{0, 0}, {15, 8}, {30, 16}});
+
+        invokeHotSpotDetection(manager);
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertTrue(currentHotSpots.containsKey(region.getRegionId()));
+        // Combined hotspot is treated as write-type
+        assertEquals(HotSpotCoordinator.HotSpotType.WRITE, currentHotSpots.get(region.getRegionId()).getType());
+    }
+
+    @Test
+    @DisplayName("detection works correctly with irregular snapshot intervals")
+    void testIrregularIntervals() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        // Threshold: 100 per interval (assume ~10ms interval)
+        // With a 50ms interval, per-second threshold = 100 / 0.05 = 2000/s
+        // Delta of 150 over 50ms = 3000/s > 2000/s → hotspot
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(100, 50, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-irregular", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // Create snapshots with varying intervals
+        // Snapshot 0→1: ~10ms, delta=120 → 12000/s
+        // Snapshot 1→2: ~50ms, delta=150 → 3000/s
+        // Average per-sec: 7500/s. Threshold per-sec (avg interval ~30ms): 100/0.03 = 3333/s
+        recordReadHistory(manager, region.getRegionId(), 0, 120);
+        Thread.sleep(50);
+        recordReadHistory(manager, region.getRegionId(), 270);
+
+        invokeHotSpotDetection(manager);
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertTrue(currentHotSpots.containsKey(region.getRegionId()));
+        assertEquals(HotSpotCoordinator.HotSpotType.READ, currentHotSpots.get(region.getRegionId()).getType());
+    }
+
+    @Test
+    @DisplayName("counter reset does not cause false positive")
+    void testCounterResetNoFalsePositive() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-reset", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // Counter reset in the middle: 0→5→2→4
+        // Delta 1: 5 per ~50ms ≈ 100/s (well below threshold 400/s)
+        // Delta 2: max(0, 2-5)=0 (counter reset, clamped)
+        // Delta 3: 4-2=2 per ~50ms ≈ 40/s
+        // Average: (100+0+40)/3 ≈ 47/s << 400/s → NOT a hotspot
+        recordReadHistory(manager, region.getRegionId(), 0, 5, 2, 4);
+
+        invokeHotSpotDetection(manager);
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertFalse(currentHotSpots.containsKey(region.getRegionId()));
+    }
+
+    @Test
+    @DisplayName("zero load followed by activity should not crash")
+    void testZeroDeltaHandling() throws Exception {
+        ClusterManager clusterManager = createClusterManager();
+        MetadataManager metadataManager = new MetadataManager();
+        HotSpotCoordinator manager = new HotSpotCoordinator(clusterManager, metadataManager,
+            createRegionSplitCoordinator(), null);
+
+        manager.configure(new HotSpotCoordinator.HotSpotSettings(20, 10, 3, 300000));
+
+        ServerId primary = new ServerId("primary-host", 16020);
+        clusterManager.registerServer(primary);
+
+        Region region = createRegion("region-zero", "users", primary);
+        metadataManager.registerRegion(region);
+        clusterManager.assignRegionToServer(region.getRegionId(), primary);
+
+        // 0→0→50: first delta is 0, second delta is 50 per ~50ms = 1000/s
+        // Average per-sec: 500/s > threshold 400/s → hotspot
+        recordReadHistory(manager, region.getRegionId(), 0, 0, 50);
+
+        invokeHotSpotDetection(manager);
+
+        Map<String, HotSpotCoordinator.HotSpotInfo> currentHotSpots = manager.getCurrentHotSpots();
+        assertTrue(currentHotSpots.containsKey(region.getRegionId()));
+    }
+
+    // ==================== Helper methods ====================
 
     private ClusterManager createClusterManager() {
         return new ClusterManager(new LoadBalancer());
@@ -245,23 +445,39 @@ class HotSpotCoordinatorTest {
         return region;
     }
 
-    private void recordReadHistory(HotSpotCoordinator manager, String regionId, long... readRequests) {
+    private void recordReadHistory(HotSpotCoordinator manager, String regionId, long... readRequests)
+        throws Exception {
         for (long readRequest : readRequests) {
             ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
             load.setRegionId(regionId);
             load.setReadRequests(readRequest);
             load.setWriteRequests(0L);
             manager.recordRegionLoad(regionId, load);
+            Thread.sleep(50);
         }
     }
 
-    private void recordWriteHistory(HotSpotCoordinator manager, String regionId, long... writeRequests) {
+    private void recordWriteHistory(HotSpotCoordinator manager, String regionId, long... writeRequests)
+        throws Exception {
         for (long writeRequest : writeRequests) {
             ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
             load.setRegionId(regionId);
             load.setReadRequests(0L);
             load.setWriteRequests(writeRequest);
             manager.recordRegionLoad(regionId, load);
+            Thread.sleep(50);
+        }
+    }
+
+    private void recordMixedHistory(HotSpotCoordinator manager, String regionId, long[][] readWritePairs)
+        throws Exception {
+        for (long[] pair : readWritePairs) {
+            ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
+            load.setRegionId(regionId);
+            load.setReadRequests(pair[0]);
+            load.setWriteRequests(pair[1]);
+            manager.recordRegionLoad(regionId, load);
+            Thread.sleep(50);
         }
     }
 

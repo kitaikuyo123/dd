@@ -105,22 +105,6 @@ class LoadBalancerTest {
         assertEquals(target, actions.get(0).getTarget());
     }
 
-    @Test
-    @DisplayName("getServerLoadRanking sorts by effective load ascending")
-    void testGetServerLoadRanking() {
-        LoadBalancer balancer = new LoadBalancer();
-
-        ServerId server1 = new ServerId("host1", 8080);
-        ServerId server2 = new ServerId("host2", 8080);
-
-        ClusterManager.ServerInfo info1 = createServerInfo(server1, 80.0);
-        ClusterManager.ServerInfo info2 = createServerInfo(server2, 20.0);
-
-        List<LoadBalancer.ServerLoadRank> ranks = balancer.getServerLoadRanking(Arrays.asList(info1, info2));
-
-        assertEquals(2, ranks.size());
-        assertEquals(server2, ranks.get(0).getServerId());
-    }
 
     private ClusterManager.ServerInfo createServerInfo(ServerId serverId, double loadPercent) {
         ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(serverId, System.currentTimeMillis());

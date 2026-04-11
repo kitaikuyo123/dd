@@ -28,7 +28,6 @@ public class HotSpotCoordinator {
 
     public static final long DEFAULT_READ_THRESHOLD_PER_INTERVAL = 200;
     public static final long DEFAULT_WRITE_THRESHOLD_PER_INTERVAL = 100;
-    public static final double DEFAULT_GROWTH_THRESHOLD = 1.2;
     public static final int DEFAULT_TARGET_READ_REPLICA_COUNT = 3;
     public static final long DEFAULT_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(5);
 
@@ -43,7 +42,6 @@ public class HotSpotCoordinator {
     private final Map<String, Long> cooldownUntilMs = new ConcurrentHashMap<>();
     private volatile long readThresholdPerInterval = DEFAULT_READ_THRESHOLD_PER_INTERVAL;
     private volatile long writeThresholdPerInterval = DEFAULT_WRITE_THRESHOLD_PER_INTERVAL;
-    private volatile double growthThreshold = DEFAULT_GROWTH_THRESHOLD;
     private volatile int targetReadReplicaCount = DEFAULT_TARGET_READ_REPLICA_COUNT;
     private volatile long cooldownMs = DEFAULT_COOLDOWN_MS;
     private volatile long historyWindowMs = TimeUnit.MINUTES.toMillis(2);
@@ -65,7 +63,6 @@ public class HotSpotCoordinator {
         }
         this.readThresholdPerInterval = Math.max(1L, settings.getReadThresholdPerInterval());
         this.writeThresholdPerInterval = Math.max(1L, settings.getWriteThresholdPerInterval());
-        this.growthThreshold = Math.max(1.0, settings.getGrowthThreshold());
         this.targetReadReplicaCount = Math.max(1, settings.getTargetReadReplicaCount());
         this.cooldownMs = Math.max(0L, settings.getCooldownMs());
     }
@@ -76,10 +73,6 @@ public class HotSpotCoordinator {
 
     public long getWriteThresholdPerInterval() {
         return writeThresholdPerInterval;
-    }
-
-    public double getGrowthThreshold() {
-        return growthThreshold;
     }
 
     public int getTargetReadReplicaCount() {
@@ -107,12 +100,8 @@ public class HotSpotCoordinator {
         }
     }
 
-    public void configureHistoryWindow(long windowMs, int minSnapshots) {
-        this.historyWindowMs = Math.max(30000L, windowMs);
-        this.minSnapshotCount = Math.max(2, minSnapshots);
-    }
 
-    public List<HotSpotAction> drainPendingActions() {
+    private List<HotSpotAction> drainPendingActions() {
         List<HotSpotAction> actions = new ArrayList<>();
         HotSpotAction action;
         while ((action = pendingActions.poll()) != null) {
@@ -185,49 +174,81 @@ public class HotSpotCoordinator {
         cooldownUntilMs.entrySet().removeIf(entry -> entry.getValue() <= now);
     }
 
+    /**
+     * Converts raw cumulative-counter snapshots into time-normalized per-second deltas.
+     */
+    private List<IntervalDelta> computePerIntervalDeltas(List<RegionLoadSnapshot> snapshots) {
+        List<IntervalDelta> deltas = new ArrayList<>();
+        for (int i = 1; i < snapshots.size(); i++) {
+            RegionLoadSnapshot prev = snapshots.get(i - 1);
+            RegionLoadSnapshot curr = snapshots.get(i);
+            long intervalMs = curr.timestamp - prev.timestamp;
+            if (intervalMs <= 0) {
+                continue;
+            }
+            long readDelta = Math.max(0, curr.load.getReadRequests() - prev.load.getReadRequests());
+            long writeDelta = Math.max(0, curr.load.getWriteRequests() - prev.load.getWriteRequests());
+            double readPerSec = readDelta * 1000.0 / intervalMs;
+            double writePerSec = writeDelta * 1000.0 / intervalMs;
+            deltas.add(new IntervalDelta(readPerSec, writePerSec, intervalMs));
+        }
+        return deltas;
+    }
+
     private HotSpotType analyzeHotSpot(Queue<RegionLoadSnapshot> history) {
         List<RegionLoadSnapshot> snapshots = new ArrayList<>(history);
-        if (snapshots.size() < 3) {
+        if (snapshots.size() < minSnapshotCount) {
             return null;
         }
 
-        RegionLoadSnapshot latest = snapshots.get(snapshots.size() - 1);
-        RegionLoadSnapshot previous = snapshots.get(snapshots.size() - 2);
-
-        long readRequests = latest.load.getReadRequests() - previous.load.getReadRequests();
-        long writeRequests = latest.load.getWriteRequests() - previous.load.getWriteRequests();
-
-        if (readRequests > readThresholdPerInterval) {
-            return isSustainedGrowth(snapshots) ? HotSpotType.READ_GROWING : HotSpotType.READ;
+        List<IntervalDelta> deltas = computePerIntervalDeltas(snapshots);
+        if (deltas.isEmpty()) {
+            return null;
         }
 
-        if (writeRequests > writeThresholdPerInterval) {
-            return isSustainedGrowth(snapshots) ? HotSpotType.WRITE_GROWING : HotSpotType.WRITE;
+        // Compute average per-second rates across all deltas
+        double avgReadPerSec = 0, avgWritePerSec = 0, avgIntervalMs = 0;
+        for (IntervalDelta d : deltas) {
+            avgReadPerSec += d.readPerSec;
+            avgWritePerSec += d.writePerSec;
+            avgIntervalMs += d.intervalMs;
         }
+        avgReadPerSec /= deltas.size();
+        avgWritePerSec /= deltas.size();
+        avgIntervalMs /= deltas.size();
 
+        // Convert per-interval thresholds to per-second based on actual average interval
+        double avgIntervalSec = avgIntervalMs / 1000.0;
+        if (avgIntervalSec <= 0) {
+            return null;
+        }
+        double readThresholdPerSec = readThresholdPerInterval / avgIntervalSec;
+        double writeThresholdPerSec = writeThresholdPerInterval / avgIntervalSec;
+        double combinedThresholdPerSec = 0.7 * (readThresholdPerSec + writeThresholdPerSec);
+
+        boolean readHot = avgReadPerSec > readThresholdPerSec;
+        boolean writeHot = avgWritePerSec > writeThresholdPerSec;
+        double combinedPerSec = avgReadPerSec + avgWritePerSec;
+        boolean combinedHot = !readHot && !writeHot && combinedPerSec > combinedThresholdPerSec;
+
+        // Severity-based priority: write wins ties
+        if (readHot && writeHot) {
+            double readSeverity = avgReadPerSec / readThresholdPerSec;
+            double writeSeverity = avgWritePerSec / writeThresholdPerSec;
+            return writeSeverity >= readSeverity ? HotSpotType.WRITE : HotSpotType.READ;
+        }
+        if (readHot) {
+            return HotSpotType.READ;
+        }
+        if (writeHot) {
+            return HotSpotType.WRITE;
+        }
+        if (combinedHot) {
+            return HotSpotType.WRITE;
+        }
         return null;
     }
 
-    private boolean isSustainedGrowth(List<RegionLoadSnapshot> snapshots) {
-        if (snapshots.size() < 3) {
-            return false;
-        }
-
-        double growthSum = 0;
-        for (int i = 1; i < snapshots.size(); i++) {
-            long prevTotal = snapshots.get(i - 1).load.getReadRequests()
-                + snapshots.get(i - 1).load.getWriteRequests();
-            long currTotal = snapshots.get(i).load.getReadRequests()
-                + snapshots.get(i).load.getWriteRequests();
-
-            if (prevTotal > 0) {
-                growthSum += (double) currTotal / prevTotal;
-            }
-        }
-
-        double avgGrowth = growthSum / (snapshots.size() - 1);
-        return avgGrowth > growthThreshold;
-    }
 
     private long estimateRequestDelta(Queue<RegionLoadSnapshot> history) {
         List<RegionLoadSnapshot> snapshots = new ArrayList<>(history);
@@ -235,23 +256,89 @@ public class HotSpotCoordinator {
             return 0;
         }
 
-        RegionLoadSnapshot latest = snapshots.get(snapshots.size() - 1);
-        RegionLoadSnapshot previous = snapshots.get(snapshots.size() - 2);
-        long latestTotal = latest.load.getReadRequests() + latest.load.getWriteRequests();
-        long previousTotal = previous.load.getReadRequests() + previous.load.getWriteRequests();
-        return Math.max(0, latestTotal - previousTotal);
-    }
-
-    public double calculateDisplayScore(String regionId, long replicationLag) {
-        HotSpotInfo info = hotSpots.get(regionId);
-        if (info == null) {
-            return replicationLag > 0 ? Math.min(1.0, replicationLag / 1000.0) : 0.0;
+        List<IntervalDelta> deltas = computePerIntervalDeltas(snapshots);
+        if (deltas.isEmpty()) {
+            return 0;
         }
 
-        long threshold = info.isReadHotSpot() ? readThresholdPerInterval : writeThresholdPerInterval;
-        double pressure = threshold > 0 ? (double) info.getRequestCount() / threshold : 0.0;
-        double lagPenalty = replicationLag > 0 ? Math.min(1.0, replicationLag / 1000.0) : 0.0;
-        return pressure + lagPenalty;
+        double avgPerSec = 0, avgIntervalMs = 0;
+        for (IntervalDelta d : deltas) {
+            avgPerSec += d.combinedPerSec();
+            avgIntervalMs += d.intervalMs;
+        }
+        avgPerSec /= deltas.size();
+        avgIntervalMs /= deltas.size();
+        return Math.round(avgPerSec * avgIntervalMs / 1000.0);
+    }
+
+    /**
+     * 计算前端展示用的热点分数（0-100）
+     * <ul>
+     *   <li>非热点 region：基于当前 QPS 相对于阈值的占比，线性映射到 0-50</li>
+     *   <li>热点 region：阈值占比 50 分 + 超出部分映射到 50-100</li>
+     *   <li>复制延迟额外加 0-10 分</li>
+     * </ul>
+     */
+    public double calculateDisplayScore(String regionId, long replicationLag) {
+        // 从历史快照中计算当前 QPS
+        Queue<RegionLoadSnapshot> history = loadHistory.get(regionId);
+        double readQps = 0, writeQps = 0;
+        if (history != null && history.size() >= 2) {
+            List<RegionLoadSnapshot> snapshots = new ArrayList<>(history);
+            List<IntervalDelta> deltas = computePerIntervalDeltas(snapshots);
+            if (!deltas.isEmpty()) {
+                for (IntervalDelta d : deltas) {
+                    readQps += d.readPerSec;
+                    writeQps += d.writePerSec;
+                }
+                readQps /= deltas.size();
+                writeQps /= deltas.size();
+            }
+        }
+
+        // 将阈值转换为 per-second（与检测算法一致）
+        double avgIntervalSec = estimateAvgIntervalSec(history);
+        double readThresholdPerSec = avgIntervalSec > 0 ? readThresholdPerInterval / avgIntervalSec : 0;
+        double writeThresholdPerSec = avgIntervalSec > 0 ? writeThresholdPerInterval / avgIntervalSec : 0;
+        double maxThreshold = Math.max(readThresholdPerSec, writeThresholdPerSec);
+
+        double score;
+        if (maxThreshold <= 0) {
+            score = 0;
+        } else {
+            // 综合热度：读写加权（写权重更高，与检测一致）
+            double combinedQps = readQps + writeQps * 2.0;
+            double ratio = combinedQps / maxThreshold; // 0.0 = 无流量, 1.0 = 刚好到阈值
+            if (ratio <= 1.0) {
+                // 非热点：0 → 50
+                score = ratio * 50.0;
+            } else {
+                // 热点：50 → 100（超出阈值部分映射，超过阈值 3 倍封顶）
+                double overRatio = Math.min(2.0, ratio - 1.0);
+                score = 50.0 + overRatio * 25.0;
+            }
+        }
+
+        // 复制延迟惩罚：0-10 分
+        double lagPenalty = replicationLag > 0 ? Math.min(10.0, replicationLag / 100.0) : 0.0;
+
+        return Math.min(100.0, score + lagPenalty);
+    }
+
+    private double estimateAvgIntervalSec(Queue<RegionLoadSnapshot> history) {
+        if (history == null || history.size() < 2) {
+            return 0;
+        }
+        List<RegionLoadSnapshot> snapshots = new ArrayList<>(history);
+        List<IntervalDelta> deltas = computePerIntervalDeltas(snapshots);
+        if (deltas.isEmpty()) {
+            return 0;
+        }
+        double avgMs = 0;
+        for (IntervalDelta d : deltas) {
+            avgMs += d.intervalMs;
+        }
+        return (avgMs / deltas.size()) / 1000.0;
     }
 
     private HotSpotAction planHotSpotAction(String regionId, HotSpotType type) {
@@ -262,10 +349,8 @@ public class HotSpotCoordinator {
 
         switch (type) {
             case READ:
-            case READ_GROWING:
                 return planReadReplica(regionId, type);
             case WRITE:
-            case WRITE_GROWING:
                 return new HotSpotAction(regionId, HotSpotActionType.SPLIT_REGION, null, null, type);
             default:
                 return null;
@@ -315,9 +400,7 @@ public class HotSpotCoordinator {
     private void addReadReplica(String regionId, ServerId targetServerId) {
         logger.info("Adding read replica for {} on {}", regionId, targetServerId);
         clusterManager.addReplica(regionId, targetServerId);
-        if (recoveryCoordinator != null) {
-            recoveryCoordinator.bootstrapReplica(regionId, targetServerId);
-        }
+        recoveryCoordinator.bootstrapReplica(regionId, targetServerId);
     }
 
     private void splitHotRegion(String regionId) {
@@ -336,9 +419,7 @@ public class HotSpotCoordinator {
 
     public enum HotSpotType {
         READ,
-        READ_GROWING,
-        WRITE,
-        WRITE_GROWING
+        WRITE
     }
 
     public enum HotSpotActionType {
@@ -422,25 +503,22 @@ public class HotSpotCoordinator {
         }
 
         public boolean isReadHotSpot() {
-            return type == HotSpotType.READ || type == HotSpotType.READ_GROWING;
+            return type == HotSpotType.READ;
         }
     }
 
     public static class HotSpotSettings {
         private final long readThresholdPerInterval;
         private final long writeThresholdPerInterval;
-        private final double growthThreshold;
         private final int targetReadReplicaCount;
         private final long cooldownMs;
 
         public HotSpotSettings(long readThresholdPerInterval,
                                long writeThresholdPerInterval,
-                               double growthThreshold,
                                int targetReadReplicaCount,
                                long cooldownMs) {
             this.readThresholdPerInterval = readThresholdPerInterval;
             this.writeThresholdPerInterval = writeThresholdPerInterval;
-            this.growthThreshold = growthThreshold;
             this.targetReadReplicaCount = targetReadReplicaCount;
             this.cooldownMs = cooldownMs;
         }
@@ -451,10 +529,6 @@ public class HotSpotCoordinator {
 
         public long getWriteThresholdPerInterval() {
             return writeThresholdPerInterval;
-        }
-
-        public double getGrowthThreshold() {
-            return growthThreshold;
         }
 
         public int getTargetReadReplicaCount() {
@@ -473,6 +547,25 @@ public class HotSpotCoordinator {
         private RegionLoadSnapshot(long timestamp, ClusterManager.RegionLoad load) {
             this.timestamp = timestamp;
             this.load = load;
+        }
+    }
+
+    /**
+     * Per-interval delta, time-normalized to requests per second.
+     */
+    private static class IntervalDelta {
+        final double readPerSec;
+        final double writePerSec;
+        final long intervalMs;
+
+        IntervalDelta(double readPerSec, double writePerSec, long intervalMs) {
+            this.readPerSec = readPerSec;
+            this.writePerSec = writePerSec;
+            this.intervalMs = intervalMs;
+        }
+
+        double combinedPerSec() {
+            return readPerSec + writePerSec;
         }
     }
 }

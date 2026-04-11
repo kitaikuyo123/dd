@@ -41,11 +41,12 @@ public class LoadBalancer {
      */
     public static class LoadCalculator {
 
-        // 权重配置
-        private static final double MEMORY_WEIGHT = 0.3;
-        private static final double DISK_WEIGHT = 0.3;
-        private static final double REGION_COUNT_WEIGHT = 0.2;
-        private static final double REQUEST_WEIGHT = 0.2;
+        // 权重配置（总和 100）
+        private static final int CPU_WEIGHT = 25;
+        private static final int MEMORY_WEIGHT = 25;
+        private static final int DISK_WEIGHT = 20;
+        private static final int REGION_COUNT_WEIGHT = 15;
+        private static final int REQUEST_WEIGHT = 15;
 
         // 请求历史记录（用于计算增长率）
         private final Map<String, RequestHistory> requestHistories = new ConcurrentHashMap<>();
@@ -65,27 +66,30 @@ public class LoadBalancer {
                 return regionLoads.size() * 10.0;
             }
 
-            // 1. 内存使用率（0-100）
+            // 1. CPU 使用率（0-100）
+            double cpuScore = metrics.getCpuUsage();
+
+            // 2. 内存使用率（0-100）
             double memoryScore = metrics.getMemoryUsage();
 
-            // 2. 磁盘使用率（0-100）
-            double diskUsage = 0;
+            // 3. 磁盘使用率（0-100）
+            double diskScore = 0;
             if (metrics.getTotalSpace() > 0) {
-                diskUsage = 100.0 * (metrics.getTotalSpace() - metrics.getAvailableSpace()) / metrics.getTotalSpace();
+                diskScore = 100.0 * (metrics.getTotalSpace() - metrics.getAvailableSpace()) / metrics.getTotalSpace();
             }
-            double diskScore = diskUsage;
 
-            // 3. Region 数量分数（假设最大承载 100 个 Region）
+            // 4. Region 数量分数（假设最大承载 100 个 Region）
             double regionScore = Math.min(100, regionLoads.size() * 100.0 / 100);
 
-            // 4. 请求负载分数
+            // 5. 请求负载分数
             double requestScore = calculateRequestScore(server);
 
             // 加权计算综合分数
-            return memoryScore * MEMORY_WEIGHT +
-                   diskScore * DISK_WEIGHT +
-                   regionScore * REGION_COUNT_WEIGHT +
-                   requestScore * REQUEST_WEIGHT;
+            return (cpuScore * CPU_WEIGHT +
+                    memoryScore * MEMORY_WEIGHT +
+                    diskScore * DISK_WEIGHT +
+                    regionScore * REGION_COUNT_WEIGHT +
+                    requestScore * REQUEST_WEIGHT) / 100.0;
         }
 
         /**
@@ -131,7 +135,7 @@ public class LoadBalancer {
          * 判断服务器是否过载
          */
         public boolean isOverloaded(ClusterManager.ServerInfo server) {
-            return calculateLoadScore(server) > 80;
+            return calculateLoadScore(server) > 70;
         }
 
         /**
@@ -376,49 +380,6 @@ public class LoadBalancer {
         return sizeWeight + requestWeight;
     }
 
-    /**
-     * 检查是否需要立即均衡
-     */
-    public boolean needsImmediateRebalance(List<ClusterManager.ServerInfo> servers) {
-        if (servers.size() <= 1) {
-            return false;
-        }
-
-        // 检查是否有服务器严重过载
-        int overloadedCount = 0;
-        for (ClusterManager.ServerInfo server : servers) {
-            if (loadCalculator.isOverloaded(server)) {
-                overloadedCount++;
-            }
-        }
-
-        // 如果超过 30% 的服务器过载，需要立即均衡
-        return overloadedCount > servers.size() * 0.3;
-    }
-
-    /**
-     * 获取服务器负载排名（用于调试）
-     */
-    public List<ServerLoadRank> getServerLoadRanking(List<ClusterManager.ServerInfo> servers) {
-        List<ServerLoadRank> ranks = new ArrayList<>();
-
-        for (ClusterManager.ServerInfo server : servers) {
-            double score = loadCalculator.calculateLoadScore(server);
-            double capacity = loadCalculator.getRemainingCapacity(server);
-            int regionCount = server.getRegionLoads().size();
-
-            ranks.add(new ServerLoadRank(
-                server.getServerId(),
-                score,
-                capacity,
-                regionCount
-            ));
-        }
-
-        ranks.sort(Comparator.comparingDouble(ServerLoadRank::getLoadScore));
-        return ranks;
-    }
-
     private ServerId selectRandomServer(List<ClusterManager.ServerInfo> servers) {
         List<ClusterManager.ServerInfo> candidates = new ArrayList<>(servers);
         candidates.removeIf(loadCalculator::isOverloaded);
@@ -491,25 +452,4 @@ public class LoadBalancer {
         public long getCreateTime() { return createTime; }
     }
 
-    /**
-     * 服务器负载排名
-     */
-    public static class ServerLoadRank {
-        private final ServerId serverId;
-        private final double loadScore;
-        private final double remainingCapacity;
-        private final int regionCount;
-
-        public ServerLoadRank(ServerId serverId, double loadScore, double remainingCapacity, int regionCount) {
-            this.serverId = serverId;
-            this.loadScore = loadScore;
-            this.remainingCapacity = remainingCapacity;
-            this.regionCount = regionCount;
-        }
-
-        public ServerId getServerId() { return serverId; }
-        public double getLoadScore() { return loadScore; }
-        public double getRemainingCapacity() { return remainingCapacity; }
-        public int getRegionCount() { return regionCount; }
-    }
 }

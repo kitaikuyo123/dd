@@ -190,7 +190,7 @@ public class MonitoringService {
             row.put("replicationLag", replicationLag);
             row.put("hotspotDetected", hotSpotInfo != null);
             row.put("hotspotType", hotSpotInfo != null ? hotSpotInfo.getType().name() : null);
-            row.put("hotspotScore", hotspotScore(region.getRegionId(), readRequests, writeRequests, replicationLag));
+            row.put("hotspotScore", hotspotScore(region.getRegionId(), replicationLag));
             row.put("lifecycle", lifecycleStatuses(region.getRegionId()));
             result.add(row);
         }
@@ -412,11 +412,11 @@ public class MonitoringService {
         }
     }
 
-    private double hotspotScore(String regionId, long readRequests, long writeRequests, long replicationLag) {
-        if (hotSpotCoordinator != null) {
-            return hotSpotCoordinator.calculateDisplayScore(regionId, replicationLag);
+    private double hotspotScore(String regionId, long replicationLag) {
+        if (hotSpotCoordinator == null) {
+            return 0.0;
         }
-        return readRequests + writeRequests * 3.0 + replicationLag * 2.0;
+        return hotSpotCoordinator.calculateDisplayScore(regionId, replicationLag);
     }
 
     private long sum(List<Map<String, Object>> rows, String key) {
