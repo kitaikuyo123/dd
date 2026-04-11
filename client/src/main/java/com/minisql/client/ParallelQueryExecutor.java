@@ -10,7 +10,6 @@ import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
-import com.minisql.sql.SQLParser;
 import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.CompoundCondition;
 import com.minisql.sql.ast.SelectStatement;
@@ -37,8 +36,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Executes distributed SELECT queries by scanning regions and applying SQL
@@ -63,119 +60,88 @@ public class ParallelQueryExecutor {
         this.executor = Executors.newFixedThreadPool(10);
     }
 
-    public List<Row> executeQuery(String sql, String tableName, byte[] rowKey) throws SQLException {
-        QuerySpec spec = parseQuerySpec(sql);
-        return executeQuerySpec(spec, rowKey);
-    }
+    /**
+     * AST-driven query execution entry point.
+     * Replaces the old string-parsing executeQuery methods.
+     */
+    public List<Row> executeQuery(SelectStatement ast, String rawSql) throws SQLException {
+        String tableName = ast.getTable();
+        String tableAlias = ast.getTableAlias();
+        boolean selectAll = ast.isSelectAll();
+        boolean hasJoin = ast.getJoinTable() != null;
+        boolean hasAggregation = ast.hasAggregation();
 
-    public List<Row> executeQueryWithOrder(String sql, String tableName,
-                                           List<String> orderByColumns,
-                                           List<Boolean> ascending,
-                                           int limit, int offset) throws SQLException {
-        List<Row> rows = executeQuery(sql, tableName, null);
-        List<List<Row>> wrapped = new ArrayList<>();
-        wrapped.add(rows);
-        return mergeAndSort(wrapped, orderByColumns, ascending, limit, offset);
-    }
-
-    public List<Row> executeAggregationQuery(String sql, String tableName,
-                                             List<String> groupByColumns,
-                                             List<ResultSetMerger.AggregateFunction> aggregateFunctions)
-        throws SQLException {
-        QuerySpec spec = parseQuerySpec(sql);
-        return executeQuerySpec(spec, null);
-    }
-
-    private List<Row> executeQuerySpec(QuerySpec spec, byte[] rowKey) throws SQLException {
-        List<com.minisql.common.model.Row> rows = fetchBaseRows(spec, rowKey);
-
-        if (spec.joinSpec != null) {
-            rows = executeJoin(spec, rows);
-        }
-
-        if (spec.whereCondition != null) {
-            rows = filterRows(rows, spec.whereCondition);
-        }
-
-        if (spec.hasAggregation()) {
-            rows = aggregateRows(spec, rows);
-            if (spec.havingCondition != null) {
-                rows = filterRows(rows, spec.havingCondition);
+        // Build aggregate expressions from AST
+        List<AggregateExpression> aggregateExpressions = new ArrayList<>();
+        if (ast.getAggregates() != null) {
+            for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
+                AggregateExpression expr = new AggregateExpression();
+                expr.function = agg.getFunction();
+                expr.column = agg.getColumn();
+                expr.outputName = agg.getOutputName();
+                aggregateExpressions.add(expr);
             }
         }
 
-        if (!spec.orderByColumns.isEmpty()) {
-            rows.sort(createSortComparator(spec.orderByColumns, spec.orderAscending));
+        // Determine pushdown WHERE clause
+        String whereClause = (ast.getWhere() != null && canPushDownCondition(ast.getWhere()) && !hasJoin)
+            ? conditionToSql(ast.getWhere()) : null;
+
+        // Determine projected qualifiers for column pushdown
+        List<String> projectedQualifiers;
+        if (hasJoin) {
+            List<String> joinLeftCols = new ArrayList<>();
+            List<String> joinRightCols = new ArrayList<>();
+            extractJoinConditionColumns(ast.getJoinCondition(), joinLeftCols, joinRightCols,
+                tableAlias != null ? tableAlias : tableName,
+                ast.getJoinTableAlias() != null ? ast.getJoinTableAlias() : ast.getJoinTable());
+            projectedQualifiers = determineJoinProjectedQualifiersFromAst(
+                ast, tableName, tableAlias, joinLeftCols, aggregateExpressions);
+        } else {
+            projectedQualifiers = determineProjectedQualifiersFromAst(ast, hasAggregation);
         }
 
-        rows = applyLimitOffset(rows, spec.limit, spec.offset);
-        return projectRows(spec, rows);
+        // Fetch base rows
+        List<com.minisql.common.model.Row> rows = fetchSourceRows(
+            tableName, null, ast.getWhere(), whereClause, projectedQualifiers);
+
+        // JOIN
+        if (hasJoin) {
+            rows = executeJoinFromAst(ast, rows);
+        } else if (ast.getWhere() != null && whereClause == null) {
+            // Client-side filter for conditions that couldn't be pushed down
+            rows = filterRows(rows, ast.getWhere());
+        }
+
+        // Aggregation
+        if (hasAggregation) {
+            List<String> groupByColumns = ast.getGroupByColumns() != null ? ast.getGroupByColumns() : Collections.emptyList();
+            rows = aggregateRowsFromAst(groupByColumns, aggregateExpressions, rows);
+            if (ast.getHaving() != null) {
+                rows = filterRows(rows, ast.getHaving());
+            }
+        }
+
+        // ORDER BY
+        if (ast.getOrderBy() != null && !ast.getOrderBy().isEmpty()) {
+            List<String> orderByColumns = new ArrayList<>();
+            List<Boolean> orderAscending = new ArrayList<>();
+            for (SelectStatement.OrderByElement elem : ast.getOrderBy()) {
+                orderByColumns.add(elem.getColumn());
+                orderAscending.add(elem.isAscending());
+            }
+            rows.sort(createSortComparator(orderByColumns, orderAscending));
+        }
+
+        // LIMIT / OFFSET
+        int limit = ast.getLimit() != null ? ast.getLimit() : -1;
+        int offset = ast.getOffset() != null ? ast.getOffset() : 0;
+        rows = applyLimitOffset(rows, limit, offset);
+
+        // Project
+        return projectRowsFromAst(ast, rows, hasAggregation);
     }
 
-    private List<com.minisql.common.model.Row> fetchBaseRows(QuerySpec spec, byte[] rowKey) throws SQLException {
-        if (spec.joinSpec != null) {
-            List<String> leftProjectedQualifiers = determineJoinProjectedQualifiers(
-                spec,
-                spec.tableName,
-                spec.tableAlias,
-                spec.joinSpec.leftConditions
-            );
-            return fetchSourceRows(spec.tableName, null, null, null, leftProjectedQualifiers);
-        }
-        String pushdownWhereClause = canPushDownCondition(spec.whereCondition) ? spec.whereClause : null;
-        List<String> projectedQualifiers = determineProjectedQualifiers(spec);
-        return fetchSourceRows(spec.tableName, rowKey, spec.whereCondition, pushdownWhereClause, projectedQualifiers);
-    }
-
-    private List<com.minisql.common.model.Row> executeJoin(QuerySpec spec,
-                                                           List<com.minisql.common.model.Row> leftRows) throws SQLException {
-        List<String> rightProjectedQualifiers = determineJoinProjectedQualifiers(
-            spec,
-            spec.joinSpec.rightTable,
-            spec.joinSpec.rightAlias,
-            spec.joinSpec.rightConditions
-        );
-        List<com.minisql.common.model.Row> rightRows = fetchSourceRows(
-            spec.joinSpec.rightTable,
-            null,
-            null,
-            null,
-            rightProjectedQualifiers
-        );
-        Table rightSchema = getTableSchema(spec.joinSpec.rightTable);
-        String leftQualifier = spec.tableAlias != null ? spec.tableAlias : spec.tableName;
-        String rightQualifier = spec.joinSpec.rightAlias != null ? spec.joinSpec.rightAlias : spec.joinSpec.rightTable;
-        Map<String, List<com.minisql.common.model.Row>> rightBuckets = new LinkedHashMap<>();
-
-        for (com.minisql.common.model.Row rightRow : rightRows) {
-            String bucketKey = buildJoinKey(rightRow, spec.joinSpec.rightConditions);
-            if (bucketKey == null) {
-                continue;
-            }
-            rightBuckets.computeIfAbsent(bucketKey, ignored -> new ArrayList<>()).add(rightRow);
-        }
-
-        List<com.minisql.common.model.Row> joinedRows = new ArrayList<>();
-        for (com.minisql.common.model.Row leftRow : leftRows) {
-            String bucketKey = buildJoinKey(leftRow, spec.joinSpec.leftConditions);
-            if (bucketKey == null) {
-                continue;
-            }
-
-            List<com.minisql.common.model.Row> matches = rightBuckets.get(bucketKey);
-            if (matches == null) {
-                if (spec.joinSpec.isLeftJoin()) {
-                    joinedRows.add(mergeLogicalRows(leftRow, leftQualifier, null, rightQualifier, rightSchema));
-                }
-                continue;
-            }
-
-            for (com.minisql.common.model.Row rightRow : matches) {
-                joinedRows.add(mergeLogicalRows(leftRow, leftQualifier, rightRow, rightQualifier, rightSchema));
-            }
-        }
-        return joinedRows;
-    }
 
     private String buildJoinKey(com.minisql.common.model.Row row, List<String> columns) {
         List<String> values = new ArrayList<>();
@@ -187,38 +153,6 @@ public class ParallelQueryExecutor {
             values.add(String.valueOf(value));
         }
         return String.join("\u0001", values);
-    }
-
-    private List<com.minisql.common.model.Row> aggregateRows(QuerySpec spec,
-                                                             List<com.minisql.common.model.Row> sourceRows) {
-        Map<List<Object>, AggregateAccumulator> groups = new LinkedHashMap<>();
-        for (com.minisql.common.model.Row sourceRow : sourceRows) {
-            List<Object> groupKey = new ArrayList<>();
-            for (String column : spec.groupByColumns) {
-                groupKey.add(resolveColumnValue(sourceRow, column));
-            }
-
-            AggregateAccumulator accumulator = groups.computeIfAbsent(
-                groupKey,
-                key -> new AggregateAccumulator(spec.aggregateExpressions)
-            );
-            accumulator.addRow(sourceRow);
-        }
-
-        if (groups.isEmpty() && spec.groupByColumns.isEmpty()) {
-            groups.put(Collections.emptyList(), new AggregateAccumulator(spec.aggregateExpressions));
-        }
-
-        List<com.minisql.common.model.Row> aggregatedRows = new ArrayList<>();
-        for (Map.Entry<List<Object>, AggregateAccumulator> entry : groups.entrySet()) {
-            com.minisql.common.model.Row row = new com.minisql.common.model.Row();
-            for (int i = 0; i < spec.groupByColumns.size(); i++) {
-                row.setColumn(spec.groupByColumns.get(i), entry.getKey().get(i));
-            }
-            entry.getValue().appendResults(row);
-            aggregatedRows.add(row);
-        }
-        return aggregatedRows;
     }
 
     private Comparator<com.minisql.common.model.Row> createSortComparator(List<String> columns,
@@ -246,28 +180,6 @@ public class ParallelQueryExecutor {
         }
         int toIndex = limit < 0 ? rows.size() : Math.min(rows.size(), fromIndex + limit);
         return new ArrayList<>(rows.subList(fromIndex, toIndex));
-    }
-
-    private List<Row> projectRows(QuerySpec spec, List<com.minisql.common.model.Row> rows) {
-        List<Row> projected = new ArrayList<>();
-        for (com.minisql.common.model.Row source : rows) {
-            Row row = new Row();
-            if (spec.selectAll && !spec.hasAggregation()) {
-                for (String columnName : source.getColumnNames()) {
-                    row.addColumn(columnName, source.getColumn(columnName));
-                }
-            } else {
-                for (SelectItem item : spec.selectItems) {
-                    String outputName = item.outputName();
-                    Object value = item.aggregate
-                        ? resolveColumnValue(source, outputName)
-                        : resolveColumnValue(source, item.expression);
-                    row.addColumn(outputName, value);
-                }
-            }
-            projected.add(row);
-        }
-        return projected;
     }
 
     private List<com.minisql.common.model.Row> fetchSourceRows(String tableName,
@@ -383,35 +295,139 @@ public class ParallelQueryExecutor {
         return false;
     }
 
-    private List<String> determineProjectedQualifiers(QuerySpec spec) {
-        if (spec == null || spec.selectAll || spec.joinSpec != null || spec.hasAggregation()) {
+    // ── AST helper methods ──────────────────────────────────────────────
+
+    /**
+     * Serialize a Condition AST back to a SQL WHERE clause for pushdown.
+     */
+    private String conditionToSql(Condition condition) {
+        if (condition == null) {
             return null;
         }
+        if (condition instanceof SimpleCondition) {
+            SimpleCondition simple = (SimpleCondition) condition;
+            if (simple.isValueColumnReference()) {
+                return simple.getColumn() + " " + simple.getOperator() + " " + simple.getValue();
+            }
+            return simple.getColumn() + " " + simple.getOperator() + " '" + simple.getValue() + "'";
+        }
+        if (condition instanceof CompoundCondition) {
+            CompoundCondition compound = (CompoundCondition) condition;
+            return "(" + conditionToSql(compound.getLeft()) + " " + compound.getOperator()
+                + " " + conditionToSql(compound.getRight()) + ")";
+        }
+        return null;
+    }
 
+    /**
+     * Extract left/right column pairs from a JOIN ON condition tree.
+     */
+    private void extractJoinConditionColumns(Condition condition,
+                                             List<String> leftCols,
+                                             List<String> rightCols,
+                                             String leftTable,
+                                             String rightTable) {
+        if (condition instanceof SimpleCondition) {
+            SimpleCondition simple = (SimpleCondition) condition;
+            if ("=".equals(simple.getOperator()) && simple.isValueColumnReference()) {
+                String col1 = simple.getColumn();
+                String col2 = simple.getValue();
+                if (belongsToTable(col1, leftTable)) {
+                    leftCols.add(col1);
+                    rightCols.add(col2);
+                } else {
+                    leftCols.add(col2);
+                    rightCols.add(col1);
+                }
+            }
+        } else if (condition instanceof CompoundCondition) {
+            CompoundCondition compound = (CompoundCondition) condition;
+            if ("AND".equalsIgnoreCase(compound.getOperator())) {
+                extractJoinConditionColumns(compound.getLeft(), leftCols, rightCols, leftTable, rightTable);
+                extractJoinConditionColumns(compound.getRight(), leftCols, rightCols, leftTable, rightTable);
+            }
+        }
+    }
+
+    private boolean belongsToTable(String column, String table) {
+        if (column == null || table == null) return false;
+        int dot = column.indexOf('.');
+        if (dot < 0) return true; // unqualified → belongs to any table
+        return column.substring(0, dot).equalsIgnoreCase(table);
+    }
+
+    /**
+     * Determine column qualifiers to project when there is no JOIN.
+     */
+    private List<String> determineProjectedQualifiersFromAst(SelectStatement ast, boolean hasAggregation) {
+        if (ast.isSelectAll() || hasAggregation) {
+            return null;
+        }
         List<String> columns = new ArrayList<>();
-        addSimpleColumns(columns, spec.selectItems);
-        addSimpleColumns(columns, spec.orderByColumns);
-        collectConditionColumns(spec.whereCondition, columns);
+        if (ast.getColumns() != null) {
+            for (String col : ast.getColumns()) {
+                String qualifier = toSimpleQualifier(col);
+                if (qualifier != null && !columns.contains(qualifier)) {
+                    columns.add(qualifier);
+                }
+            }
+        }
+        if (ast.getOrderBy() != null) {
+            for (SelectStatement.OrderByElement elem : ast.getOrderBy()) {
+                String qualifier = toSimpleQualifier(elem.getColumn());
+                if (qualifier != null && !columns.contains(qualifier)) {
+                    columns.add(qualifier);
+                }
+            }
+        }
+        collectConditionColumns(ast.getWhere(), columns);
         return columns.isEmpty() ? null : columns;
     }
 
-    private List<String> determineJoinProjectedQualifiers(QuerySpec spec,
-                                                          String tableName,
-                                                          String tableAlias,
-                                                          List<String> joinColumns) {
-        if (spec == null || tableName == null) {
-            return null;
-        }
-
+    /**
+     * Determine column qualifiers to project for one side of a JOIN.
+     */
+    private List<String> determineJoinProjectedQualifiersFromAst(SelectStatement ast,
+                                                                  String tableName,
+                                                                  String tableAlias,
+                                                                  List<String> joinColumns,
+                                                                  List<AggregateExpression> aggregates) {
         List<String> columns = new ArrayList<>();
         addJoinColumns(columns, joinColumns);
-        collectSelectColumnsForSource(spec.selectItems, tableName, tableAlias, columns);
-        collectStringColumnsForSource(spec.orderByColumns, tableName, tableAlias, columns);
-        collectStringColumnsForSource(spec.groupByColumns, tableName, tableAlias, columns);
-        collectConditionColumnsForSource(spec.whereCondition, tableName, tableAlias, columns);
-        collectConditionColumnsForSource(spec.havingCondition, tableName, tableAlias, columns);
-        for (AggregateExpression expression : spec.aggregateExpressions) {
-            String qualifier = qualifyForSource(expression.column, tableName, tableAlias);
+        // SELECT columns belonging to this table
+        if (!ast.isSelectAll() && ast.getColumns() != null) {
+            for (String col : ast.getColumns()) {
+                String qualifier = qualifyForSource(col, tableName, tableAlias);
+                if (qualifier != null && !columns.contains(qualifier)) {
+                    columns.add(qualifier);
+                }
+            }
+        }
+        // ORDER BY
+        if (ast.getOrderBy() != null) {
+            for (SelectStatement.OrderByElement elem : ast.getOrderBy()) {
+                String qualifier = qualifyForSource(elem.getColumn(), tableName, tableAlias);
+                if (qualifier != null && !columns.contains(qualifier)) {
+                    columns.add(qualifier);
+                }
+            }
+        }
+        // GROUP BY
+        if (ast.getGroupByColumns() != null) {
+            for (String col : ast.getGroupByColumns()) {
+                String qualifier = qualifyForSource(col, tableName, tableAlias);
+                if (qualifier != null && !columns.contains(qualifier)) {
+                    columns.add(qualifier);
+                }
+            }
+        }
+        // WHERE
+        collectConditionColumnsForSource(ast.getWhere(), tableName, tableAlias, columns);
+        // HAVING
+        collectConditionColumnsForSource(ast.getHaving(), tableName, tableAlias, columns);
+        // Aggregate columns
+        for (AggregateExpression expr : aggregates) {
+            String qualifier = qualifyForSource(expr.column, tableName, tableAlias);
             if (qualifier != null && !columns.contains(qualifier)) {
                 columns.add(qualifier);
             }
@@ -419,70 +435,155 @@ public class ParallelQueryExecutor {
         return columns.isEmpty() ? null : columns;
     }
 
-    private void addSimpleColumns(List<String> target, List<?> items) {
-        if (items == null) {
-            return;
+    /**
+     * Execute JOIN using AST fields.
+     */
+    private List<com.minisql.common.model.Row> executeJoinFromAst(
+            SelectStatement ast, List<com.minisql.common.model.Row> leftRows) throws SQLException {
+
+        String leftTable = ast.getTable();
+        String leftAlias = ast.getTableAlias();
+        String rightTable = ast.getJoinTable();
+        String rightAlias = ast.getJoinTableAlias();
+        JoinType joinType = ast.getJoinType() != null ? ast.getJoinType() : JoinType.INNER;
+
+        // Extract join columns
+        List<String> leftJoinCols = new ArrayList<>();
+        List<String> rightJoinCols = new ArrayList<>();
+        String leftQualifier = leftAlias != null ? leftAlias : leftTable;
+        String rightQualifier = rightAlias != null ? rightAlias : rightTable;
+        extractJoinConditionColumns(ast.getJoinCondition(), leftJoinCols, rightJoinCols, leftQualifier, rightQualifier);
+
+        // Determine right-side projected qualifiers
+        List<String> rightProjectedQualifiers = determineJoinProjectedQualifiersFromAst(
+            ast, rightTable, rightAlias, rightJoinCols,
+            ast.getAggregates() != null ? buildAggregateExpressions(ast) : Collections.emptyList());
+
+        List<com.minisql.common.model.Row> rightRows = fetchSourceRows(
+            rightTable, null, null, null, rightProjectedQualifiers);
+        Table rightSchema = getTableSchema(rightTable);
+
+        // Hash join
+        Map<String, List<com.minisql.common.model.Row>> rightBuckets = new LinkedHashMap<>();
+        for (com.minisql.common.model.Row rightRow : rightRows) {
+            String bucketKey = buildJoinKey(rightRow, rightJoinCols);
+            if (bucketKey != null) {
+                rightBuckets.computeIfAbsent(bucketKey, ignored -> new ArrayList<>()).add(rightRow);
+            }
         }
-        for (Object item : items) {
-            String column = null;
-            if (item instanceof SelectItem) {
-                SelectItem selectItem = (SelectItem) item;
-                if (!selectItem.aggregate) {
-                    column = selectItem.expression;
+
+        boolean isLeftJoin = joinType == JoinType.LEFT;
+        List<com.minisql.common.model.Row> joinedRows = new ArrayList<>();
+        for (com.minisql.common.model.Row leftRow : leftRows) {
+            String bucketKey = buildJoinKey(leftRow, leftJoinCols);
+            List<com.minisql.common.model.Row> matches = bucketKey != null ? rightBuckets.get(bucketKey) : null;
+            if (matches == null) {
+                if (isLeftJoin) {
+                    joinedRows.add(mergeLogicalRows(leftRow, leftQualifier, null, rightQualifier, rightSchema));
                 }
-            } else if (item instanceof String) {
-                column = (String) item;
-            }
-            String qualifier = toSimpleQualifier(column);
-            if (qualifier != null && !target.contains(qualifier)) {
-                target.add(qualifier);
-            }
-        }
-    }
-
-    private void addJoinColumns(List<String> target, List<String> joinColumns) {
-        if (joinColumns == null) {
-            return;
-        }
-        for (String column : joinColumns) {
-            String qualifier = toSimpleQualifier(column);
-            if (qualifier != null && !target.contains(qualifier)) {
-                target.add(qualifier);
-            }
-        }
-    }
-
-    private void collectSelectColumnsForSource(List<SelectItem> items,
-                                               String tableName,
-                                               String tableAlias,
-                                               List<String> target) {
-        if (items == null) {
-            return;
-        }
-        for (SelectItem item : items) {
-            if (item.aggregate) {
                 continue;
             }
-            String qualifier = qualifyForSource(item.expression, tableName, tableAlias);
-            if (qualifier != null && !target.contains(qualifier)) {
-                target.add(qualifier);
+            for (com.minisql.common.model.Row rightRow : matches) {
+                joinedRows.add(mergeLogicalRows(leftRow, leftQualifier, rightRow, rightQualifier, rightSchema));
             }
         }
+        return joinedRows;
     }
 
-    private void collectStringColumnsForSource(List<String> items,
-                                               String tableName,
-                                               String tableAlias,
-                                               List<String> target) {
-        if (items == null) {
-            return;
-        }
-        for (String item : items) {
-            String qualifier = qualifyForSource(item, tableName, tableAlias);
-            if (qualifier != null && !target.contains(qualifier)) {
-                target.add(qualifier);
+    private List<AggregateExpression> buildAggregateExpressions(SelectStatement ast) {
+        List<AggregateExpression> list = new ArrayList<>();
+        if (ast.getAggregates() != null) {
+            for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
+                AggregateExpression expr = new AggregateExpression();
+                expr.function = agg.getFunction();
+                expr.column = agg.getColumn();
+                expr.outputName = agg.getOutputName();
+                list.add(expr);
             }
         }
+        return list;
+    }
+
+    /**
+     * Aggregation using explicit parameters from AST.
+     */
+    private List<com.minisql.common.model.Row> aggregateRowsFromAst(
+            List<String> groupByColumns,
+            List<AggregateExpression> aggregateExpressions,
+            List<com.minisql.common.model.Row> sourceRows) {
+        Map<List<Object>, AggregateAccumulator> groups = new LinkedHashMap<>();
+        for (com.minisql.common.model.Row sourceRow : sourceRows) {
+            List<Object> groupKey = new ArrayList<>();
+            if (groupByColumns != null) {
+                for (String column : groupByColumns) {
+                    groupKey.add(resolveColumnValue(sourceRow, column));
+                }
+            }
+            AggregateAccumulator accumulator = groups.computeIfAbsent(
+                groupKey, key -> new AggregateAccumulator(aggregateExpressions));
+            accumulator.addRow(sourceRow);
+        }
+
+        if (groups.isEmpty() && (groupByColumns == null || groupByColumns.isEmpty())) {
+            groups.put(Collections.emptyList(), new AggregateAccumulator(aggregateExpressions));
+        }
+
+        List<com.minisql.common.model.Row> aggregatedRows = new ArrayList<>();
+        for (Map.Entry<List<Object>, AggregateAccumulator> entry : groups.entrySet()) {
+            com.minisql.common.model.Row row = new com.minisql.common.model.Row();
+            if (groupByColumns != null) {
+                for (int i = 0; i < groupByColumns.size(); i++) {
+                    row.setColumn(groupByColumns.get(i), entry.getKey().get(i));
+                }
+            }
+            entry.getValue().appendResults(row);
+            aggregatedRows.add(row);
+        }
+        return aggregatedRows;
+    }
+
+    /**
+     * Project rows using AST fields instead of QuerySpec.
+     */
+    private List<Row> projectRowsFromAst(SelectStatement ast,
+                                         List<com.minisql.common.model.Row> rows,
+                                         boolean hasAggregation) {
+        List<Row> projected = new ArrayList<>();
+        for (com.minisql.common.model.Row source : rows) {
+            Row row = new Row();
+            if (ast.isSelectAll() && !hasAggregation) {
+                for (String columnName : source.getColumnNames()) {
+                    row.addColumn(columnName, source.getColumn(columnName));
+                }
+            } else if (hasAggregation) {
+                // For aggregation, output columns = groupBy columns + aggregate output names
+                List<String> groupByColumns = ast.getGroupByColumns();
+                if (groupByColumns != null) {
+                    for (String col : groupByColumns) {
+                        row.addColumn(col, resolveColumnValue(source, col));
+                    }
+                }
+                if (ast.getAggregates() != null) {
+                    for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
+                        row.addColumn(agg.getOutputName(), resolveColumnValue(source, agg.getOutputName()));
+                    }
+                }
+            } else {
+                // Explicit column list
+                List<String> columns = ast.getColumns();
+                List<String> aliases = ast.getColumnAliases();
+                if (columns != null) {
+                    for (int i = 0; i < columns.size(); i++) {
+                        String col = columns.get(i);
+                        String outputName = (aliases != null && i < aliases.size() && aliases.get(i) != null)
+                            ? aliases.get(i) : col;
+                        row.addColumn(outputName, resolveColumnValue(source, col));
+                    }
+                }
+            }
+            projected.add(row);
+        }
+        return projected;
     }
 
     private void collectConditionColumnsForSource(Condition condition,
@@ -503,6 +604,18 @@ public class ParallelQueryExecutor {
             CompoundCondition compound = (CompoundCondition) condition;
             collectConditionColumnsForSource(compound.getLeft(), tableName, tableAlias, target);
             collectConditionColumnsForSource(compound.getRight(), tableName, tableAlias, target);
+        }
+    }
+
+    private void addJoinColumns(List<String> target, List<String> joinColumns) {
+        if (joinColumns == null) {
+            return;
+        }
+        for (String column : joinColumns) {
+            String qualifier = toSimpleQualifier(column);
+            if (qualifier != null && !target.contains(qualifier)) {
+                target.add(qualifier);
+            }
         }
     }
 
@@ -555,360 +668,6 @@ public class ParallelQueryExecutor {
         }
         int qualifierIndex = trimmed.indexOf('.');
         return qualifierIndex >= 0 ? trimmed.substring(qualifierIndex + 1) : trimmed;
-    }
-
-    private SelectStatement parseSelect(String sql) throws SQLException {
-        try {
-            return (SelectStatement) new SQLParser(sql).parse();
-        } catch (Exception e) {
-            throw new SQLException("Failed to parse SELECT statement", e);
-        }
-    }
-
-    private QuerySpec parseQuerySpec(String sql) throws SQLException {
-        String normalized = normalizeSql(sql);
-        String upper = normalized.toUpperCase();
-        if (!upper.startsWith("SELECT ")) {
-            throw new SQLException("Only SELECT queries are supported");
-        }
-
-        int fromIndex = upper.indexOf(" FROM ");
-        if (fromIndex < 0) {
-            throw new SQLException("SELECT query is missing FROM");
-        }
-
-        int whereIndex = upper.indexOf(" WHERE ", fromIndex);
-        int groupByIndex = upper.indexOf(" GROUP BY ", fromIndex);
-        int havingIndex = upper.indexOf(" HAVING ", fromIndex);
-        int orderByIndex = upper.indexOf(" ORDER BY ", fromIndex);
-        int limitIndex = upper.indexOf(" LIMIT ", fromIndex);
-        int offsetIndex = upper.indexOf(" OFFSET ", fromIndex);
-
-        QuerySpec spec = new QuerySpec();
-        String selectPart = normalized.substring("SELECT ".length(), fromIndex).trim();
-        int fromEnd = firstPositive(whereIndex, groupByIndex, havingIndex, orderByIndex, limitIndex, offsetIndex, normalized.length());
-        String fromPart = normalized.substring(fromIndex + " FROM ".length(), fromEnd).trim();
-
-        spec.selectItems = parseSelectItems(selectPart);
-        spec.selectAll = spec.selectItems.size() == 1 && "*".equals(spec.selectItems.get(0).expression);
-
-        parseFromPart(spec, fromPart);
-
-        String whereClause = extractClause(normalized, whereIndex, " WHERE ", groupByIndex, havingIndex, orderByIndex, limitIndex, offsetIndex);
-        String groupByClause = extractClause(normalized, groupByIndex, " GROUP BY ", havingIndex, orderByIndex, limitIndex, offsetIndex);
-        String havingClause = extractClause(normalized, havingIndex, " HAVING ", orderByIndex, limitIndex, offsetIndex);
-        String orderByClause = extractClause(normalized, orderByIndex, " ORDER BY ", limitIndex, offsetIndex);
-        String limitClause = extractClause(normalized, limitIndex, " LIMIT ", offsetIndex);
-        String offsetClause = extractClause(normalized, offsetIndex, " OFFSET ");
-
-        spec.whereClause = whereClause;
-        spec.whereCondition = parseClauseCondition(spec.tableName, whereClause);
-        spec.groupByColumns = splitCommaSeparated(groupByClause);
-        spec.orderByColumns = new ArrayList<>();
-        spec.orderAscending = new ArrayList<>();
-        spec.limit = limitClause == null || limitClause.isEmpty() ? -1 : Integer.parseInt(limitClause.trim());
-        spec.offset = offsetClause == null || offsetClause.isEmpty() ? 0 : Integer.parseInt(offsetClause.trim());
-
-        for (SelectItem item : spec.selectItems) {
-            if (item.aggregate) {
-                spec.aggregateExpressions.add(item.toAggregateExpression());
-            }
-        }
-
-        spec.havingCondition = parseHavingCondition(spec, havingClause);
-
-        if (orderByClause != null && !orderByClause.isEmpty()) {
-            for (String item : splitCommaSeparated(orderByClause)) {
-                String trimmed = item.trim();
-                boolean ascending = true;
-                String upperItem = trimmed.toUpperCase();
-                if (upperItem.endsWith(" DESC")) {
-                    ascending = false;
-                    trimmed = trimmed.substring(0, trimmed.length() - 5).trim();
-                } else if (upperItem.endsWith(" ASC")) {
-                    trimmed = trimmed.substring(0, trimmed.length() - 4).trim();
-                }
-                spec.orderByColumns.add(trimmed);
-                spec.orderAscending.add(ascending);
-            }
-        }
-
-        return spec;
-    }
-
-    private String normalizeSql(String sql) {
-        String normalized = sql.trim();
-        if (normalized.endsWith(";")) {
-            normalized = normalized.substring(0, normalized.length() - 1).trim();
-        }
-        return normalized;
-    }
-
-    private void parseFromPart(QuerySpec spec, String fromPart) throws SQLException {
-        String upper = fromPart.toUpperCase();
-        int leftJoinIndex = upper.indexOf(" LEFT JOIN ");
-        int innerJoinIndex = upper.indexOf(" INNER JOIN ");
-        int plainJoinIndex = upper.indexOf(" JOIN ");
-        int joinIndex = -1;
-        JoinType joinType = JoinType.INNER;
-
-        if (leftJoinIndex >= 0) {
-            joinIndex = leftJoinIndex;
-            joinType = JoinType.LEFT;
-        } else if (innerJoinIndex >= 0) {
-            joinIndex = innerJoinIndex;
-            joinType = JoinType.INNER;
-        } else if (plainJoinIndex >= 0) {
-            joinIndex = plainJoinIndex;
-            joinType = JoinType.INNER;
-        }
-
-        if (joinIndex < 0) {
-            TableSource source = parseTableSource(fromPart.trim());
-            spec.tableName = source.tableName;
-            spec.tableAlias = source.alias;
-            return;
-        }
-
-        TableSource leftSource = parseTableSource(fromPart.substring(0, joinIndex).trim());
-        spec.tableName = leftSource.tableName;
-        spec.tableAlias = leftSource.alias;
-        String joinKeyword = joinType == com.minisql.sql.execution.QueryPlan.JoinType.LEFT ? " LEFT JOIN "
-            : (innerJoinIndex >= 0 ? " INNER JOIN " : " JOIN ");
-        String joinPart = fromPart.substring(joinIndex + joinKeyword.length()).trim();
-        int onIndex = joinPart.toUpperCase().indexOf(" ON ");
-        if (onIndex < 0) {
-            throw new SQLException("JOIN query is missing ON clause");
-        }
-
-        JoinQuerySpec joinSpec = new JoinQuerySpec();
-        joinSpec.joinType = joinType.name();
-        TableSource rightSource = parseTableSource(joinPart.substring(0, onIndex).trim());
-        joinSpec.rightTable = rightSource.tableName;
-        joinSpec.rightAlias = rightSource.alias;
-        String conditionPart = joinPart.substring(onIndex + " ON ".length()).trim();
-        parseJoinConditions(joinSpec, conditionPart);
-        spec.joinSpec = joinSpec;
-    }
-
-    private TableSource parseTableSource(String sourcePart) throws SQLException {
-        String trimmed = sourcePart == null ? "" : sourcePart.trim();
-        if (trimmed.isEmpty()) {
-            throw new SQLException("Table source cannot be empty");
-        }
-
-        Matcher asMatcher = Pattern.compile("(?i)^([A-Za-z_][A-Za-z0-9_]*)\\s+AS\\s+([A-Za-z_][A-Za-z0-9_]*)$").matcher(trimmed);
-        if (asMatcher.matches()) {
-            return new TableSource(asMatcher.group(1).trim(), asMatcher.group(2).trim());
-        }
-
-        String[] parts = trimmed.split("\\s+");
-        if (parts.length == 1) {
-            return new TableSource(parts[0].trim(), null);
-        }
-        if (parts.length == 2) {
-            return new TableSource(parts[0].trim(), parts[1].trim());
-        }
-
-        throw new SQLException("Unsupported table source: " + trimmed);
-    }
-
-    private void parseJoinConditions(JoinQuerySpec joinSpec, String conditionPart) throws SQLException {
-        List<String> parts = splitByLogicalAnd(conditionPart);
-        joinSpec.leftConditions = new ArrayList<>();
-        joinSpec.rightConditions = new ArrayList<>();
-        for (String part : parts) {
-            Matcher matcher = Pattern.compile("(?i)^([A-Za-z_][A-Za-z0-9_\\.]*?)\\s*=\\s*([A-Za-z_][A-Za-z0-9_\\.]*)$").matcher(part.trim());
-            if (!matcher.matches()) {
-                throw new SQLException("Only equality JOIN conditions are supported: " + part.trim());
-            }
-            joinSpec.leftConditions.add(matcher.group(1).trim());
-            joinSpec.rightConditions.add(matcher.group(2).trim());
-        }
-    }
-
-    private List<String> splitByLogicalAnd(String input) {
-        List<String> parts = new ArrayList<>();
-        for (String part : input.split("(?i)\\s+AND\\s+")) {
-            if (!part.trim().isEmpty()) {
-                parts.add(part.trim());
-            }
-        }
-        return parts;
-    }
-
-    private List<SelectItem> parseSelectItems(String selectPart) throws SQLException {
-        List<SelectItem> items = new ArrayList<>();
-        for (String rawItem : splitCommaSeparated(selectPart)) {
-            String item = rawItem.trim();
-            if ("*".equals(item)) {
-                items.add(new SelectItem("*", null, false));
-                continue;
-            }
-
-            Matcher aliasMatcher = Pattern.compile("(?i)^(.*?)(?:\\s+AS\\s+)([A-Za-z_][A-Za-z0-9_\\.]*)$").matcher(item);
-            String expression = item;
-            String alias = null;
-            if (aliasMatcher.matches()) {
-                expression = aliasMatcher.group(1).trim();
-                alias = aliasMatcher.group(2).trim();
-            }
-
-            Matcher aggregateMatcher = Pattern.compile("(?i)^(COUNT|SUM|AVG|MAX|MIN)\\s*\\((\\*|[A-Za-z_][A-Za-z0-9_\\.]*)\\)$")
-                .matcher(expression);
-            if (aggregateMatcher.matches()) {
-                items.add(new SelectItem(expression, alias, true));
-            } else {
-                items.add(new SelectItem(expression, alias, false));
-            }
-        }
-
-        if (items.isEmpty()) {
-            throw new SQLException("SELECT list cannot be empty");
-        }
-        return items;
-    }
-
-    private Condition parseClauseCondition(String tableName, String clause) throws SQLException {
-        if (clause == null || clause.isEmpty()) {
-            return null;
-        }
-
-        String syntheticSql = "SELECT * FROM " + tableName + " WHERE " + clause;
-        SelectStatement parsed = parseSelect(syntheticSql);
-        return parsed.getWhere();
-    }
-
-    private Condition parseHavingCondition(QuerySpec spec, String clause) throws SQLException {
-        if (clause == null || clause.isEmpty()) {
-            return null;
-        }
-
-        try {
-            return parseClauseCondition(spec.tableName, clause);
-        } catch (SQLException ignored) {
-            return parseManualCondition(spec, clause);
-        }
-    }
-
-    private Condition parseManualCondition(QuerySpec spec, String clause) throws SQLException {
-        List<String> andParts = splitByLogicalAnd(clause);
-        if (andParts.isEmpty()) {
-            throw new SQLException("Condition clause cannot be empty");
-        }
-
-        Condition condition = null;
-        for (String part : andParts) {
-            Condition simple = parseManualSimpleCondition(spec, part);
-            condition = condition == null ? simple : new com.minisql.sql.ast.CompoundCondition(condition, simple, "AND");
-        }
-        return condition;
-    }
-
-    private Condition parseManualSimpleCondition(QuerySpec spec, String expression) throws SQLException {
-        Matcher matcher = Pattern.compile("^(.+?)\\s*(>=|<=|<>|!=|=|==|>|<|LIKE)\\s*(.+)$", Pattern.CASE_INSENSITIVE)
-            .matcher(expression.trim());
-        if (!matcher.matches()) {
-            throw new SQLException("Unsupported condition expression: " + expression);
-        }
-
-        String left = canonicalizeConditionOperand(spec, matcher.group(1).trim());
-        String operator = matcher.group(2).trim();
-        String right = stripConditionLiteral(matcher.group(3).trim());
-        return new com.minisql.sql.ast.SimpleCondition(left, operator, right);
-    }
-
-    private String canonicalizeConditionOperand(QuerySpec spec, String operand) {
-        if (operand == null) {
-            return null;
-        }
-
-        String trimmed = operand.trim();
-        for (SelectItem item : spec.selectItems) {
-            if (item.aggregate && item.expression.equalsIgnoreCase(trimmed)) {
-                return item.outputName();
-            }
-            if (item.alias != null && item.alias.equalsIgnoreCase(trimmed)) {
-                return item.outputName();
-            }
-        }
-
-        for (AggregateExpression expression : spec.aggregateExpressions) {
-            if (expression.outputName != null && expression.outputName.equalsIgnoreCase(trimmed)) {
-                return expression.outputName;
-            }
-            String aggregateSignature = expression.function + "(" + expression.column + ")";
-            if (aggregateSignature.equalsIgnoreCase(trimmed)) {
-                return expression.outputName;
-            }
-        }
-
-        return trimmed;
-    }
-
-    private String stripConditionLiteral(String value) {
-        if (value.length() >= 2) {
-            if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith("\"") && value.endsWith("\""))) {
-                return value.substring(1, value.length() - 1);
-            }
-        }
-        return value;
-    }
-
-    private String extractClause(String sql, int clauseIndex, String clauseKeyword, int... followingClauseIndexes) {
-        if (clauseIndex < 0) {
-            return null;
-        }
-        int start = clauseIndex + clauseKeyword.length();
-        int end = firstPositive(followingClauseIndexes.length == 0 ? new int[]{sql.length()} : append(sql.length(), followingClauseIndexes));
-        return sql.substring(start, end).trim();
-    }
-
-    private int[] append(int last, int... values) {
-        int[] result = new int[values.length + 1];
-        System.arraycopy(values, 0, result, 0, values.length);
-        result[values.length] = last;
-        return result;
-    }
-
-    private int firstPositive(int... indexes) {
-        int candidate = Integer.MAX_VALUE;
-        for (int index : indexes) {
-            if (index >= 0 && index < candidate) {
-                candidate = index;
-            }
-        }
-        return candidate == Integer.MAX_VALUE ? -1 : candidate;
-    }
-
-    private List<String> splitCommaSeparated(String input) {
-        if (input == null || input.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<String> parts = new ArrayList<>();
-        int depth = 0;
-        StringBuilder current = new StringBuilder();
-        for (int i = 0; i < input.length(); i++) {
-            char ch = input.charAt(i);
-            if (ch == '(') {
-                depth++;
-            } else if (ch == ')') {
-                depth = Math.max(0, depth - 1);
-            }
-
-            if (ch == ',' && depth == 0) {
-                parts.add(current.toString().trim());
-                current.setLength(0);
-            } else {
-                current.append(ch);
-            }
-        }
-
-        if (current.length() > 0) {
-            parts.add(current.toString().trim());
-        }
-        return parts;
     }
 
     private Table getTableSchema(String tableName) throws SQLException {
@@ -1146,78 +905,6 @@ public class ParallelQueryExecutor {
         public String getTableName() { return tableName; }
         public String getServerHost() { return serverHost; }
         public int getServerPort() { return serverPort; }
-    }
-
-    private static class QuerySpec {
-        private String tableName;
-        private String tableAlias;
-        private boolean selectAll;
-        private List<SelectItem> selectItems = new ArrayList<>();
-        private JoinQuerySpec joinSpec;
-        private Condition whereCondition;
-        private String whereClause;
-        private List<String> groupByColumns = new ArrayList<>();
-        private Condition havingCondition;
-        private List<AggregateExpression> aggregateExpressions = new ArrayList<>();
-        private List<String> orderByColumns = new ArrayList<>();
-        private List<Boolean> orderAscending = new ArrayList<>();
-        private int limit;
-        private int offset;
-
-        private boolean hasAggregation() {
-            return !aggregateExpressions.isEmpty() || !groupByColumns.isEmpty();
-        }
-    }
-
-    private static class JoinQuerySpec {
-        private String joinType = JoinType.INNER.name();
-        private String rightTable;
-        private String rightAlias;
-        private List<String> leftConditions;
-        private List<String> rightConditions;
-
-        private boolean isLeftJoin() {
-            return JoinType.LEFT.name().equalsIgnoreCase(joinType);
-        }
-    }
-
-    private static class TableSource {
-        private final String tableName;
-        private final String alias;
-
-        private TableSource(String tableName, String alias) {
-            this.tableName = tableName;
-            this.alias = alias;
-        }
-    }
-
-    private static class SelectItem {
-        private final String expression;
-        private final String alias;
-        private final boolean aggregate;
-
-        private SelectItem(String expression, String alias, boolean aggregate) {
-            this.expression = expression;
-            this.alias = alias;
-            this.aggregate = aggregate;
-        }
-
-        private String outputName() {
-            return alias != null ? alias : expression;
-        }
-
-        private AggregateExpression toAggregateExpression() {
-            AggregateExpression expression = new AggregateExpression();
-            Matcher aggregateMatcher = Pattern.compile("(?i)^(COUNT|SUM|AVG|MAX|MIN)\\s*\\((\\*|[A-Za-z_][A-Za-z0-9_\\.]*)\\)$")
-                .matcher(this.expression);
-            if (!aggregateMatcher.matches()) {
-                return expression;
-            }
-            expression.function = aggregateMatcher.group(1).toUpperCase();
-            expression.column = aggregateMatcher.group(2);
-            expression.outputName = outputName();
-            return expression;
-        }
     }
 
     private static class AggregateExpression {

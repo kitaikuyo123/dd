@@ -1,6 +1,5 @@
 package com.minisql.client;
 
-import com.minisql.sql.SQLParser;
 import java.sql.*;
 
 /**
@@ -69,13 +68,8 @@ public class MiniSQLStatement implements Statement {
     }
 
     private boolean isQueryStatement(String sql) throws SQLException {
-        try {
-            com.minisql.sql.ast.Statement statement = new SQLParser(sql).parse();
-            return statement instanceof com.minisql.sql.ast.SelectStatement
-                || statement instanceof com.minisql.sql.ast.ShowTablesStatement;
-        } catch (Exception e) {
-            throw new SQLException("Failed to parse SQL", e);
-        }
+        String trimmed = sql.trim().toUpperCase();
+        return trimmed.startsWith("SELECT ") || trimmed.startsWith("SHOW ");
     }
 
     @Override

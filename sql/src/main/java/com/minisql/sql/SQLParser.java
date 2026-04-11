@@ -17,13 +17,21 @@ import com.minisql.sql.ast.SimpleCondition;
 import com.minisql.sql.ast.Statement;
 import com.minisql.sql.ast.UpdateStatement;
 
+import com.minisql.sql.execution.QueryPlan;
+
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Hand-written SQL parser for the subset used by MiniSQL.
  */
 public class SQLParser {
+
+    private static final Set<String> AGGREGATE_FUNCTIONS = new HashSet<>(
+        Arrays.asList("COUNT", "SUM", "AVG", "MAX", "MIN"));
 
     private final List<Token> tokens;
     private int position;
@@ -65,16 +73,16 @@ public class SQLParser {
         SelectStatement stmt = new SelectStatement();
         parseSelectList(stmt);
         consume(TokenType.FROM);
-        stmt.setTable(parseIdentifierPath());
+        parseTableRef(stmt);
 
-        if (match(TokenType.JOIN)) {
-            stmt.setJoinTable(parseIdentifierPath());
-            consume(TokenType.ON);
-            stmt.setJoinCondition(parseCondition());
-        }
+        // JOIN: [LEFT | INNER] JOIN tableRef ON condition
+        parseJoin(stmt);
+
         if (match(TokenType.WHERE)) {
             stmt.setWhere(parseCondition());
         }
+        parseGroupBy(stmt);
+        parseHaving(stmt);
         parseOrderBy(stmt);
         parseLimit(stmt);
         return stmt;
@@ -88,9 +96,105 @@ public class SQLParser {
 
         List<String> columns = new ArrayList<>();
         do {
-            columns.add(parseIdentifierPath());
+            // Check for aggregate function: IDENTIFIER "(" ...
+            if (current().type == TokenType.IDENTIFIER
+                && AGGREGATE_FUNCTIONS.contains(current().value.toUpperCase())
+                && peek(1).type == TokenType.LPAREN) {
+                SelectStatement.AggregateExpr agg = parseAggregateFunction();
+                stmt.addAggregate(agg);
+                columns.add(agg.getOutputName());
+                // Check for alias after aggregate
+                if (match(TokenType.AS)) {
+                    agg.setAlias(consume(TokenType.IDENTIFIER).value);
+                    // Replace last column with alias
+                    columns.set(columns.size() - 1, agg.getAlias());
+                }
+                stmt.addColumnAlias(agg.getAlias());
+            } else {
+                String column = parseIdentifierPath();
+                columns.add(column);
+                if (match(TokenType.AS)) {
+                    String alias = consume(TokenType.IDENTIFIER).value;
+                    stmt.addColumnAlias(alias);
+                } else {
+                    stmt.addColumnAlias(null);
+                }
+            }
         } while (match(TokenType.COMMA));
         stmt.setColumns(columns);
+    }
+
+    private SelectStatement.AggregateExpr parseAggregateFunction() {
+        String function = consume(TokenType.IDENTIFIER).value.toUpperCase();
+        consume(TokenType.LPAREN);
+        String column;
+        if (match(TokenType.ASTERISK)) {
+            column = "*";
+        } else {
+            column = parseIdentifierPath();
+        }
+        consume(TokenType.RPAREN);
+        return new SelectStatement.AggregateExpr(function, column);
+    }
+
+    private void parseTableRef(SelectStatement stmt) {
+        stmt.setTable(parseIdentifierPath());
+        // Table alias: [AS identifier] or bare identifier (if not a keyword that starts next clause)
+        if (match(TokenType.AS)) {
+            stmt.setTableAlias(consume(TokenType.IDENTIFIER).value);
+        } else if (current().type == TokenType.IDENTIFIER) {
+            // Bare alias: FROM students s — but only if not a clause keyword
+            stmt.setTableAlias(consume(TokenType.IDENTIFIER).value);
+        }
+    }
+
+    private void parseJoin(SelectStatement stmt) {
+        QueryPlan.JoinType joinType = null;
+
+        if (match(TokenType.LEFT)) {
+            joinType = QueryPlan.JoinType.LEFT;
+            consume(TokenType.JOIN);
+        } else if (match(TokenType.INNER)) {
+            joinType = QueryPlan.JoinType.INNER;
+            consume(TokenType.JOIN);
+        } else if (match(TokenType.JOIN)) {
+            joinType = QueryPlan.JoinType.INNER;
+        }
+
+        if (joinType == null) {
+            return;
+        }
+
+        stmt.setJoinType(joinType);
+        stmt.setJoinTable(parseIdentifierPath());
+        // Join table alias
+        if (match(TokenType.AS)) {
+            stmt.setJoinTableAlias(consume(TokenType.IDENTIFIER).value);
+        } else if (current().type == TokenType.IDENTIFIER && current().type != TokenType.ON) {
+            stmt.setJoinTableAlias(consume(TokenType.IDENTIFIER).value);
+        }
+        consume(TokenType.ON);
+        stmt.setJoinCondition(parseCondition());
+    }
+
+    private void parseGroupBy(SelectStatement stmt) {
+        if (!match(TokenType.GROUP)) {
+            return;
+        }
+        consume(TokenType.BY);
+        stmt.setGroupByColumns(parseIdentifierList());
+    }
+
+    private void parseHaving(SelectStatement stmt) {
+        if (!match(TokenType.HAVING)) {
+            return;
+        }
+        stmt.setHaving(parseCondition());
+    }
+
+    private Token peek(int offset) {
+        int idx = position + offset;
+        return idx < tokens.size() ? tokens.get(idx) : tokens.get(tokens.size() - 1);
     }
 
     private void parseOrderBy(SelectStatement stmt) {

@@ -239,11 +239,6 @@ public class MiniSQLConnection implements Connection {
         checkClosed();
 
         try {
-            // 1. 解析 SQL
-            if (isComplexDistributedQuery(sql)) {
-                List<com.minisql.sql.execution.Row> rows = parallelQueryExecutor.executeQuery(sql, null, null);
-                return convertToResultSet(rows, null, null);
-            }
             SQLParser parser = new SQLParser(sql);
             com.minisql.sql.ast.Statement stmt = parser.parse();
 
@@ -251,32 +246,10 @@ public class MiniSQLConnection implements Connection {
                 com.minisql.sql.ast.SelectStatement select = (com.minisql.sql.ast.SelectStatement) stmt;
                 String tableName = select.getTable();
 
-                // 获取 rowKey 条件用于路由
-                byte[] rowKey = extractRowKeyFromCondition(select.getWhere());
+                List<com.minisql.sql.execution.Row> rows =
+                    parallelQueryExecutor.executeQuery(select, sql);
 
-                // 使用 ParallelQueryExecutor 执行查询
-                List<com.minisql.sql.execution.Row> rows;
-                if (select.getOrderBy() != null && !select.getOrderBy().isEmpty()) {
-                    // 带排序和限制的查询
-                    List<String> orderByColumns = new ArrayList<>();
-                    List<Boolean> ascending = new ArrayList<>();
-                    for (com.minisql.sql.ast.SelectStatement.OrderByElement element : select.getOrderBy()) {
-                        orderByColumns.add(element.getColumn());
-                        ascending.add(element.isAscending());
-                    }
-                    rows = parallelQueryExecutor.executeQueryWithOrder(
-                        sql, tableName,
-                        orderByColumns,
-                        ascending,
-                        select.getLimit() != null ? select.getLimit() : -1,
-                        select.getOffset() != null ? select.getOffset() : 0
-                    );
-                } else {
-                    // 普通查询
-                    rows = parallelQueryExecutor.executeQuery(sql, tableName, rowKey);
-                }
-
-                // 转换为 ResultSet（传入表名和投影列）
+                // 转换为 ResultSet
                 List<String> projectedColumns = null;
                 if (select.getColumns() != null && !select.getColumns().isEmpty()) {
                     projectedColumns = new ArrayList<>();
@@ -288,7 +261,6 @@ public class MiniSQLConnection implements Connection {
                 }
                 return convertToResultSet(rows, tableName, projectedColumns);
             } else if (stmt instanceof com.minisql.sql.ast.ShowTablesStatement) {
-                // SHOW TABLES: 调用 listTables() 获取表列表
                 List<String> tableNames = listTables();
                 return convertToTableListResultSet(tableNames);
             } else {
@@ -299,39 +271,6 @@ public class MiniSQLConnection implements Connection {
         } catch (Exception e) {
             throw new SQLException("Failed to execute query", e);
         }
-    }
-
-    /**
-     * 从条件中提取 rowKey
-     */
-    private byte[] extractRowKeyFromCondition(com.minisql.sql.ast.Condition condition) {
-        if (condition instanceof com.minisql.sql.ast.SimpleCondition) {
-            com.minisql.sql.ast.SimpleCondition simple = (com.minisql.sql.ast.SimpleCondition) condition;
-            if ("rowKey".equalsIgnoreCase(simple.getColumn()) ||
-                "id".equalsIgnoreCase(simple.getColumn())) {
-                if ("=".equals(simple.getOperator())) {
-                    return simple.getValue().getBytes();
-                }
-            }
-        }
-        return null;
-    }
-
-    private boolean isAggregationQuery(String sql) {
-        String upper = sql.toUpperCase();
-        return upper.contains(" GROUP BY ")
-            || upper.contains("COUNT(")
-            || upper.contains("SUM(")
-            || upper.contains("AVG(")
-            || upper.contains("MAX(")
-            || upper.contains("MIN(");
-    }
-
-    private boolean isComplexDistributedQuery(String sql) {
-        String upper = sql.toUpperCase();
-        return upper.contains(" JOIN ")
-            || upper.contains(" HAVING ")
-            || isAggregationQuery(sql);
     }
 
     /**

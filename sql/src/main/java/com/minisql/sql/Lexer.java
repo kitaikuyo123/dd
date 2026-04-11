@@ -166,8 +166,9 @@ public class Lexer {
         SELECT, FROM, WHERE, INSERT, INTO, VALUES,
         UPDATE, SET, DELETE, CREATE, TABLE, DROP,
         PRIMARY, KEY, INT, BIGINT, VARCHAR, DOUBLE, STRING_TYPE, TEXT,
-        AND, OR, NOT, NULL, JOIN, ON,
+        AND, OR, NOT, NULL, JOIN, ON, LEFT, INNER,
         ORDER, BY, LIMIT, OFFSET, ASC, DESC,
+        GROUP, HAVING, AS,
         SHOW, TABLES,
 
         // 标识符和字面量
@@ -209,6 +210,8 @@ public class Lexer {
             KEYWORDS.put("NULL", NULL);
             KEYWORDS.put("JOIN", JOIN);
             KEYWORDS.put("ON", ON);
+            KEYWORDS.put("LEFT", LEFT);
+            KEYWORDS.put("INNER", INNER);
             KEYWORDS.put("ORDER", ORDER);
             KEYWORDS.put("BY", BY);
             KEYWORDS.put("LIMIT", LIMIT);
@@ -217,6 +220,9 @@ public class Lexer {
             KEYWORDS.put("DESC", DESC);
             KEYWORDS.put("SHOW", SHOW);
             KEYWORDS.put("TABLES", TABLES);
+            KEYWORDS.put("GROUP", GROUP);
+            KEYWORDS.put("HAVING", HAVING);
+            KEYWORDS.put("AS", AS);
         }
     }
 
