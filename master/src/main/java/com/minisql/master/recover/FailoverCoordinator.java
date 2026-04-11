@@ -384,10 +384,6 @@ public class FailoverCoordinator {
      * 通知故障转移完成
      */
     private void updateMetadataPrimary(String regionId, ServerId newPrimary) {
-        if (metadataManager == null) {
-            return;
-        }
-
         Region region = metadataManager.getRegion(regionId);
         if (region == null) {
             logger.warn("Region {} not found in metadata during failover", regionId);
@@ -490,54 +486,6 @@ public class FailoverCoordinator {
     }
 
     /**
-     * 获取故障转移历史（regionId -> 故障转移次数）
-     */
-    public Map<String, Integer> getFailoverHistory() {
-        Map<String, Integer> result = new HashMap<>();
-        for (Map.Entry<String, FailoverState> entry : failoverStates.entrySet()) {
-            result.put(entry.getKey(), entry.getValue().failoverCount);
-        }
-        return result;
-    }
-
-    /**
-     * 获取故障转移状态
-     */
-    public FailoverState getFailoverState(String regionId) {
-        return failoverStates.get(regionId);
-    }
-
-    /**
-     * 清除故障转移历史（用于测试）
-     */
-    public void clearFailoverHistory() {
-        failoverStates.clear();
-    }
-
-    /**
-     * 检查是否可以进行故障转移
-     */
-    public boolean canFailover(String regionId) {
-        FailoverState state = failoverStates.get(regionId);
-
-        // 检查冷却时间
-        if (state != null && state.isInCooldown()) {
-            logger.debug("Failover cooldown in effect for region: {}, remaining: {}ms",
-                        regionId, state.getRemainingCooldownMs());
-            return false;
-        }
-
-        // 检查是否有正在进行的故障转移
-        if (ongoingFailovers.containsKey(regionId)) {
-            return false;
-        }
-
-        // 检查是否有可用的候选副本
-        ReplicaInfo candidate = selectNewPrimary(regionId);
-        return candidate != null && isCandidateCaughtUp(regionId, candidate.getServerId());
-    }
-
-    /**
      * 获取正在进行的故障转移列表
      */
     private boolean isCandidateCaughtUp(String regionId, ServerId candidate) {
@@ -578,10 +526,6 @@ public class FailoverCoordinator {
         }
     }
 
-    public Set<String> getOngoingFailovers() {
-        return ongoingFailovers.keySet();
-    }
-
     /**
      * 停止故障转移管理器
      */
@@ -603,35 +547,5 @@ public class FailoverCoordinator {
         }
 
         logger.info("FailoverCoordinator shut down");
-    }
-
-    /**
-     * 获取故障转移状态摘要
-     */
-    public String getStatus() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("=== Failover Manager Status ===\n");
-        sb.append("Ongoing failovers: ").append(ongoingFailovers.size()).append("\n");
-        sb.append("Failover history: ").append(failoverStates.size()).append(" regions\n");
-        sb.append("Base cooldown period: ").append(baseFailoverCooldownMs / 1000).append("s\n");
-        sb.append("Max cooldown period: ").append(maxFailoverCooldownMs / 1000).append("s\n");
-        return sb.toString();
-    }
-
-    /**
-     * 获取详细的故障转移状态
-     */
-    public String getDetailedStatus() {
-        StringBuilder sb = new StringBuilder(getStatus());
-        sb.append("\n=== Region Status ===\n");
-        for (Map.Entry<String, FailoverState> entry : failoverStates.entrySet()) {
-            FailoverState state = entry.getValue();
-            sb.append("  ").append(entry.getKey())
-              .append(": count=").append(state.failoverCount)
-              .append(", cooldown=").append(state.currentCooldownMs)
-              .append(", inCooldown=").append(state.isInCooldown())
-              .append("\n");
-        }
-        return sb.toString();
     }
 }

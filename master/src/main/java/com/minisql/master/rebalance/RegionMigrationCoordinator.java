@@ -347,9 +347,7 @@ public class RegionMigrationCoordinator {
 
     private void transition(String regionId, ServerId serverId,
                             ReplicaLifecycleManager.ReplicaLifecycleState state, String detail) {
-        if (lifecycleManager != null) {
-            lifecycleManager.transition(regionId, serverId, state, detail);
-        }
+        lifecycleManager.transition(regionId, serverId, state, detail);
     }
 
     private void recordEvent(String type, String severity, String regionId, ServerId sourceServer,

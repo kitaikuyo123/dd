@@ -141,30 +141,36 @@ public class MySQLStorageEngine implements StorageEngine {
         try (Connection conn = getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             int index = 1;
+            // 1. row_deletes CTE: startKey, endKey
             stmt.setBytes(index++, startKey);
             stmt.setBytes(index++, endKey);
+            // 2. predicate_latest CTE: startKey, endKey
             stmt.setBytes(index++, startKey);
             stmt.setBytes(index++, endKey);
-
-            for (String qualifier : request.getProjectedQualifiers()) {
-                stmt.setString(index++, qualifier);
-            }
+            // 3. predicate_latest qualifier IN (only when columnPredicates non-empty)
             for (StorageColumnPredicate predicate : request.getColumnPredicates()) {
                 if (!request.getColumnPredicates().subList(0, request.getColumnPredicates().indexOf(predicate)).stream()
                     .anyMatch(existing -> existing.getQualifier().equals(predicate.getQualifier()))) {
                     stmt.setString(index++, predicate.getQualifier());
                 }
             }
-            for (StorageColumnPredicate predicate : request.getColumnPredicates()) {
-                stmt.setString(index++, predicate.getQualifier());
-                stmt.setBytes(index++, predicate.getValue());
-            }
+            // 4. matching_rows CTE: startKey, endKey (only when no columnPredicates)
             if (!request.hasColumnPredicates()) {
                 stmt.setBytes(index++, startKey);
                 stmt.setBytes(index++, endKey);
             }
+            // 5. columnPredicates: qualifier, value pairs
+            for (StorageColumnPredicate predicate : request.getColumnPredicates()) {
+                stmt.setString(index++, predicate.getQualifier());
+                stmt.setBytes(index++, predicate.getValue());
+            }
+            // 6. latest_cells CTE: startKey, endKey
             stmt.setBytes(index++, startKey);
             stmt.setBytes(index++, endKey);
+            // 7. latest_cells qualifier IN (projected qualifiers)
+            for (String qualifier : request.getProjectedQualifiers()) {
+                stmt.setString(index++, qualifier);
+            }
 
             try (ResultSet rs = stmt.executeQuery()) {
                 return visibilityResolver.materializeVisibleCells(rs, this::resultSetToKeyValue).iterator();

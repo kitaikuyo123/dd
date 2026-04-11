@@ -16,20 +16,18 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReplicaMonitorTest {
 
     @Test
-    @DisplayName("health check marks timeout and later recovery")
-    void testReplicaOfflineThenRecovered() throws Exception {
-        ReplicaMonitor monitor = new ReplicaMonitor(new ClusterManager(new LoadBalancer()),
-            10L, 30L, 100L, 10L);
+    @DisplayName("updateHeartbeat recovers an offline replica")
+    void testReplicaOfflineThenRecovered() {
+        ReplicaMonitor monitor = new ReplicaMonitor(new ClusterManager(new LoadBalancer()));
         ServerId replicaServer = new ServerId("replica-host", 16020);
+        // Replica starts OFFLINE (as would be set by ZooKeeper-driven failure detection)
         ReplicaInfo replica = new ReplicaInfo("region-1", replicaServer, "", "", "",
-            ReplicaInfo.ReplicaState.SECONDARY);
+            ReplicaInfo.ReplicaState.OFFLINE);
 
-        AtomicBoolean failedCalled = new AtomicBoolean(false);
         AtomicBoolean recoveredCalled = new AtomicBoolean(false);
         monitor.registerCallback(new ReplicaMonitor.FailoverCallback() {
             @Override
             public void onReplicaFailed(String regionId, ServerId failedReplica) {
-                failedCalled.set(true);
             }
 
             @Override
@@ -42,22 +40,12 @@ class ReplicaMonitorTest {
             }
         });
         monitor.registerReplica("region-1", replica);
-        monitor.start();
 
-        try {
-            waitFor(() -> failedCalled.get()
-                && replica.getState() == ReplicaInfo.ReplicaState.OFFLINE, 1000L);
+        // Heartbeat recovers the OFFLINE replica to SECONDARY
+        monitor.updateHeartbeat("region-1", replicaServer, 0L);
 
-            monitor.updateHeartbeat("region-1", replicaServer, 0L);
-
-            waitFor(() -> recoveredCalled.get()
-                && replica.getState() == ReplicaInfo.ReplicaState.SECONDARY, 1000L);
-        } finally {
-            monitor.stop();
-        }
-
-        assertTrue(failedCalled.get());
         assertTrue(recoveredCalled.get());
+        assertEquals(ReplicaInfo.ReplicaState.SECONDARY, replica.getState());
     }
 
     @Test
@@ -76,19 +64,4 @@ class ReplicaMonitorTest {
         assertTrue(monitor.getReplicas("region-1").isEmpty());
     }
 
-    private void waitFor(Check check, long timeoutMs) throws Exception {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            if (check.done()) {
-                return;
-            }
-            Thread.sleep(10L);
-        }
-        fail("Condition was not satisfied within " + timeoutMs + "ms");
-    }
-
-    @FunctionalInterface
-    private interface Check {
-        boolean done();
-    }
 }
