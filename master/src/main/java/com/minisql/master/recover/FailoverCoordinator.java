@@ -10,6 +10,7 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.DistributedLock;
 
 import java.util.*;
@@ -33,6 +34,7 @@ public class FailoverCoordinator {
     private final ReplicaLifecycleManager lifecycleManager;
     private final RegionServerCommandClient commandClient;
     private final ExecutorService executor;
+    private ReplicationCoordinator replicationCoordinator;
 
     // 配置参数
     private final int maxFailoverRetries;
@@ -178,6 +180,10 @@ public class FailoverCoordinator {
         this.monitoringService = monitoringService;
     }
 
+    public void setReplicationCoordinator(ReplicationCoordinator replicationCoordinator) {
+        this.replicationCoordinator = replicationCoordinator;
+    }
+
     /**
      * 触发故障转移（普通模式）
      */
@@ -279,6 +285,7 @@ public class FailoverCoordinator {
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, newPrimary.getServerId());
+            syncReplicationPrimary(regionId, newPrimary.getServerId());
             recordEvent("PRIMARY_PROMOTED", "INFO", regionId, null, null, toServerName(newPrimary.getServerId()),
                 "Primary promoted during failover", null);
             lifecycleManager.transition(regionId, newPrimary.getServerId(),
@@ -321,29 +328,33 @@ public class FailoverCoordinator {
      * 选择新的主副本
      */
     private ReplicaInfo selectNewPrimary(String regionId) {
-        // 使用 ReplicaMonitor 选择最健康的从副本
-        ReplicaInfo candidate = replicaMonitor.selectHealthiestSecondary(regionId);
+        List<ReplicaInfo> replicas = replicaMonitor.getReplicas(regionId);
+        ReplicaInfo candidate = null;
+        long minLag = Long.MAX_VALUE;
+
+        for (ReplicaInfo replica : replicas) {
+            if (replica == null || replica.isPrimary() || !replica.isHealthy()) {
+                continue;
+            }
+            if (!clusterManager.isServerActive(replica.getServerId())) {
+                logger.info("Skip inactive failover candidate {} for region {}",
+                    replica.getServerId(), regionId);
+                continue;
+            }
+            if (replica.getReplicationLag() < minLag) {
+                minLag = replica.getReplicationLag();
+                candidate = replica;
+            }
+        }
 
         if (candidate == null) {
-            // 没有健康的从副本，尝试从 ClusterManager 获取活跃服务器
-            logger.info("No healthy secondary found, checking active servers...");
-
-            // 获取该 Region 的所有副本
-            List<ReplicaInfo> replicas = replicaMonitor.getReplicas(regionId);
-            for (ReplicaInfo replica : replicas) {
-                if (replica.isHealthy() && !replica.isPrimary()) {
-                    return replica;
-                }
-            }
-
+            logger.info("No healthy active secondary found for failover in region {}", regionId);
             return null;
         }
 
-        // 验证候选副本的复制延迟
         if (candidate.getReplicationLag() > failoverTimeoutMs) {
             logger.warn("Candidate replica has too much lag: {}ms",
-                             candidate.getReplicationLag());
-            // 尝试寻找下一个最佳候选
+                candidate.getReplicationLag());
             return findNextBestCandidate(regionId, candidate);
         }
 
@@ -361,6 +372,8 @@ public class FailoverCoordinator {
         for (ReplicaInfo replica : replicas) {
             if (replica == exclude) continue;
             if (!replica.isHealthy()) continue;
+            if (replica.isPrimary()) continue;
+            if (!clusterManager.isServerActive(replica.getServerId())) continue;
 
             if (replica.getReplicationLag() < minLag) {
                 minLag = replica.getReplicationLag();
@@ -441,11 +454,16 @@ public class FailoverCoordinator {
                 logger.error("Target replica is not caught up enough for manual failover: {}", targetPrimary);
                 return;
             }
+            if (!clusterManager.isServerActive(targetPrimary)) {
+                logger.error("Target replica is not active for manual failover: {}", targetPrimary);
+                return;
+            }
             if (!promoteReplica(regionId, targetPrimary)) {
                 logger.error("Failed to promote target replica: {}", targetPrimary);
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, targetPrimary);
+            syncReplicationPrimary(regionId, targetPrimary);
             clusterManager.updateRegionAssignment(regionId, targetPrimary);
             updateMetadataPrimary(regionId, targetPrimary);
             updateZooKeeper(regionId, targetPrimary);
@@ -524,6 +542,23 @@ public class FailoverCoordinator {
             logger.error("Failed to promote replica {} for region {}: {}", targetServer, regionId, e.getMessage(), e);
             return false;
         }
+    }
+
+    private void syncReplicationPrimary(String regionId, ServerId newPrimary) {
+        if (replicationCoordinator == null) {
+            return;
+        }
+        try {
+            replicationCoordinator.promoteToPrimary(regionId, newPrimary);
+            logger.info("Replication primary updated for region {} -> {}", regionId, newPrimary);
+        } catch (Exception e) {
+            logger.warn("Failed to sync replication primary for region {} to {}: {}",
+                regionId, newPrimary, e.getMessage());
+        }
+    }
+
+    public Set<String> getOngoingFailovers() {
+        return ongoingFailovers.keySet();
     }
 
     /**

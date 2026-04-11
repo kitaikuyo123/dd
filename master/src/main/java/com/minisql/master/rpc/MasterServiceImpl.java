@@ -441,6 +441,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 return;
             }
 
+            pruneFailedReplicaReferences(regionId, failedServer, region, primaryFailed);
             clusterManager.updateRegionState(regionId, Region.State.OFFLINE);
             if (primaryFailed) {
                 lifecycleManager.transition(regionId, failedServer,
@@ -470,6 +471,25 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             logger.warn("Failed to recover region {}: {}", regionId, e.getMessage());
         } finally {
             recoveringRegions.remove(regionId);
+        }
+    }
+
+    private void pruneFailedReplicaReferences(String regionId, ServerId failedServer, Region region, boolean primaryFailed) {
+        if (failedServer == null || region == null) {
+            return;
+        }
+
+        clusterManager.removeReplica(regionId, failedServer);
+        replicaMonitor.removeReplica(regionId, failedServer);
+        region.removeReplica(failedServer);
+
+        if (primaryFailed && failedServer.equals(region.getPrimary())) {
+            region.setPrimary(null);
+            return;
+        }
+
+        if (region.getPrimary() != null) {
+            metadataManager.registerRegionForTable(region, region.getPrimary());
         }
     }
 
@@ -1261,6 +1281,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             clusterManager.promoteReplicaToPrimary(regionId, newPrimary);
             clusterManager.addReplica(regionId, newPrimary);
+            if (replicationCoordinator != null) {
+                try {
+                    replicationCoordinator.promoteToPrimary(regionId, newPrimary);
+                } catch (Exception e) {
+                    logger.warn("Failed to sync replication primary for region {} to {} during reportPrimaryChange: {}",
+                        regionId, newPrimary, e.getMessage());
+                }
+            }
             region.setPrimary(newPrimary);
             if (!region.getReplicas().contains(newPrimary)) {
                 region.addReplica(newPrimary);

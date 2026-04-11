@@ -223,6 +223,7 @@ public class MasterMain {
 
         failoverCoordinator = new FailoverCoordinator(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
         failoverCoordinator.setZkClient(zkClient);
+        failoverCoordinator.setReplicationCoordinator(replicationCoordinator);
 
         recoveryCoordinator = new RecoveryCoordinator(
             clusterManager, metadataManager, replicaMonitor, replicationCoordinator, replicaLifecycleManager);
