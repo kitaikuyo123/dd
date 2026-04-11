@@ -89,3 +89,10 @@ surefire-reports/
 *.exec
 *.ec
 jacoco.exec
+
+# Documentation
+claude.md
+introduction.md
+
+# Server Properties
+regionserver/src/main/resources/*.properties

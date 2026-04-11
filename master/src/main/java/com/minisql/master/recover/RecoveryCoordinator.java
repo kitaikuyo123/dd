@@ -17,6 +17,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,6 +40,7 @@ public class RecoveryCoordinator {
     private final RegionServerCommandClient commandClient;
     private final ExecutorService recoveryExecutor;
     private final ConcurrentHashMap<String, Boolean> inFlightRecoveries = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> regionLocks = new ConcurrentHashMap<>();
     private MonitoringService monitoringService;
 
     public RecoveryCoordinator(ClusterManager clusterManager,
@@ -107,6 +111,7 @@ public class RecoveryCoordinator {
     }
 
     public void reconcileRecoveredServer(ServerId recoveredServer) {
+        logger.info("[RECOVERY-RECONCILE] Start reconcile for recovered server {}", recoveredServer);
         for (Region region : metadataManager.getAllRegions()) {
             if (region == null) {
                 continue;
@@ -126,7 +131,11 @@ public class RecoveryCoordinator {
                 continue;
             }
 
+            enforceReplicaTarget(region.getRegionId());
+
             if (region.getReplicas().contains(recoveredServer)) {
+                logger.info("[RECOVERY-RECONCILE] Region {} already contains recovered server {}, schedule recoverReplica",
+                    region.getRegionId(), recoveredServer);
                 recoverReplica(region.getRegionId(), recoveredServer);
                 continue;
             }
@@ -141,8 +150,17 @@ public class RecoveryCoordinator {
                 .filter(clusterManager::isServerActive)
                 .count();
 
+            logger.info("[RECOVERY-RECONCILE] Region={} table={} primary={} replicas={} activeReplicaCount={} targetReplicationFactor={}",
+                region.getRegionId(), region.getTableName(), primary, region.getReplicas(),
+                activeReplicaCount, targetReplicationFactor);
+
             if (activeReplicaCount < targetReplicationFactor) {
+                logger.info("[RECOVERY-BOOTSTRAP] Region {} activeReplicaCount {} < target {}, bootstrap on recovered server {}",
+                    region.getRegionId(), activeReplicaCount, targetReplicationFactor, recoveredServer);
                 bootstrapReplica(region.getRegionId(), recoveredServer);
+            } else {
+                logger.info("[RECOVERY-RECONCILE] Region {} does not need bootstrap (activeReplicaCount {} >= target {})",
+                    region.getRegionId(), activeReplicaCount, targetReplicationFactor);
             }
         }
     }
@@ -178,6 +196,7 @@ public class RecoveryCoordinator {
             .count();
 
         if (activeReplicaCount >= targetReplicationFactor) {
+            enforceReplicaTarget(region.getRegionId());
             return;
         }
 
@@ -191,6 +210,8 @@ public class RecoveryCoordinator {
                 break;
             }
         }
+
+        enforceReplicaTarget(region.getRegionId());
     }
 
     private void ensurePrimaryRegionOpen(Region region) {
@@ -274,6 +295,8 @@ public class RecoveryCoordinator {
     }
 
     private void performRecovery(String regionId, ServerId replica, boolean initializing) {
+        logger.info("[RECOVERY-BOOTSTRAP] Begin performRecovery region={} replica={} initializing={}",
+            regionId, replica, initializing);
         recordEvent("RECOVERY_STARTED", "INFO", regionId, replica,
             initializing ? "Replica bootstrap started" : "Replica recovery started", null);
         lifecycleManager.transition(regionId, replica,
@@ -286,6 +309,9 @@ public class RecoveryCoordinator {
         markReplicaReady(regionId, replica);
         recordEvent("RECOVERY_COMPLETED", "INFO", regionId, replica,
             initializing ? "Replica bootstrap completed" : "Replica recovery completed", null);
+        enforceReplicaTarget(regionId);
+        logger.info("[RECOVERY-BOOTSTRAP] Completed performRecovery region={} replica={} initializing={}",
+            regionId, replica, initializing);
     }
 
     private void waitForReplicaReady(String regionId, ServerId replica) {
@@ -321,6 +347,8 @@ public class RecoveryCoordinator {
         if (region != null) {
             region.addReplica(replica);
             metadataManager.registerRegionForTable(region, region.getPrimary());
+            logger.info("[RECOVERY-BOOTSTRAP] ensureReplicaRegistered region={} replica={} initializing={} replicasAfterRegister={}",
+                regionId, replica, initializing, region.getReplicas());
         }
 
         boolean exists = false;
@@ -381,9 +409,85 @@ public class RecoveryCoordinator {
             metadataManager.registerRegionForTable(region, region.getPrimary());
         }
 
+        if (region != null) {
+            logger.info("[RECOVERY-BOOTSTRAP] markReplicaReady region={} replica={} replicasNow={}",
+                regionId, replica, region.getReplicas());
+        }
+
         lifecycleManager.transition(regionId, replica,
             ReplicaLifecycleManager.ReplicaLifecycleState.SECONDARY_READY,
             "Replica ready for serving");
+    }
+
+    private void enforceReplicaTarget(String regionId) {
+        Object regionLock = regionLocks.computeIfAbsent(regionId, ignored -> new Object());
+        synchronized (regionLock) {
+            Region region = metadataManager.getRegion(regionId);
+            if (region == null || region.getPrimary() == null) {
+                return;
+            }
+
+            int targetReplicationFactor = 3;
+            com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
+            if (table != null && table.getProperties() != null) {
+                targetReplicationFactor = table.getProperties().getReplicationFactor();
+            }
+            targetReplicationFactor = Math.max(1, targetReplicationFactor);
+
+            List<ServerId> currentReplicas = new ArrayList<>(region.getReplicas());
+            if (currentReplicas.size() <= targetReplicationFactor) {
+                return;
+            }
+
+            ServerId primary = region.getPrimary();
+            List<ServerId> secondaries = new ArrayList<>();
+            for (ServerId replica : currentReplicas) {
+                if (replica != null && !replica.equals(primary)) {
+                    secondaries.add(replica);
+                }
+            }
+
+            secondaries.sort(Comparator
+                .comparing((ServerId sid) -> !clusterManager.isServerActive(sid))
+                .thenComparing(ServerId::getHost)
+                .thenComparingInt(ServerId::getPort));
+
+            int keepSecondaryCount = Math.max(0, targetReplicationFactor - 1);
+            Set<ServerId> keepReplicas = new HashSet<>();
+            keepReplicas.add(primary);
+            for (int i = 0; i < Math.min(keepSecondaryCount, secondaries.size()); i++) {
+                keepReplicas.add(secondaries.get(i));
+            }
+
+            List<ServerId> removed = new ArrayList<>();
+            for (ServerId replica : currentReplicas) {
+                if (replica == null || replica.equals(primary) || keepReplicas.contains(replica)) {
+                    continue;
+                }
+                removed.add(replica);
+            }
+
+            if (removed.isEmpty()) {
+                return;
+            }
+
+            for (ServerId replica : removed) {
+                region.removeReplica(replica);
+                clusterManager.removeReplica(regionId, replica);
+                replicaMonitor.removeReplica(regionId, replica);
+                replicationCoordinator.removeReplica(regionId, replica);
+                lifecycleManager.transition(regionId, replica,
+                    ReplicaLifecycleManager.ReplicaLifecycleState.REMOVED,
+                    "Trimmed excess secondary replica to match replication factor");
+                recordEvent("REPLICA_TRIMMED", "INFO", regionId, replica,
+                    "Trimmed excess secondary replica",
+                    "targetReplicationFactor=" + targetReplicationFactor);
+            }
+
+            metadataManager.registerRegionForTable(region, primary);
+            logger.info("[RECOVERY-TRIM] region={} target={} removed={} replicasNow={}",
+                regionId, targetReplicationFactor, removed, region.getReplicas());
+        }
     }
 
     private String buildTaskKey(String regionId, ServerId replica) {

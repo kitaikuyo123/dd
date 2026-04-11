@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
 public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private static final Logger logger = LoggerFactory.getLogger(MasterServiceImpl.class);
+    private static final long DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS = 10_000L;
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -59,6 +60,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private final Map<String, Long> regionSplitCooldownUntilMs = new ConcurrentHashMap<>();
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
+    private final long hotSpotDetectorIntervalMs;
 
     // Master 状态
     private final String clusterId;
@@ -74,7 +76,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              ReplicaLifecycleManager lifecycleManager,
                              Properties config) {
         this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
-            failoverCoordinator, recoveryCoordinator, lifecycleManager, new GrpcRegionServerCommandClient(clusterManager), config);
+            failoverCoordinator, recoveryCoordinator, lifecycleManager,
+            new GrpcRegionServerCommandClient(clusterManager),
+            config);
     }
 
     public MasterServiceImpl(ClusterManager clusterManager,
@@ -87,6 +91,24 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              ReplicaLifecycleManager lifecycleManager,
                              RegionServerCommandClient commandClient,
                              Properties config) {
+        this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
+            failoverCoordinator, recoveryCoordinator, lifecycleManager, commandClient,
+            DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS,
+            null);
+        applyCoordinatorThresholds(config);
+    }
+
+    public MasterServiceImpl(ClusterManager clusterManager,
+                             MetadataManager metadataManager,
+                             LoadBalancer loadBalancer,
+                             ReplicationCoordinator replicationCoordinator,
+                             ReplicaMonitor replicaMonitor,
+                             FailoverCoordinator failoverCoordinator,
+                             RecoveryCoordinator recoveryCoordinator,
+                             ReplicaLifecycleManager lifecycleManager,
+                             RegionServerCommandClient commandClient,
+                             long hotSpotDetectorIntervalMs,
+                             HotSpotCoordinator.HotSpotSettings hotSpotSettings) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.loadBalancer = loadBalancer;
@@ -102,36 +124,24 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
-
-        // Apply configurable thresholds from properties
-        if (config != null) {
-            String splitThresholdMb = config.getProperty("region.split.threshold.mb");
-            if (splitThresholdMb != null) {
-                splitCoordinator.setSplitThresholdSize(Long.parseLong(splitThresholdMb) * 1024 * 1024);
-            }
-            String mergeThresholdMb = config.getProperty("region.merge.threshold.mb");
-            if (mergeThresholdMb != null) {
-                mergeCoordinator.setMergeThresholdSize(Long.parseLong(mergeThresholdMb) * 1024 * 1024);
-            }
-            String maxMergeGb = config.getProperty("region.merge.max.size.gb");
-            if (maxMergeGb != null) {
-                mergeCoordinator.setMaxMergeSize(Long.parseLong(maxMergeGb) * 1024 * 1024 * 1024);
-            }
-            String minMergeMb = config.getProperty("region.merge.min.size.mb");
-            if (minMergeMb != null) {
-                mergeCoordinator.setMinMergeSize(Long.parseLong(minMergeMb) * 1024 * 1024);
-            }
-            String mergeCooldownMs = config.getProperty("region.merge.cooldown.ms");
-            if (mergeCooldownMs != null) {
-                mergeCoordinator.setMergeCooldownMs(Long.parseLong(mergeCooldownMs));
-            }
+        if (hotSpotSettings != null) {
+            this.hotSpotCoordinator.configure(hotSpotSettings);
         }
+        this.hotSpotDetectorIntervalMs = Math.max(1_000L, hotSpotDetectorIntervalMs);
         this.serverFailureRecoveryExecutor = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "ServerFailure-Recovery");
             t.setDaemon(true);
             return t;
         });
         this.clusterId = UUID.randomUUID().toString();
+        logger.info(
+            "HotSpot detector config applied: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
+            this.hotSpotDetectorIntervalMs,
+            this.hotSpotCoordinator.getReadThresholdPerInterval(),
+            this.hotSpotCoordinator.getWriteThresholdPerInterval(),
+            this.hotSpotCoordinator.getGrowthThreshold(),
+            this.hotSpotCoordinator.getTargetReadReplicaCount(),
+            this.hotSpotCoordinator.getCooldownMs());
 
         // 启动自动合并检查
         mergeCoordinator.start();
@@ -143,8 +153,53 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         startServerFailureCheckScheduler();
     }
 
+    private void applyCoordinatorThresholds(Properties config) {
+        if (config == null) {
+            return;
+        }
+
+        Long splitThresholdMb = parseLongProperty(config, "region.split.threshold.mb");
+        if (splitThresholdMb != null) {
+            splitCoordinator.setSplitThresholdSize(splitThresholdMb * 1024 * 1024);
+        }
+
+        Long mergeThresholdMb = parseLongProperty(config, "region.merge.threshold.mb");
+        if (mergeThresholdMb != null) {
+            mergeCoordinator.setMergeThresholdSize(mergeThresholdMb * 1024 * 1024);
+        }
+
+        Long maxMergeGb = parseLongProperty(config, "region.merge.max.size.gb");
+        if (maxMergeGb != null) {
+            mergeCoordinator.setMaxMergeSize(maxMergeGb * 1024 * 1024 * 1024);
+        }
+
+        Long minMergeMb = parseLongProperty(config, "region.merge.min.size.mb");
+        if (minMergeMb != null) {
+            mergeCoordinator.setMinMergeSize(minMergeMb * 1024 * 1024);
+        }
+
+        Long mergeCooldownMs = parseLongProperty(config, "region.merge.cooldown.ms");
+        if (mergeCooldownMs != null) {
+            mergeCoordinator.setMergeCooldownMs(mergeCooldownMs);
+        }
+    }
+
+    private Long parseLongProperty(Properties config, String key) {
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(rawValue.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Ignoring invalid long property {}={}", key, rawValue);
+            return null;
+        }
+    }
+
     public void setMonitoringService(MonitoringService monitoringService) {
         this.monitoringService = monitoringService;
+        this.monitoringService.setHotSpotCoordinator(hotSpotCoordinator);
         this.migrationCoordinator.setMonitoringService(monitoringService);
         this.splitCoordinator.setMonitoringService(monitoringService);
         this.mergeCoordinator.setMonitoringService(monitoringService);
@@ -191,8 +246,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         });
         hotSpotScheduler.scheduleAtFixedRate(
             this::checkHotSpots,
-            10, 10, TimeUnit.SECONDS
+            hotSpotDetectorIntervalMs, hotSpotDetectorIntervalMs, TimeUnit.MILLISECONDS
         );
+        logger.info("HotSpot detector scheduler started, interval: {} ms", hotSpotDetectorIntervalMs);
     }
 
     /**
@@ -385,6 +441,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 return;
             }
 
+            pruneFailedReplicaReferences(regionId, failedServer, region, primaryFailed);
             clusterManager.updateRegionState(regionId, Region.State.OFFLINE);
             if (primaryFailed) {
                 lifecycleManager.transition(regionId, failedServer,
@@ -414,6 +471,25 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             logger.warn("Failed to recover region {}: {}", regionId, e.getMessage());
         } finally {
             recoveringRegions.remove(regionId);
+        }
+    }
+
+    private void pruneFailedReplicaReferences(String regionId, ServerId failedServer, Region region, boolean primaryFailed) {
+        if (failedServer == null || region == null) {
+            return;
+        }
+
+        clusterManager.removeReplica(regionId, failedServer);
+        replicaMonitor.removeReplica(regionId, failedServer);
+        region.removeReplica(failedServer);
+
+        if (primaryFailed && failedServer.equals(region.getPrimary())) {
+            region.setPrimary(null);
+            return;
+        }
+
+        if (region.getPrimary() != null) {
+            metadataManager.registerRegionForTable(region, region.getPrimary());
         }
     }
 
@@ -1205,6 +1281,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             clusterManager.promoteReplicaToPrimary(regionId, newPrimary);
             clusterManager.addReplica(regionId, newPrimary);
+            if (replicationCoordinator != null) {
+                try {
+                    replicationCoordinator.promoteToPrimary(regionId, newPrimary);
+                } catch (Exception e) {
+                    logger.warn("Failed to sync replication primary for region {} to {} during reportPrimaryChange: {}",
+                        regionId, newPrimary, e.getMessage());
+                }
+            }
             region.setPrimary(newPrimary);
             if (!region.getReplicas().contains(newPrimary)) {
                 region.addReplica(newPrimary);

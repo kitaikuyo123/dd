@@ -164,6 +164,9 @@ public class HotSpotCoordinator {
                 logger.info("Hot spot action planned: region={} type={} action={} target={}",
                     regionId, hotSpotType, action.getType(), action.getTargetServer());
                 pendingActions.offer(action);
+            } else {
+                logger.info("Hot spot detected but no executable action: region={} type={} (likely no eligible target replica server or incomplete metadata)",
+                    regionId, hotSpotType);
             }
             cooldownUntilMs.put(regionId, now + cooldownMs);
         }
