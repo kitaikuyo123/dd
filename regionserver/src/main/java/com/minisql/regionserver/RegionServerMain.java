@@ -55,6 +55,7 @@ public class RegionServerMain {
         long diskCapacityMb = Long.parseLong(config.getProperty("regionserver.disk.capacity.mb", "1024"));
         long splitThresholdMb = Long.parseLong(config.getProperty("regionserver.region.split.threshold.mb", "256"));
         long splitMinMb = Long.parseLong(config.getProperty("regionserver.region.split.min.mb", "64"));
+        int replicationFactor = Integer.parseInt(config.getProperty("replication.factor", "3"));
 
         logger.info("========================================");
         logger.info("  MiniSQL RegionServer Starting...");
@@ -73,7 +74,7 @@ public class RegionServerMain {
             mysqlPassword
         ).maxPoolSize(mysqlMaxConnections).build();
 
-        initRegionServer(host, port, mysqlConfig, masterAddress, splitThresholdMb, splitMinMb);
+        initRegionServer(host, port, mysqlConfig, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
         initHeartbeatSender(zkConnect, masterAddress, heartbeatInterval, mysqlConfig, diskCapacityMb);
 
         logger.info("----------------------------------------");
@@ -145,8 +146,9 @@ public class RegionServerMain {
                                   MySQLConfig mysqlConfig,
                                   String masterAddress,
                                   long splitThresholdMb,
-                                  long splitMinMb) throws IOException {
-        regionServer = new RegionServer(host, port, mysqlConfig, masterAddress);
+                                  long splitMinMb,
+                                  int replicationFactor) throws IOException {
+        regionServer = new RegionServer(host, port, mysqlConfig, masterAddress, replicationFactor);
         regionServer.getSplitService().setConfig(splitThresholdMb, splitMinMb);
         regionServer.start();
     }

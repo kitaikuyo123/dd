@@ -61,6 +61,7 @@ public class MasterMain {
     private MonitorHttpServer monitorHttpServer;
     private MasterServiceImpl serviceImpl;
     private ServerId masterServerId;
+    private Properties config;
 
     public static void main(String[] args) {
         MasterMain master = new MasterMain();
@@ -89,6 +90,7 @@ public class MasterMain {
         logger.info("----------------------------------------");
 
         initZookeeper(zkConnectString);
+        this.config = config;
         initComponents(config);
         startGrpcServer(host, port);
         startLeaderElection();
@@ -185,7 +187,7 @@ public class MasterMain {
 
         metadataManager = new MetadataManager(zkClient);
 
-        int replicationFactor = 3;
+        int replicationFactor = Integer.parseInt(config.getProperty("replication.factor", "3"));
         replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(replicationFactor).build());
         replicationCoordinator.setZkClient(zkClient);
         replicationCoordinator.start();
@@ -282,7 +284,8 @@ public class MasterMain {
             replicaMonitor,
             failoverCoordinator,
             recoveryCoordinator,
-            replicaLifecycleManager
+            replicaLifecycleManager,
+            config
         );
         serviceImpl.setMonitoringService(monitoringService);
         serviceImpl.setZkClient(zkClient);

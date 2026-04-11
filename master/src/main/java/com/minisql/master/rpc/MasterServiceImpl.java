@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -70,9 +71,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              ReplicaMonitor replicaMonitor,
                              FailoverCoordinator failoverCoordinator,
                              RecoveryCoordinator recoveryCoordinator,
-                             ReplicaLifecycleManager lifecycleManager) {
+                             ReplicaLifecycleManager lifecycleManager,
+                             Properties config) {
         this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
-            failoverCoordinator, recoveryCoordinator, lifecycleManager, new GrpcRegionServerCommandClient(clusterManager));
+            failoverCoordinator, recoveryCoordinator, lifecycleManager, new GrpcRegionServerCommandClient(clusterManager), config);
     }
 
     public MasterServiceImpl(ClusterManager clusterManager,
@@ -83,7 +85,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              FailoverCoordinator failoverCoordinator,
                              RecoveryCoordinator recoveryCoordinator,
                              ReplicaLifecycleManager lifecycleManager,
-                             RegionServerCommandClient commandClient) {
+                             RegionServerCommandClient commandClient,
+                             Properties config) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.loadBalancer = loadBalancer;
@@ -97,7 +100,32 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             clusterManager, metadataManager, commandClient, lifecycleManager);
         this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
+        this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
+
+        // Apply configurable thresholds from properties
+        if (config != null) {
+            String splitThresholdMb = config.getProperty("region.split.threshold.mb");
+            if (splitThresholdMb != null) {
+                splitCoordinator.setSplitThresholdSize(Long.parseLong(splitThresholdMb) * 1024 * 1024);
+            }
+            String mergeThresholdMb = config.getProperty("region.merge.threshold.mb");
+            if (mergeThresholdMb != null) {
+                mergeCoordinator.setMergeThresholdSize(Long.parseLong(mergeThresholdMb) * 1024 * 1024);
+            }
+            String maxMergeGb = config.getProperty("region.merge.max.size.gb");
+            if (maxMergeGb != null) {
+                mergeCoordinator.setMaxMergeSize(Long.parseLong(maxMergeGb) * 1024 * 1024 * 1024);
+            }
+            String minMergeMb = config.getProperty("region.merge.min.size.mb");
+            if (minMergeMb != null) {
+                mergeCoordinator.setMinMergeSize(Long.parseLong(minMergeMb) * 1024 * 1024);
+            }
+            String mergeCooldownMs = config.getProperty("region.merge.cooldown.ms");
+            if (mergeCooldownMs != null) {
+                mergeCoordinator.setMergeCooldownMs(Long.parseLong(mergeCooldownMs));
+            }
+        }
         this.serverFailureRecoveryExecutor = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "ServerFailure-Recovery");
             t.setDaemon(true);
@@ -363,9 +391,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
                     "Primary failure detected by ServerFailureEvent");
                 clusterManager.unassignRegion(regionId);
-                if (failoverCoordinator == null) {
-                    throw new IllegalStateException("FailoverCoordinator is required for primary recovery");
-                }
                 failoverCoordinator.triggerEmergencyFailover(regionId);
             }
 
@@ -374,9 +399,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 lifecycleManager.transition(regionId, newServer,
                     ReplicaLifecycleManager.ReplicaLifecycleState.BOOTSTRAPPING,
                     "ServerFailureEvent scheduling replacement replica");
-                if (recoveryCoordinator == null) {
-                    throw new IllegalStateException("RecoveryCoordinator is required for replica bootstrap");
-                }
                 recoveryCoordinator.bootstrapReplica(regionId, newServer);
             }
 
@@ -472,9 +494,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
-            if (recoveryCoordinator != null) {
-                recoveryCoordinator.reconcileRecoveredServer(serverId);
-            }
+            recoveryCoordinator.reconcileRecoveredServer(serverId);
 
             logger.info("RegionServer registered: {}", serverId);
             recordEvent("SERVER_REGISTERED", "INFO", null, null, serverId, null,
@@ -538,15 +558,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     hotSpotCoordinator.recordRegionLoad(load.getRegionId(), convertRegionLoad(load));
 
                     // 更新副本监控心跳
-                    if (replicaMonitor != null) {
-                        ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, load.getRegionId());
-                        replicaMonitor.updateHeartbeat(load.getRegionId(), serverId, lagSnapshot.lagInEntries);
-                        clusterManager.updateReplicaSequenceId(
-                            load.getRegionId(),
-                            serverId,
-                            lagSnapshot.lastAppliedSequenceId
-                        );
-                    }
+                    ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, load.getRegionId());
+                    replicaMonitor.updateHeartbeat(load.getRegionId(), serverId, lagSnapshot.lagInEntries);
+                    clusterManager.updateReplicaSequenceId(
+                        load.getRegionId(),
+                        serverId,
+                        lagSnapshot.lastAppliedSequenceId
+                    );
                 }
             }
 
@@ -792,7 +810,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     }
 
                     // 创建副本组（如果选择了多个服务器）
-                    if (selectedServers.size() > 1 && replicationCoordinator != null) {
+                    if (selectedServers.size() > 1) {
                         replicationCoordinator.createReplicaGroup(region, selectedServers);
                         logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
                             region.getRegionId(), selectedServers.size());
@@ -800,13 +818,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                             logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
                                 region.getRegionId(), selectedServers.size(), replicationFactor);
                         }
-                        if (recoveryCoordinator != null) {
-                            for (int i = 1; i < selectedServers.size(); i++) {
-                                ServerId replicaServer = selectedServers.get(i);
-                                logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
-                                    replicaServer, region.getRegionId());
-                                recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
-                            }
+                        for (int i = 1; i < selectedServers.size(); i++) {
+                            ServerId replicaServer = selectedServers.get(i);
+                            logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
+                                replicaServer, region.getRegionId());
+                            recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
                         }
                     } else if (selectedServers.size() == 1) {
                         logger.warn("[CREATE TABLE] WARNING: Region {} initialized with primary only; no secondary replica available at create time",
@@ -857,15 +873,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         }
                     }
                     clusterManager.removeRegionMetadata(region.getTableName(), region.getRegionId());
-                    if (replicaMonitor != null) {
-                        replicaMonitor.removeRegion(region.getRegionId());
-                    }
-                    if (lifecycleManager != null) {
-                        lifecycleManager.removeRegion(region.getRegionId());
-                    }
-                    if (replicationCoordinator != null) {
-                        replicationCoordinator.removeReplicaGroup(region.getRegionId());
-                    }
+                    replicaMonitor.removeRegion(region.getRegionId());
+                    lifecycleManager.removeRegion(region.getRegionId());
+                    replicationCoordinator.removeReplicaGroup(region.getRegionId());
                     metadataManager.removeRegion(region.getRegionId());
                 } catch (Exception cleanupError) {
                     logger.error("[CREATE TABLE] Failed to rollback region {}: {}",
@@ -934,15 +944,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             for (Region region : regions) {
                 clusterManager.removeRegionMetadata(region.getTableName(), region.getRegionId());
-                if (replicaMonitor != null) {
-                    replicaMonitor.removeRegion(region.getRegionId());
-                }
-                if (lifecycleManager != null) {
-                    lifecycleManager.removeRegion(region.getRegionId());
-                }
-                if (replicationCoordinator != null) {
-                    replicationCoordinator.removeReplicaGroup(region.getRegionId());
-                }
+                replicaMonitor.removeRegion(region.getRegionId());
+                lifecycleManager.removeRegion(region.getRegionId());
+                replicationCoordinator.removeReplicaGroup(region.getRegionId());
                 metadataManager.removeRegion(region.getRegionId());
             }
 
@@ -1207,18 +1211,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             }
             metadataManager.registerRegionForTable(region, newPrimary);
 
-            if (replicaMonitor != null) {
-                replicaMonitor.promoteToPrimary(regionId, newPrimary);
-            }
-            if (lifecycleManager != null) {
-                lifecycleManager.transition(regionId, newPrimary,
-                    ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
-                    "Primary change reported to Master");
-                if (oldPrimary != null && !oldPrimary.equals(newPrimary)) {
-                    lifecycleManager.transition(regionId, oldPrimary,
-                        ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
-                        "Primary replaced by " + newPrimary.getServerName());
-                }
+            replicaMonitor.promoteToPrimary(regionId, newPrimary);
+            lifecycleManager.transition(regionId, newPrimary,
+                ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
+                "Primary change reported to Master");
+            if (oldPrimary != null && !oldPrimary.equals(newPrimary)) {
+                lifecycleManager.transition(regionId, oldPrimary,
+                    ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
+                    "Primary replaced by " + newPrimary.getServerName());
             }
 
             responseObserver.onNext(MasterProto.PrimaryChangeResponse.newBuilder()
@@ -1484,10 +1484,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     }
 
     private void handleRegionFailure(String regionId) {
-        if (failoverCoordinator == null) {
-            throw new IllegalStateException("FailoverCoordinator is required for region failure handling");
-        }
-
         logger.info("Handling failure for region via FailoverCoordinator: {}", regionId);
         failoverCoordinator.triggerEmergencyFailover(regionId);
     }

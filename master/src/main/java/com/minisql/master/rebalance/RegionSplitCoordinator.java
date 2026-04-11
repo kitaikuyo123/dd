@@ -26,7 +26,8 @@ public class RegionSplitCoordinator {
     private static final Logger logger = LoggerFactory.getLogger(RegionSplitCoordinator.class);
 
     // 分裂阈值：单个 Region 最大大小（默认 10GB）
-    private static final long SPLIT_THRESHOLD_SIZE = 10L * 1024 * 1024 * 1024;
+    private static final long DEFAULT_splitThresholdSize = 10L * 1024 * 1024 * 1024;
+    private volatile long splitThresholdSize = DEFAULT_splitThresholdSize;
 
     // 待分裂的 Region 队列
     private final BlockingQueue<SplitTask> splitQueue = new LinkedBlockingQueue<>();
@@ -44,6 +45,7 @@ public class RegionSplitCoordinator {
     private final RegionServerCommandClient commandClient;
     private MonitoringService monitoringService;
     private volatile ZkClient zkClient;
+    private RegionMergeCoordinator mergeCoordinator;
 
     private volatile boolean running = false;
 
@@ -78,6 +80,14 @@ public class RegionSplitCoordinator {
         this.zkClient = zkClient;
     }
 
+    public void setMergeCoordinator(RegionMergeCoordinator mergeCoordinator) {
+        this.mergeCoordinator = mergeCoordinator;
+    }
+
+    public void setSplitThresholdSize(long splitThresholdSize) {
+        this.splitThresholdSize = splitThresholdSize;
+    }
+
     /**
      * 启动分裂管理器
      */
@@ -108,7 +118,7 @@ public class RegionSplitCoordinator {
      */
     public boolean shouldSplit(ClusterManager.RegionLoad load) {
         long totalSize = load.getStoreFileSize() + load.getMemStoreSize();
-        return totalSize >= SPLIT_THRESHOLD_SIZE;
+        return totalSize >= splitThresholdSize;
     }
 
     public boolean scheduleSplit(String regionId, String tableName, ServerId serverId, ClusterManager.RegionLoad load) {
@@ -196,6 +206,12 @@ public class RegionSplitCoordinator {
             recordEvent("REGION_SPLIT_COMPLETED", "INFO", regionId, task.getServerId(),
                 "Region split completed",
                 result.getLeftRegion().getRegionId() + "," + result.getRightRegion().getRegionId());
+
+            // 6. 记录分裂事件到合并冷却期，防止刚分裂的 Region 被立即合并
+            if (mergeCoordinator != null) {
+                mergeCoordinator.recordRegionSplit(result.getLeftRegion().getRegionId());
+                mergeCoordinator.recordRegionSplit(result.getRightRegion().getRegionId());
+            }
 
         } catch (Exception e) {
             logger.error("Error splitting region {}: {}", regionId, e.getMessage(), e);
@@ -381,16 +397,9 @@ public class RegionSplitCoordinator {
         // 创建分裂任务
         ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
         load.setRegionId(regionId);
-        load.setStoreFileSize(SPLIT_THRESHOLD_SIZE + 1);  // 强制超过阈值触发分裂
+        load.setStoreFileSize(splitThresholdSize + 1);  // 强制超过阈值触发分裂
 
         return scheduleSplit(regionId, region.getTableName(), serverId, load);
-    }
-
-    /**
-     * 手动触发分裂（用于测试或管理命令）
-     */
-    public boolean triggerManualSplit(String regionId) {
-        return checkAndSplitRegion(regionId);
     }
 
     /**

@@ -48,7 +48,8 @@ public class RegionServer {
 
     private Server grpcServer;
 
-    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress) {
+    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress,
+                        int replicationFactor) {
         this.serverId = new ServerId(host, port);
         this.mysqlConfig = mysqlConfig;
         this.masterAddress = masterAddress;
@@ -58,9 +59,13 @@ public class RegionServer {
         this.mergeService = new RegionMergeService(regionManager);
 
         this.replicationCoordinator = new ReplicationCoordinator(
-            ReplicationConfig.builder(3).build(),
+            ReplicationConfig.builder(replicationFactor).build(),
             this.mysqlConfig
         );
+    }
+
+    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress) {
+        this(host, port, mysqlConfig, masterAddress, 3);
     }
 
     public void start() throws IOException {
@@ -162,9 +167,7 @@ public class RegionServer {
     public void stop() throws Exception {
         running = false;
 
-        if (replicationCoordinator != null) {
-            replicationCoordinator.stop();
-        }
+        replicationCoordinator.stop();
 
         if (masterChannel != null && !masterChannel.isShutdown()) {
             masterChannel.shutdown();

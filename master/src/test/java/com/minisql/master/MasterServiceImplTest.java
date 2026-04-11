@@ -43,7 +43,8 @@ class MasterServiceImplTest {
             replicaMonitor,
             null,
             null,
-            lifecycleManager
+            lifecycleManager,
+            null
         );
 
         Table table = new Table("products");
@@ -109,7 +110,8 @@ class MasterServiceImplTest {
             replicaMonitor,
             null,
             null,
-            lifecycleManager
+            lifecycleManager,
+            null
         );
 
         Table table = new Table("products");
@@ -162,7 +164,8 @@ class MasterServiceImplTest {
             replicaMonitor,
             failoverCoordinator,
             null,
-            lifecycleManager
+            lifecycleManager,
+            null
         );
 
         CapturingObserver<MasterProto.RegionStatusResponse> responseObserver = new CapturingObserver<>();
@@ -217,7 +220,8 @@ class MasterServiceImplTest {
             replicaMonitor,
             failoverCoordinator,
             recoveryCoordinator,
-            lifecycleManager
+            lifecycleManager,
+            null
         );
 
         service.recoverRegionAfterServerFailure(region.getRegionId(), failedPrimary, true);
