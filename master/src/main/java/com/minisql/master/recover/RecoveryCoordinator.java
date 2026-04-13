@@ -41,6 +41,7 @@ public class RecoveryCoordinator {
     private final ExecutorService recoveryExecutor;
     private final ConcurrentHashMap<String, Boolean> inFlightRecoveries = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> regionLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Integer> desiredReplicaCounts = new ConcurrentHashMap<>();
     private MonitoringService monitoringService;
 
     public RecoveryCoordinator(ClusterManager clusterManager,
@@ -98,6 +99,32 @@ public class RecoveryCoordinator {
         this.monitoringService = monitoringService;
     }
 
+    public void setDesiredReplicaCount(String regionId, int desiredReplicaCount) {
+        if (regionId == null || regionId.isBlank()) {
+            return;
+        }
+        int normalized = Math.max(1, desiredReplicaCount);
+        desiredReplicaCounts.put(regionId, normalized);
+        logger.info("[RECOVERY-TARGET] region={} desiredReplicaCount={}", regionId, normalized);
+    }
+
+    public void clearDesiredReplicaCount(String regionId) {
+        if (regionId == null || regionId.isBlank()) {
+            return;
+        }
+        Integer removed = desiredReplicaCounts.remove(regionId);
+        if (removed != null) {
+            logger.info("[RECOVERY-TARGET] region={} clearedDesiredReplicaCount(previous={})", regionId, removed);
+        }
+    }
+
+    public void reconcileReplicaTarget(String regionId) {
+        if (regionId == null || regionId.isBlank()) {
+            return;
+        }
+        enforceReplicaTarget(regionId);
+    }
+
     public void bootstrapReplica(String regionId, ServerId replica) {
         scheduleRecovery(regionId, replica, true);
     }
@@ -140,11 +167,7 @@ public class RecoveryCoordinator {
                 continue;
             }
 
-            int targetReplicationFactor = 3;
-            com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
-            if (table != null && table.getProperties() != null) {
-                targetReplicationFactor = table.getProperties().getReplicationFactor();
-            }
+            int targetReplicationFactor = resolveTargetReplicationFactor(region);
 
             long activeReplicaCount = region.getReplicas().stream()
                 .filter(clusterManager::isServerActive)
@@ -169,11 +192,7 @@ public class RecoveryCoordinator {
         ensurePrimaryRegionOpen(region);
         waitForPrimaryReady(region);
 
-        int targetReplicationFactor = 3;
-        com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
-        if (table != null && table.getProperties() != null) {
-            targetReplicationFactor = table.getProperties().getReplicationFactor();
-        }
+        int targetReplicationFactor = resolveTargetReplicationFactor(region);
 
         List<ServerId> activeServers = new ArrayList<>();
         for (ClusterManager.ServerInfo serverInfo : clusterManager.getActiveServersList()) {
@@ -427,11 +446,7 @@ public class RecoveryCoordinator {
                 return;
             }
 
-            int targetReplicationFactor = 3;
-            com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
-            if (table != null && table.getProperties() != null) {
-                targetReplicationFactor = table.getProperties().getReplicationFactor();
-            }
+            int targetReplicationFactor = resolveTargetReplicationFactor(region);
             targetReplicationFactor = Math.max(1, targetReplicationFactor);
 
             List<ServerId> currentReplicas = new ArrayList<>(region.getReplicas());
@@ -472,13 +487,22 @@ public class RecoveryCoordinator {
             }
 
             for (ServerId replica : removed) {
+                try {
+                    if (!commandClient.closeRegion(replica, regionId, false, false).getStatus().getSuccess()) {
+                        logger.warn("Trim closeRegion returned failure for region {} on {}", regionId, replica);
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to close trimmed replica region {} on {}: {}",
+                        regionId, replica, e.getMessage());
+                }
                 region.removeReplica(replica);
                 clusterManager.removeReplica(regionId, replica);
+                clusterManager.removeRegionLoad(replica, regionId);
                 replicaMonitor.removeReplica(regionId, replica);
                 replicationCoordinator.removeReplica(regionId, replica);
                 lifecycleManager.transition(regionId, replica,
                     ReplicaLifecycleManager.ReplicaLifecycleState.REMOVED,
-                    "Trimmed excess secondary replica to match replication factor");
+                    "Trimmed excess secondary replica to match target replica count");
                 recordEvent("REPLICA_TRIMMED", "INFO", regionId, replica,
                     "Trimmed excess secondary replica",
                     "targetReplicationFactor=" + targetReplicationFactor);
@@ -488,6 +512,19 @@ public class RecoveryCoordinator {
             logger.info("[RECOVERY-TRIM] region={} target={} removed={} replicasNow={}",
                 regionId, targetReplicationFactor, removed, region.getReplicas());
         }
+    }
+
+    private int resolveTargetReplicationFactor(Region region) {
+        int tableReplicationFactor = 3;
+        com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
+        if (table != null && table.getProperties() != null) {
+            tableReplicationFactor = table.getProperties().getReplicationFactor();
+        }
+        tableReplicationFactor = Math.max(1, tableReplicationFactor);
+
+        int desiredReplicaCount = desiredReplicaCounts.getOrDefault(region.getRegionId(), tableReplicationFactor);
+        desiredReplicaCount = Math.max(1, desiredReplicaCount);
+        return Math.max(tableReplicationFactor, desiredReplicaCount);
     }
 
     private String buildTaskKey(String regionId, ServerId replica) {
