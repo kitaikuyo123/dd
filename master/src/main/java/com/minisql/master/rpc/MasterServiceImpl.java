@@ -629,15 +629,20 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             // for server liveness and failover triggers.
             if (request.getRegionLoadsCount() > 0) {
                 for (MasterProto.RegionLoad load : request.getRegionLoadsList()) {
-                    clusterManager.updateRegionLoad(serverId, load.getRegionId(),
-                        convertRegionLoad(load));
-                    hotSpotCoordinator.recordRegionLoad(load.getRegionId(), convertRegionLoad(load));
+                    String regionId = load.getRegionId();
+                    if (!isExpectedReporter(regionId, serverId)) {
+                        clusterManager.removeRegionLoad(serverId, regionId);
+                        logger.debug("Ignore stale region load report: region={} reporter={}", regionId, serverId);
+                        continue;
+                    }
+                    clusterManager.updateRegionLoad(serverId, regionId, convertRegionLoad(load));
+                    hotSpotCoordinator.recordRegionLoad(regionId, serverId, convertRegionLoad(load));
 
                     // 更新副本监控心跳
-                    ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, load.getRegionId());
-                    replicaMonitor.updateHeartbeat(load.getRegionId(), serverId, lagSnapshot.lagInEntries);
+                    ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, regionId);
+                    replicaMonitor.updateHeartbeat(regionId, serverId, lagSnapshot.lagInEntries);
                     clusterManager.updateReplicaSequenceId(
-                        load.getRegionId(),
+                        regionId,
                         serverId,
                         lagSnapshot.lastAppliedSequenceId
                     );
@@ -1424,6 +1429,36 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         } catch (Exception e) {
             logger.warn("Failed to release distributed lock: {}", e.getMessage(), e);
         }
+    }
+
+    private boolean isExpectedReporter(String regionId, ServerId reporter) {
+        if (regionId == null || regionId.isBlank() || reporter == null) {
+            return false;
+        }
+
+        Region region = metadataManager.getRegion(regionId);
+        if (region == null) {
+            return false;
+        }
+
+        ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+        if (sameEndpoint(primary, reporter)) {
+            return true;
+        }
+
+        for (ServerId replica : region.getReplicas()) {
+            if (sameEndpoint(replica, reporter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean sameEndpoint(ServerId left, ServerId right) {
+        if (left == null || right == null) {
+            return false;
+        }
+        return left.getPort() == right.getPort() && left.getHost().equals(right.getHost());
     }
 
     private ServerId convertServerId(CommonProto.ServerId proto) {
