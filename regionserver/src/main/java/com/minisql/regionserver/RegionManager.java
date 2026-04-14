@@ -1,11 +1,16 @@
 package com.minisql.regionserver;
 
 import com.minisql.common.model.Region;
+import com.minisql.common.model.ServerId;
+import com.minisql.replication.ReplicationCoordinator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -77,15 +82,17 @@ public class RegionManager {
      */
     public void registerOpenedRegion(Region region, MySQLRegionStorage storage) {
         String regionId = region.getRegionId();
+        normalizeRegionTopology(region);
+
         mysqlRegionStorages.put(regionId, storage);
         regions.put(regionId, region);
         regionStates.put(regionId, RegionState.OPEN);
 
-        boolean primaryOnThisServer = region.getPrimary() == null
-            || region.getPrimary().equals(regionServer.getServerId());
+        boolean primaryOnThisServer = region.getPrimary().equals(regionServer.getServerId());
         regionPrimaryStatus.put(regionId, primaryOnThisServer);
         lastAppliedReplicationSequenceIds.putIfAbsent(regionId, new AtomicLong(0));
         regionWriteBlocked.put(regionId, false);
+        ensureLocalReplicaGroup(region);
 
         logger.info("Region opened: {} ({})", regionId, primaryOnThisServer ? "primary" : "replica");
     }
@@ -126,6 +133,12 @@ public class RegionManager {
             regionPrimaryStatus.remove(regionId);
             lastAppliedReplicationSequenceIds.remove(regionId);
             regionWriteBlocked.remove(regionId);
+            regionFencingTokens.remove(regionId);
+
+            ReplicationCoordinator replicationCoordinator = regionServer.getReplicationCoordinator();
+            if (replicationCoordinator != null) {
+                replicationCoordinator.removeReplicaGroup(regionId);
+            }
             logger.info("Region closed: {}{}", regionId, dropTable ? " and table dropped" : "");
         } catch (Exception e) {
             regionStates.put(regionId, RegionState.OPEN);
@@ -237,5 +250,42 @@ public class RegionManager {
 
     public boolean isWriteBlocked(String regionId) {
         return regionWriteBlocked.getOrDefault(regionId, false);
+    }
+
+    private void normalizeRegionTopology(Region region) {
+        ServerId localServerId = regionServer.getServerId();
+        if (region.getPrimary() == null) {
+            region.setPrimary(localServerId);
+        }
+
+        List<ServerId> replicas = region.getReplicas();
+        if (replicas == null) {
+            replicas = new ArrayList<>();
+            region.setReplicas(replicas);
+        }
+        if (!replicas.contains(region.getPrimary())) {
+            replicas.add(region.getPrimary());
+        }
+    }
+
+    private void ensureLocalReplicaGroup(Region region) {
+        ReplicationCoordinator replicationCoordinator = regionServer.getReplicationCoordinator();
+        if (replicationCoordinator == null) {
+            return;
+        }
+
+        String regionId = region.getRegionId();
+        if (replicationCoordinator.getReplicaGroup(regionId) != null) {
+            return;
+        }
+
+        LinkedHashSet<ServerId> orderedReplicas = new LinkedHashSet<>();
+        orderedReplicas.add(region.getPrimary());
+        if (region.getReplicas() != null) {
+            orderedReplicas.addAll(region.getReplicas());
+        }
+
+        replicationCoordinator.createReplicaGroup(region, new ArrayList<>(orderedReplicas));
+        logger.info("Initialized local replica group for region {} on {}", regionId, regionServer.getServerId());
     }
 }

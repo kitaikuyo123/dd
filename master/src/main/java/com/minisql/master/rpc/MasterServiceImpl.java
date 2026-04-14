@@ -122,6 +122,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             clusterManager, metadataManager, commandClient, lifecycleManager);
         this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
+        this.splitCoordinator.setRecoveryCoordinator(recoveryCoordinator);
+        this.splitCoordinator.setReplicationCoordinator(replicationCoordinator);
+        this.splitCoordinator.setReplicaMonitor(replicaMonitor);
+        this.splitCoordinator.setLifecycleManager(lifecycleManager);
+        this.mergeCoordinator.setRecoveryCoordinator(recoveryCoordinator);
+        this.mergeCoordinator.setReplicationCoordinator(replicationCoordinator);
+        this.mergeCoordinator.setReplicaMonitor(replicaMonitor);
+        this.mergeCoordinator.setLifecycleManager(lifecycleManager);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
         if (hotSpotSettings != null) {
@@ -145,6 +153,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
         // 启动自动合并检查
         mergeCoordinator.start();
+        splitCoordinator.start();
 
         // 启动定期调度器
         startLoadBalanceScheduler();
@@ -161,6 +170,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         Long splitThresholdMb = parseLongProperty(config, "region.split.threshold.mb");
         if (splitThresholdMb != null) {
             splitCoordinator.setSplitThresholdSize(splitThresholdMb * 1024 * 1024);
+        }
+
+        Long splitTableCooldownMs = parseLongProperty(config, "region.split.table.cooldown.ms");
+        if (splitTableCooldownMs != null) {
+            splitCoordinator.setTableSplitCooldownMs(splitTableCooldownMs);
         }
 
         Long mergeThresholdMb = parseLongProperty(config, "region.merge.threshold.mb");
@@ -366,6 +380,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             serverFailureCheckScheduler.shutdownNow();
         }
         serverFailureRecoveryExecutor.shutdownNow();
+        splitCoordinator.stop();
         mergeCoordinator.stop();
     }
 

@@ -470,7 +470,10 @@ public class HotSpotCoordinator {
 
     private void splitHotRegion(String regionId) {
         logger.info("Triggering split for hot region: {}", regionId);
-        splitCoordinator.checkAndSplitRegion(regionId);
+        boolean accepted = splitCoordinator.checkAndSplitRegion(regionId);
+        if (!accepted) {
+            logger.info("Split request skipped for hot region: {} (cooldown/already queued/no eligible primary)", regionId);
+        }
     }
 
     private double calculateServerLoad(ClusterManager.ServerInfo server) {

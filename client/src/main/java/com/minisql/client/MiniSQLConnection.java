@@ -443,8 +443,7 @@ public class MiniSQLConnection implements Connection {
         String tableName = stmt.getTable();
         com.minisql.common.model.Table schema = getTableSchema(tableName);
         byte[] rowKey = resolveRowKeyForMutation(stmt.getWhere(), schema, "UPDATE");
-        MutationTarget target = resolveMutationTarget(tableName, rowKey);
-        Row existingRow = fetchExistingRow(target, rowKey, schema, "Update");
+        Row existingRow = fetchExistingRowWithRetry(tableName, rowKey, schema, "Update");
 
         for (com.minisql.sql.ast.Assignment assignment : stmt.getAssignments()) {
             if (schema.getAllPrimaryKeys().contains(assignment.getColumn())) {
@@ -577,6 +576,38 @@ public class MiniSQLConnection implements Connection {
         return RowAssembler.mergeToRow(existingKVs, schema);
     }
 
+    private Row fetchExistingRowWithRetry(String tableName, byte[] rowKey,
+                                          com.minisql.common.model.Table schema,
+                                          String operation) throws SQLException {
+        SQLException lastError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            MutationTarget target = resolveMutationTarget(tableName, rowKey);
+            try {
+                return fetchExistingRow(target, rowKey, schema, operation);
+            } catch (SQLException e) {
+                lastError = e;
+                if (attempt == 0 && shouldRetryFetchExistingRow(e.getMessage())) {
+                    router.refreshRouteCache(tableName);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw lastError != null
+            ? lastError
+            : new SQLException(operation + " failed: unable to read existing row");
+    }
+
+    private boolean shouldRetryFetchExistingRow(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("row not found")
+            || normalized.contains("cannot read existing row")
+            || isRetryableWriteRouteError(message);
+    }
+
     private void executeTypedPutMutation(String tableName, com.minisql.common.model.Table schema,
                                          byte[] rowKey, KeyValue[] keyValues, String operation) throws SQLException {
         RegionServerProto.PutRequest request = RegionServerProto.PutRequest.newBuilder()
@@ -618,7 +649,11 @@ public class MiniSQLConnection implements Connection {
         String normalized = message.toLowerCase(Locale.ROOT);
         return normalized.contains("not primary")
             || normalized.contains("primary changed")
-            || normalized.contains("stale route");
+            || normalized.contains("stale route")
+            || normalized.contains("read-only during migration")
+            || normalized.contains("region is not open")
+            || normalized.contains("region storage not found")
+            || normalized.contains("region not found");
     }
 
     private Column.ColumnType findColumnType(com.minisql.common.model.Table schema, String columnName) throws SQLException {
@@ -1256,11 +1291,21 @@ public class MiniSQLConnection implements Connection {
                 }
             }
             // 如果没有匹配的 Region，返回第一个
-            return regions.get(0).getRegionId();
+            // no fallback-to-first-region; retry with fresh cache below
         }
 
         // 兜底：返回硬编码的 RegionId（可能会导致错误，但保持向后兼容）
-        return "region-" + tableName;
+        // Retry once with a fresh route cache to absorb split/migration propagation delay.
+        router.refreshRouteCache(tableName);
+        regions = router.getRouteCache(tableName);
+        if (regions != null && !regions.isEmpty()) {
+            for (Router.RegionRouteInfo region : regions) {
+                if (BytesUtil.isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
+                    return region.getRegionId();
+                }
+            }
+        }
+        throw new SQLException("No matching region found for row key in table: " + tableName);
     }
 
     private String detectSqlType(String sql) {

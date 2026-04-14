@@ -1,0 +1,2 @@
+source tests/hotspot/sql/hotspot_write_setup.sql
+quit
