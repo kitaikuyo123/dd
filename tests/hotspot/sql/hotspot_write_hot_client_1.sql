@@ -1,0 +1,11 @@
+-- Write hotspot client 1: concentrated write operations on user_id=1
+UPDATE hotspot_orders_write SET amount = 1011 WHERE id = 1;
+UPDATE hotspot_orders_write SET amount = 1012 WHERE id = 2;
+UPDATE hotspot_orders_write SET amount = 1013 WHERE id = 3;
+UPDATE hotspot_orders_write SET amount = 1014 WHERE id = 4;
+UPDATE hotspot_orders_write SET amount = 1015 WHERE id = 5;
+UPDATE hotspot_orders_write SET amount = 1016 WHERE id = 6;
+UPDATE hotspot_orders_write SET amount = 1017 WHERE id = 7;
+UPDATE hotspot_orders_write SET amount = 1018 WHERE id = 8;
+UPDATE hotspot_orders_write SET status = 'pending' WHERE id = 6;
+UPDATE hotspot_orders_write SET status = 'paid' WHERE id = 6;

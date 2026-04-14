@@ -432,11 +432,49 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
      * 处理 Region 分裂请求
      */
     @Override
+    public void getSplitKey(RegionServerProto.GetSplitKeyRequest request,
+                            StreamObserver<RegionServerProto.GetSplitKeyResponse> responseObserver) {
+        try {
+            String regionId = request.getRegionId();
+            byte[] splitKey = regionServer.getSplitService().findBestSplitPoint(regionId);
+
+            if (splitKey == null || splitKey.length == 0) {
+                RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                    .setStatus(createErrorStatus("Cannot find suitable split point"))
+                    .build();
+                responseObserver.onNext(response);
+                responseObserver.onCompleted();
+                return;
+            }
+
+            RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                .setStatus(createSuccessStatus())
+                .setSplitKey(com.google.protobuf.ByteString.copyFrom(splitKey))
+                .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+
+            logger.info("Provided split key for region: {}", regionId);
+        } catch (Exception e) {
+            logger.error("Failed to compute split key", e);
+            RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                .setStatus(createErrorStatus(e.getMessage()))
+                .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+    }
+
+    /**
+     * 处理 Region 分裂请求
+     */
+    @Override
     public void splitRegion(RegionServerProto.SplitRegionRequest request,
                             StreamObserver<RegionServerProto.SplitRegionResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
             byte[] splitKey = request.getSplitKey().isEmpty() ? null : request.getSplitKey().toByteArray();
+            logger.info("Received split request for region: {} (splitKeyProvided={})", regionId, splitKey != null);
 
             // 如果没有指定分裂点，自动查找
             if (splitKey == null) {
@@ -481,6 +519,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
+            logger.info("Split request handled successfully for region: {}", regionId);
 
         } catch (Exception e) {
             RegionServerProto.SplitRegionResponse response = RegionServerProto.SplitRegionResponse.newBuilder()

@@ -1,0 +1,11 @@
+-- Write hotspot client 2: concentrated write operations on user_id=1
+UPDATE hotspot_orders_write SET amount = 2011 WHERE id = 1;
+UPDATE hotspot_orders_write SET amount = 2012 WHERE id = 2;
+UPDATE hotspot_orders_write SET amount = 2013 WHERE id = 3;
+UPDATE hotspot_orders_write SET amount = 2014 WHERE id = 4;
+UPDATE hotspot_orders_write SET amount = 2015 WHERE id = 5;
+UPDATE hotspot_orders_write SET amount = 2016 WHERE id = 6;
+UPDATE hotspot_orders_write SET amount = 2017 WHERE id = 7;
+UPDATE hotspot_orders_write SET amount = 2018 WHERE id = 8;
+UPDATE hotspot_orders_write SET amount = 2019 WHERE id = 9;
+UPDATE hotspot_orders_write SET amount = 2020 WHERE id = 10;
