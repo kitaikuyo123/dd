@@ -3,6 +3,9 @@ package com.minisql.master.recover;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.storage.MySQLConfig;
 
+import com.zaxxer.hikari.HikariDataSource;
+
+import javax.sql.DataSource;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
@@ -19,12 +22,21 @@ import java.util.*;
  */
 public class DataVerifier {
 
-    private final MySQLConfig sourceConfig;
-    private final MySQLConfig targetConfig;
+    private final DataSource sourceDataSource;
+    private final DataSource targetDataSource;
 
     public DataVerifier(MySQLConfig sourceConfig, MySQLConfig targetConfig) {
-        this.sourceConfig = sourceConfig;
-        this.targetConfig = targetConfig;
+        this.sourceDataSource = sourceConfig.createDataSource();
+        this.targetDataSource = targetConfig.createDataSource();
+    }
+
+    public void close() {
+        if (sourceDataSource instanceof HikariDataSource) {
+            ((HikariDataSource) sourceDataSource).close();
+        }
+        if (targetDataSource instanceof HikariDataSource) {
+            ((HikariDataSource) targetDataSource).close();
+        }
     }
 
     /**
@@ -116,8 +128,8 @@ public class DataVerifier {
      * 快速验证：只对比行数
      */
     public VerificationResult verifyRowCount(String regionId) throws SQLException {
-        long sourceCount = getRowCount(sourceConfig, regionId);
-        long targetCount = getRowCount(targetConfig, regionId);
+        long sourceCount = getRowCount(sourceDataSource, regionId);
+        long targetCount = getRowCount(targetDataSource, regionId);
 
         boolean consistent = sourceCount == targetCount;
 
@@ -142,8 +154,8 @@ public class DataVerifier {
         }
 
         // 计算 checksum
-        String sourceChecksum = calculateChecksum(sourceConfig, regionId);
-        String targetChecksum = calculateChecksum(targetConfig, regionId);
+        String sourceChecksum = calculateChecksum(sourceDataSource, regionId);
+        String targetChecksum = calculateChecksum(targetDataSource, regionId);
 
         boolean consistent = sourceChecksum.equals(targetChecksum);
 
@@ -160,13 +172,10 @@ public class DataVerifier {
     /**
      * 获取行数
      */
-    private long getRowCount(MySQLConfig config, String regionId) throws SQLException {
-        // 注意：当前 kv_store 表没有 region_id 列
-        // 这里假设使用 row_key 的范围来标识 region
-        // 实际使用时需要根据具体设计调整
+    private long getRowCount(DataSource ds, String regionId) throws SQLException {
         String sql = "SELECT COUNT(*) FROM kv_store";
 
-        try (Connection conn = config.createDataSource().getConnection();
+        try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
             if (rs.next()) {
@@ -180,10 +189,10 @@ public class DataVerifier {
      * 计算 checksum
      * 对所有数据按 row_key+qualifier+timestamp+value 计算 MD5
      */
-    private String calculateChecksum(MySQLConfig config, String regionId) throws SQLException {
+    private String calculateChecksum(DataSource ds, String regionId) throws SQLException {
         String sql = "SELECT row_key, qualifier, timestamp, value FROM kv_store ORDER BY row_key, qualifier, timestamp";
 
-        try (Connection conn = config.createDataSource().getConnection();
+        try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
 
