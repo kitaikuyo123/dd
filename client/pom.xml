@@ -27,11 +27,6 @@
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
-            <artifactId>regionserver</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.minisql</groupId>
             <artifactId>storage</artifactId>
             <version>${project.version}</version>
         </dependency>
