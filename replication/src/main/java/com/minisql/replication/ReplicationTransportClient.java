@@ -14,7 +14,7 @@ public interface ReplicationTransportClient extends AutoCloseable {
 
     List<KeyValue> fetchSnapshot(ServerId primary, String regionId, long timeoutMs);
 
-    boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs);
+    boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId);
 
     @Override
     void close();

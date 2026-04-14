@@ -85,18 +85,19 @@ public class ReplicaSyncCoordinator {
 
         List<com.minisql.common.model.KeyValue> snapshot =
             transportClient.fetchSnapshot(primary, regionId, config.getReplicationTimeoutMs());
+        long currentSequence = currentSequenceSupplier == null ? 0L : currentSequenceSupplier.getAsLong();
         boolean success = transportClient.sendSnapshot(
             replica,
             regionId,
             snapshot,
             1000,
-            Math.max(config.getReplicationTimeoutMs(), config.getAckTimeoutMs() * 2)
+            Math.max(config.getReplicationTimeoutMs(), config.getAckTimeoutMs() * 2),
+            currentSequence
         );
         if (!success) {
             return false;
         }
 
-        long currentSequence = currentSequenceSupplier == null ? 0L : currentSequenceSupplier.getAsLong();
         registry.updateReplicaProgress(regionId, replica, currentSequence, 0L);
         registry.updateReplicaRole(regionId, replica, ReplicaRole.SECONDARY);
         return true;

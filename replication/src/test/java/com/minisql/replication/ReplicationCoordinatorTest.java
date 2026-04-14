@@ -18,16 +18,6 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReplicationCoordinatorTest {
 
     @Test
-    @DisplayName("requiredReplicaAcks uses majority math after local primary commit")
-    void testRequiredReplicaAcks() {
-        assertEquals(0, ReplicationCoordinator.requiredReplicaAcks(1));
-        assertEquals(1, ReplicationCoordinator.requiredReplicaAcks(2));
-        assertEquals(1, ReplicationCoordinator.requiredReplicaAcks(3));
-        assertEquals(2, ReplicationCoordinator.requiredReplicaAcks(4));
-        assertEquals(2, ReplicationCoordinator.requiredReplicaAcks(5));
-    }
-
-    @Test
     @DisplayName("quorum config is honored during replication")
     void testReplicationUsesConfigForAckPolicy() {
         FakeTransportClient transport = new FakeTransportClient();
@@ -148,7 +138,7 @@ class ReplicationCoordinatorTest {
         }
 
         @Override
-        public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs) {
+        public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId) {
             return true;
         }
 

@@ -286,10 +286,6 @@ public class ReplicationCoordinator {
         return true;
     }
 
-    public static int requiredReplicaAcks(int replicaCount) {
-        return Math.max(0, replicaCount / 2);
-    }
-
     private void startReplicationWorker(String regionId) {
         replicationExecutor.submit(() -> {
             BlockingQueue<ReplicationTask> queue = replicationQueues.get(regionId);
@@ -366,6 +362,15 @@ public class ReplicationCoordinator {
         }
 
         task.future.complete(successCount >= requiredAcks);
+
+        // WAL 清理：复制成功后保留最近 walRetentionCount 条，删除更早的
+        if (successCount >= requiredAcks && wal != null) {
+            try {
+                wal.cleanup(regionId, config.getWalRetentionCount());
+            } catch (Exception e) {
+                logger.warn("WAL cleanup failed for region {}: {}", regionId, e.getMessage());
+            }
+        }
     }
 
     private void performHealthCheck() {
@@ -383,8 +388,15 @@ public class ReplicationCoordinator {
             }
             long timeSinceLastUpdate = System.currentTimeMillis() - state.getLastUpdateTime();
             if (timeSinceLastUpdate > config.getHealthCheckIntervalMs() * 3L && group.getReplicas().size() > 1) {
-                logger.debug("Replication health check observed stale primary progress for region {}, " +
-                    "but automatic failover is owned by the master control plane", regionId);
+                logger.warn("Primary stale detected for region {}, notifying Master to trigger failover", regionId);
+                try {
+                    ServerId oldPrimary = primary;
+                    failoverCoordinator.failover(regionId);
+                    ServerId newPrimary = group.getPrimary();
+                    logger.info("Failover completed for region {}: {} -> {}", regionId, oldPrimary, newPrimary);
+                } catch (Exception e) {
+                    logger.error("Auto-failover failed for region {}: {}", regionId, e.getMessage());
+                }
             }
         }
     }

@@ -77,7 +77,7 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
     }
 
     @Override
-    public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs) {
+    public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId) {
         try {
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = newStub(replica, timeoutMs);
             int effectiveBatchSize = Math.max(1, batchSize);
@@ -97,6 +97,25 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
                 );
                 if (!response.getStatus().getSuccess()) {
                     logger.warn("Snapshot apply failed on {} for region {}: {}",
+                        replica, regionId, response.getStatus().getMessage());
+                    return false;
+                }
+            }
+
+            // 发送一条空 mutation + 真实 sequenceId，推进 Secondary 本地位点
+            if (finalSequenceId > 0) {
+                RegionServerProto.LogEntry progressEntry = RegionServerProto.LogEntry.newBuilder()
+                    .setSequenceId(finalSequenceId)
+                    .setTimestamp(System.currentTimeMillis())
+                    .build();
+                RegionServerProto.ReplicateResponse response = stub.replicate(
+                    RegionServerProto.ReplicateRequest.newBuilder()
+                        .setRegionId(regionId)
+                        .addEntries(progressEntry)
+                        .build()
+                );
+                if (!response.getStatus().getSuccess()) {
+                    logger.warn("Snapshot progress marker failed on {} for region {}: {}",
                         replica, regionId, response.getStatus().getMessage());
                     return false;
                 }
