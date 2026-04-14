@@ -12,7 +12,7 @@
 
     <artifactId>storage</artifactId>
     <name>MiniSQL - Storage</name>
-    <description>MySQL based storage engine</description>
+    <description>Pluggable storage engine (MySQL, RocksDB)</description>
 
     <dependencies>
         <dependency>
@@ -31,6 +31,11 @@
             <groupId>com.zaxxer</groupId>
             <artifactId>HikariCP</artifactId>
             <version>5.1.0</version>
+        </dependency>
+        <!-- RocksDB -->
+        <dependency>
+            <groupId>org.rocksdb</groupId>
+            <artifactId>rocksdbjni</artifactId>
         </dependency>
 
         <dependency>

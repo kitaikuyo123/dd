@@ -225,6 +225,33 @@ public class MySQLStorageEngine implements StorageEngine {
         }
     }
 
+    @Override
+    public void dropData() {
+        dropTable();
+    }
+
+    @Override
+    public long estimateSizeBytes() {
+        try (Connection conn = getConnection()) {
+            String qualifiedTableName = currentDatabaseName(conn) + "/" + tableName;
+            Long tablespaceSize = querySingleSize(conn,
+                "SELECT FILE_SIZE AS size FROM information_schema.INNODB_TABLESPACES WHERE NAME = ?",
+                qualifiedTableName);
+            if (tablespaceSize != null) {
+                return tablespaceSize;
+            }
+            Long reportedTableSize = querySingleSize(conn,
+                "SELECT data_length + index_length AS size " +
+                    "FROM information_schema.TABLES " +
+                    "WHERE table_schema = DATABASE() AND table_name = ?",
+                tableName);
+            return reportedTableSize != null ? reportedTableSize : 0L;
+        } catch (SQLException e) {
+            logger.warn("Failed to estimate size for table {}: {}", tableName, e.getMessage());
+            return 0L;
+        }
+    }
+
     public void dropTable() {
         try (Connection conn = getConnection();
              PreparedStatement stmt = conn.prepareStatement(queryBuilder.dropTableSql(tableName))) {
@@ -293,5 +320,30 @@ public class MySQLStorageEngine implements StorageEngine {
         kv.setValue(rs.getBytes("value"));
         kv.setType(rs.getInt("is_deleted") == 1 ? KeyValue.Type.DELETE : KeyValue.Type.PUT);
         return kv;
+    }
+
+    private Long querySingleSize(Connection conn, String sql, String parameter) {
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, parameter);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getLong("size") : null;
+            }
+        } catch (SQLException e) {
+            logger.debug("Size metadata query failed: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String currentDatabaseName(Connection conn) throws SQLException {
+        try (PreparedStatement stmt = conn.prepareStatement("SELECT DATABASE()");
+             ResultSet rs = stmt.executeQuery()) {
+            if (rs.next()) {
+                String database = rs.getString(1);
+                if (database != null && !database.isBlank()) {
+                    return database;
+                }
+            }
+        }
+        throw new SQLException("Unable to determine current database name");
     }
 }

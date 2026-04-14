@@ -11,8 +11,7 @@ import java.util.Iterator;
 import java.util.UUID;
 
 /**
- * Region 分裂服务
- * 基于 MySQL 存储引擎
+ * Region split service.
  */
 public class RegionSplitService {
 
@@ -43,7 +42,7 @@ public class RegionSplitService {
      */
     public boolean shouldSplit(String regionId) {
         try {
-            MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+            RegionStorage storage = regionManager.getRegionStorage(regionId);
             if (storage == null) return false;
 
             // 获取实际大小（定期校准估算值）
@@ -66,7 +65,7 @@ public class RegionSplitService {
      * 寻找最佳分裂点（中点分裂策略）
      */
     public byte[] findBestSplitPoint(String regionId) throws IOException {
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
             throw new IOException("Region storage not found: " + regionId);
         }
@@ -101,7 +100,7 @@ public class RegionSplitService {
      * 执行 Region 分裂
      */
     public RegionSplitResult splitRegion(String regionId, byte[] splitKey) throws Exception {
-        MySQLRegionStorage oldStorage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage oldStorage = regionManager.getRegionStorage(regionId);
         if (oldStorage == null) {
             throw new IOException("Region storage not found: " + regionId);
         }
@@ -130,8 +129,8 @@ public class RegionSplitService {
         rightRegion.setEndKey(oldRegion.getEndKey());
 
         // 2. 创建新的 MySQL 存储
-        MySQLRegionStorage leftStorage = regionManager.createRegionStorage(leftRegionId);
-        MySQLRegionStorage rightStorage = regionManager.createRegionStorage(rightRegionId);
+        RegionStorage leftStorage = regionManager.createRegionStorage(leftRegionId);
+        RegionStorage rightStorage = regionManager.createRegionStorage(rightRegionId);
         leftStorage.start();
         rightStorage.start();
 

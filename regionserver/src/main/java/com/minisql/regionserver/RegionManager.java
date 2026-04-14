@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Region manager backed by MySQL storage.
+ * Region manager backed by pluggable storage.
  */
 public class RegionManager {
 
@@ -21,7 +21,7 @@ public class RegionManager {
     private final ConcurrentMap<String, Region> regions = new ConcurrentHashMap<>();
 
     // regionId -> Region storage
-    private final ConcurrentMap<String, MySQLRegionStorage> mysqlRegionStorages = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, RegionStorage> regionStorages = new ConcurrentHashMap<>();
 
     // regionId -> lifecycle state
     private final ConcurrentMap<String, RegionState> regionStates = new ConcurrentHashMap<>();
@@ -56,7 +56,7 @@ public class RegionManager {
         regionStates.put(regionId, RegionState.OPENING);
 
         try {
-            MySQLRegionStorage storage = createRegionStorage(regionId);
+            RegionStorage storage = createRegionStorage(regionId);
             storage.start();
             registerOpenedRegion(region, storage);
         } catch (Exception e) {
@@ -66,18 +66,18 @@ public class RegionManager {
     }
 
     /**
-     * Creates region storage backed by the RegionServer-level shared Hikari pool.
+     * Creates region storage using the RegionServer's storage engine factory.
      */
-    public MySQLRegionStorage createRegionStorage(String regionId) {
-        return new MySQLRegionStorage(regionId, regionServer.getOrCreateSharedDataSource());
+    public RegionStorage createRegionStorage(String regionId) {
+        return new RegionStorage(regionId, regionServer.getEngineFactory().create(regionId));
     }
 
     /**
      * Registers a region as OPEN using the same state initialization as the standard open path.
      */
-    public void registerOpenedRegion(Region region, MySQLRegionStorage storage) {
+    public void registerOpenedRegion(Region region, RegionStorage storage) {
         String regionId = region.getRegionId();
-        mysqlRegionStorages.put(regionId, storage);
+        regionStorages.put(regionId, storage);
         regions.put(regionId, region);
         regionStates.put(regionId, RegionState.OPEN);
 
@@ -103,20 +103,20 @@ public class RegionManager {
 
         try {
             if (!abort) {
-                MySQLRegionStorage storage = mysqlRegionStorages.get(regionId);
+                RegionStorage storage = regionStorages.get(regionId);
                 if (storage != null) {
                     storage.flush();
                 }
             }
 
             if (dropTable) {
-                MySQLRegionStorage storage = mysqlRegionStorages.get(regionId);
+                RegionStorage storage = regionStorages.get(regionId);
                 if (storage != null) {
-                    storage.dropTable();
+                    storage.dropData();
                 }
             }
 
-            MySQLRegionStorage storage = mysqlRegionStorages.remove(regionId);
+            RegionStorage storage = regionStorages.remove(regionId);
             if (storage != null) {
                 storage.close();
             }
@@ -140,8 +140,8 @@ public class RegionManager {
         closeRegion(regionId, abort, false);
     }
 
-    public MySQLRegionStorage getMySQLRegionStorage(String regionId) {
-        return mysqlRegionStorages.get(regionId);
+    public RegionStorage getRegionStorage(String regionId) {
+        return regionStorages.get(regionId);
     }
 
     public Region getRegion(String regionId) {
@@ -161,21 +161,21 @@ public class RegionManager {
     }
 
     public void flushRegion(String regionId) throws IOException {
-        MySQLRegionStorage storage = mysqlRegionStorages.get(regionId);
+        RegionStorage storage = regionStorages.get(regionId);
         if (storage != null) {
             storage.flush();
         }
     }
 
     public void compactRegion(String regionId, boolean major) throws IOException {
-        MySQLRegionStorage storage = mysqlRegionStorages.get(regionId);
+        RegionStorage storage = regionStorages.get(regionId);
         if (storage != null) {
             storage.compact(major);
         }
     }
 
-    public void registerMySQLRegionStorage(String regionId, MySQLRegionStorage storage) {
-        mysqlRegionStorages.put(regionId, storage);
+    public void registerRegionStorage(String regionId, RegionStorage storage) {
+        regionStorages.put(regionId, storage);
     }
 
     public void registerRegionInternal(Region region) {

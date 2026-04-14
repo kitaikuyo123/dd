@@ -1,6 +1,10 @@
 package com.minisql.regionserver;
 
 import com.minisql.storage.MySQLConfig;
+import com.minisql.storage.MySQLEngineFactory;
+import com.minisql.storage.RocksDBConfig;
+import com.minisql.storage.RocksDBEngineFactory;
+import com.minisql.storage.StorageEngineFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,7 +78,28 @@ public class RegionServerMain {
             mysqlPassword
         ).maxPoolSize(mysqlMaxConnections).build();
 
-        initRegionServer(host, port, mysqlConfig, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
+        // Storage engine selection
+        String storageType = config.getProperty("storage.type", "mysql").toLowerCase();
+        StorageEngineFactory engineFactory;
+        switch (storageType) {
+            case "rocksdb":
+                String rocksdbDir = config.getProperty("rocksdb.data.dir", "./data/rocksdb");
+                long writeBufferMb = Long.parseLong(config.getProperty("rocksdb.write.buffer.size.mb", "64"));
+                String compression = config.getProperty("rocksdb.compression", "snappy");
+                RocksDBConfig rocksDBConfig = RocksDBConfig.builder(rocksdbDir)
+                    .writeBufferSizeBytes(writeBufferMb * 1024 * 1024)
+                    .compressionType(compression)
+                    .build();
+                engineFactory = new RocksDBEngineFactory(rocksDBConfig);
+                logger.info("Using RocksDB storage engine at {}", rocksdbDir);
+                break;
+            default:
+                engineFactory = new MySQLEngineFactory(mysqlConfig.createDataSource());
+                logger.info("Using MySQL storage engine at {}:{}/{}", mysqlHost, mysqlPort, mysqlDatabase);
+                break;
+        }
+
+        initRegionServer(host, port, mysqlConfig, engineFactory, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
         initHeartbeatSender(zkConnect, masterAddress, heartbeatInterval, mysqlConfig, diskCapacityMb);
 
         logger.info("----------------------------------------");
@@ -144,11 +169,12 @@ public class RegionServerMain {
     private void initRegionServer(String host,
                                   int port,
                                   MySQLConfig mysqlConfig,
+                                  StorageEngineFactory engineFactory,
                                   String masterAddress,
                                   long splitThresholdMb,
                                   long splitMinMb,
                                   int replicationFactor) throws IOException {
-        regionServer = new RegionServer(host, port, mysqlConfig, masterAddress, replicationFactor);
+        regionServer = new RegionServer(host, port, mysqlConfig, engineFactory, masterAddress, replicationFactor);
         regionServer.getSplitService().setConfig(splitThresholdMb, splitMinMb);
         regionServer.start();
     }

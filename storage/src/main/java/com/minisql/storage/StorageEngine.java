@@ -37,4 +37,16 @@ public interface StorageEngine {
     void compact(boolean major);
 
     void close();
+
+    /**
+     * Drop all data for this storage instance.
+     * Default no-op; implementations should override.
+     */
+    default void dropData() {}
+
+    /**
+     * Estimate the on-disk size in bytes.
+     * Returns 0 by default.
+     */
+    default long estimateSizeBytes() { return 0L; }
 }

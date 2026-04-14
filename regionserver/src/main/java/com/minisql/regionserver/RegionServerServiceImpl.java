@@ -145,7 +145,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         try {
             String regionId = request.getRegionId();
             byte[] rowKey = request.getRowKey().toByteArray();
-            MySQLRegionStorage storage = regionServer.getRegionManager().getMySQLRegionStorage(regionId);
+            RegionStorage storage = regionServer.getRegionManager().getRegionStorage(regionId);
             if (storage == null) {
                 throw new IOException("Region storage not found: " + regionId);
             }
@@ -802,7 +802,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             Table tableSchema = regionServer.getTableSchema(region.getTableName());
 
-            MySQLRegionStorage storage = regionServer.getRegionManager().getMySQLRegionStorage(regionId);
+            RegionStorage storage = regionServer.getRegionManager().getRegionStorage(regionId);
             if (storage == null) {
                 throw new IOException("Region storage not found: " + regionId);
             }

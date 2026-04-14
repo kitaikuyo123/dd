@@ -44,8 +44,8 @@ public class RegionMergeService {
             }
 
             // 2. 获取大小
-            MySQLRegionStorage leftStorage = regionManager.getMySQLRegionStorage(leftRegionId);
-            MySQLRegionStorage rightStorage = regionManager.getMySQLRegionStorage(rightRegionId);
+            RegionStorage leftStorage = regionManager.getRegionStorage(leftRegionId);
+            RegionStorage rightStorage = regionManager.getRegionStorage(rightRegionId);
             if (leftStorage == null || rightStorage == null) {
                 return false;
             }
@@ -109,8 +109,8 @@ public class RegionMergeService {
      * 执行 Region 合并（带事务回滚机制）
      */
     public RegionMergeResult mergeRegions(String leftRegionId, String rightRegionId) throws Exception {
-        MySQLRegionStorage leftStorage = regionManager.getMySQLRegionStorage(leftRegionId);
-        MySQLRegionStorage rightStorage = regionManager.getMySQLRegionStorage(rightRegionId);
+        RegionStorage leftStorage = regionManager.getRegionStorage(leftRegionId);
+        RegionStorage rightStorage = regionManager.getRegionStorage(rightRegionId);
 
         if (leftStorage == null || rightStorage == null) {
             throw new IOException("Region storage not found: " + leftRegionId + " or " + rightRegionId);
@@ -146,7 +146,7 @@ public class RegionMergeService {
             mergedRegion.setEndKey(rightRegion.getEndKey());
 
             // 2. 创建新存储（会自动创建 kv_store_{mergedRegionId} 表）
-            MySQLRegionStorage mergedStorage = regionManager.createRegionStorage(mergedRegionId);
+            RegionStorage mergedStorage = regionManager.createRegionStorage(mergedRegionId);
             checkpoint.mergedStorage = mergedStorage;
             mergedStorage.start();
 
@@ -264,7 +264,7 @@ public class RegionMergeService {
         Region leftRegion;
         Region rightRegion;
         String mergedRegionId;
-        MySQLRegionStorage mergedStorage;
+        RegionStorage mergedStorage;
     }
 
     /**

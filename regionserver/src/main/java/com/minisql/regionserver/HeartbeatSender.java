@@ -281,7 +281,7 @@ public class HeartbeatSender {
         List<MasterProto.RegionLoad> loads = new ArrayList<>();
         try {
             for (com.minisql.common.model.Region region : regionManager.getAllRegions()) {
-                MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(region.getRegionId());
+                RegionStorage storage = regionManager.getRegionStorage(region.getRegionId());
                 if (storage == null) {
                     continue;
                 }
@@ -311,7 +311,7 @@ public class HeartbeatSender {
             long totalSpace = diskCapacityMb * 1024L * 1024L;
             long usedSpace = 0L;
             for (com.minisql.common.model.Region region : regionManager.getAllRegions()) {
-                MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(region.getRegionId());
+                RegionStorage storage = regionManager.getRegionStorage(region.getRegionId());
                 if (storage != null) {
                     usedSpace += storage.getStoreFileSize();
                 }

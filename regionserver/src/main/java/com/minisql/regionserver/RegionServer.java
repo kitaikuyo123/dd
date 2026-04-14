@@ -12,6 +12,7 @@ import com.minisql.replication.ReplicationConfig;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationWAL;
 import com.minisql.storage.MySQLConfig;
+import com.minisql.storage.StorageEngineFactory;
 import com.minisql.storage.StorageScanFilter;
 import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
@@ -37,6 +38,7 @@ public class RegionServer {
     private final RegionSplitService splitService;
     private final RegionMergeService mergeService;
     private final MySQLConfig mysqlConfig;
+    private final StorageEngineFactory engineFactory;
     private volatile HikariDataSource sharedDataSource;
     private final String masterAddress;
 
@@ -48,10 +50,11 @@ public class RegionServer {
 
     private Server grpcServer;
 
-    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress,
-                        int replicationFactor) {
+    public RegionServer(String host, int port, MySQLConfig mysqlConfig, StorageEngineFactory engineFactory,
+                        String masterAddress, int replicationFactor) {
         this.serverId = new ServerId(host, port);
         this.mysqlConfig = mysqlConfig;
+        this.engineFactory = engineFactory;
         this.masterAddress = masterAddress;
 
         this.regionManager = new RegionManager(this);
@@ -62,6 +65,11 @@ public class RegionServer {
             ReplicationConfig.builder(replicationFactor).build(),
             this.mysqlConfig
         );
+    }
+
+    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress,
+                        int replicationFactor) {
+        this(host, port, mysqlConfig, null, masterAddress, replicationFactor);
     }
 
     public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress) {
@@ -211,10 +219,10 @@ public class RegionServer {
             throw new IllegalStateException("Region is temporarily read-only during migration: " + regionId);
         }
 
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
-            logger.error("MySQL Region storage not found: {}", regionId);
-            throw new IllegalStateException("MySQL Region storage not found: " + regionId);
+            logger.error("Region storage not found: {}", regionId);
+            throw new IllegalStateException("Region storage not found: " + regionId);
         }
 
         logger.debug("Storage found, writing data...");
@@ -225,9 +233,9 @@ public class RegionServer {
     public KeyValue get(String regionId, byte[] rowKey) {
         checkRegionOpen(regionId);
 
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
-            throw new IllegalStateException("MySQL Region storage not found: " + regionId);
+            throw new IllegalStateException("Region storage not found: " + regionId);
         }
         return storage.get(rowKey);
     }
@@ -235,9 +243,9 @@ public class RegionServer {
     public Iterator<KeyValue> scan(String regionId, byte[] startKey, byte[] endKey) {
         checkRegionOpen(regionId);
 
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
-            throw new IllegalStateException("MySQL Region storage not found: " + regionId);
+            throw new IllegalStateException("Region storage not found: " + regionId);
         }
         return storage.scan(startKey, endKey);
     }
@@ -245,9 +253,9 @@ public class RegionServer {
     public Iterator<KeyValue> scan(String regionId, StorageScanFilter filter) {
         checkRegionOpen(regionId);
 
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
-            throw new IllegalStateException("MySQL Region storage not found: " + regionId);
+            throw new IllegalStateException("Region storage not found: " + regionId);
         }
         return storage.scan(filter);
     }
@@ -263,9 +271,9 @@ public class RegionServer {
             throw new IllegalStateException("Region is temporarily read-only during migration: " + regionId);
         }
 
-        MySQLRegionStorage storage = regionManager.getMySQLRegionStorage(regionId);
+        RegionStorage storage = regionManager.getRegionStorage(regionId);
         if (storage == null) {
-            throw new IllegalStateException("MySQL Region storage not found: " + regionId);
+            throw new IllegalStateException("Region storage not found: " + regionId);
         }
         storage.delete(rowKey);
     }
@@ -311,14 +319,24 @@ public class RegionServer {
     }
 
     /**
-     * Gets or creates the shared RegionServer-level datasource.
+     * Gets or creates the shared RegionServer-level datasource (for MySQL mode).
      */
     public synchronized HikariDataSource getOrCreateSharedDataSource() {
         if (sharedDataSource == null || sharedDataSource.isClosed()) {
-            sharedDataSource = mysqlConfig.createDataSource();
-            logger.info("Shared MySQL DataSource created: {}", mysqlConfig.getJdbcUrl());
+            if (mysqlConfig != null) {
+                sharedDataSource = mysqlConfig.createDataSource();
+                logger.info("Shared MySQL DataSource created: {}", mysqlConfig.getJdbcUrl());
+            }
         }
         return sharedDataSource;
+    }
+
+    public StorageEngineFactory getEngineFactory() {
+        if (engineFactory != null) {
+            return engineFactory;
+        }
+        // Legacy path: no factory provided, create MySQL on-the-fly
+        return new com.minisql.storage.MySQLEngineFactory(getOrCreateSharedDataSource());
     }
 
     public MySQLConfig getMySQLConfig() {
