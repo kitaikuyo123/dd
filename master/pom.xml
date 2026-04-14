@@ -60,12 +60,13 @@
             <artifactId>log4j-slf4j2-impl</artifactId>
         </dependency>
 
-        <!-- curator-test for embedded ZooKeeper (used at runtime for development) -->
+        <!-- curator-test for embedded ZooKeeper (dev mode: -Dminisql.zk.embedded=true) -->
         <dependency>
             <groupId>org.apache.curator</groupId>
             <artifactId>curator-test</artifactId>
             <version>${curator.version}</version>
             <scope>compile</scope>
+            <optional>true</optional>
             <exclusions>
                 <exclusion>
                     <groupId>org.junit.jupiter</groupId>
