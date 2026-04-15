@@ -1,6 +1,7 @@
 package com.minisql.master.monitoring;
 
 import java.sql.Connection;
+import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -13,10 +14,19 @@ import java.util.Map;
 
 /**
  * Executes ad-hoc SQL for the monitor web console by reusing the JDBC client.
- * The MiniSQL JDBC driver is discovered automatically via Java SPI
- * ({@code META-INF/services/java.sql.Driver}) when the client JAR is on the classpath.
+ * The MiniSQL JDBC driver is registered explicitly because {@code mvn exec:java}
+ * uses a custom ClassLoader where Java SPI auto-discovery may not work.
  */
 public class SqlConsoleService {
+
+    static {
+        try {
+            Class<?> driverClass = Class.forName("com.minisql.client.MiniSQLDriver");
+            DriverManager.registerDriver((Driver) driverClass.getDeclaredConstructor().newInstance());
+        } catch (Exception e) {
+            // client JAR not on classpath — SQL console will fail at getConnection time
+        }
+    }
 
     private final String jdbcUrl;
 

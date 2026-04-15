@@ -106,12 +106,20 @@ public class RecoveryCoordinator {
         scheduleRecovery(regionId, replica, false);
     }
 
+    /**
+     * Tracks which (region, server) pairs have already been scheduled for recovery
+     * in the current reconciliation pass, preventing duplicate scheduling when
+     * multiple RegionServers register concurrently.
+     */
+    private final ConcurrentHashMap<String, Boolean> reconciledPairs = new ConcurrentHashMap<>();
+
     public void reconcileRecoveredServer(ServerId recoveredServer) {
         for (Region region : metadataManager.getAllRegions()) {
             if (region == null) {
                 continue;
             }
 
+            String regionId = region.getRegionId();
             ServerId primary = region.getPrimary();
             if (primary == null) {
                 continue;
@@ -126,8 +134,14 @@ public class RecoveryCoordinator {
                 continue;
             }
 
+            String pairKey = buildTaskKey(regionId, recoveredServer);
+            if (reconciledPairs.putIfAbsent(pairKey, Boolean.TRUE) != null) {
+                // Already scheduled for this region+server in a previous pass
+                continue;
+            }
+
             if (region.getReplicas().contains(recoveredServer)) {
-                recoverReplica(region.getRegionId(), recoveredServer);
+                recoverReplica(regionId, recoveredServer);
                 continue;
             }
 
@@ -142,7 +156,7 @@ public class RecoveryCoordinator {
                 .count();
 
             if (activeReplicaCount < targetReplicationFactor) {
-                bootstrapReplica(region.getRegionId(), recoveredServer);
+                bootstrapReplica(regionId, recoveredServer);
             }
         }
     }
@@ -164,12 +178,17 @@ public class RecoveryCoordinator {
             }
         }
 
+        String regionId = region.getRegionId();
         for (ServerId replica : new ArrayList<>(region.getReplicas())) {
             if (replica.equals(region.getPrimary())) {
                 continue;
             }
             if (clusterManager.isServerActive(replica)) {
-                recoverReplica(region.getRegionId(), replica);
+                String pairKey = buildTaskKey(regionId, replica);
+                if (reconciledPairs.putIfAbsent(pairKey, Boolean.TRUE) != null) {
+                    continue;
+                }
+                recoverReplica(regionId, replica);
             }
         }
 
@@ -185,7 +204,11 @@ public class RecoveryCoordinator {
             if (candidate.equals(region.getPrimary()) || region.getReplicas().contains(candidate)) {
                 continue;
             }
-            bootstrapReplica(region.getRegionId(), candidate);
+            String pairKey = buildTaskKey(regionId, candidate);
+            if (reconciledPairs.putIfAbsent(pairKey, Boolean.TRUE) != null) {
+                continue;
+            }
+            bootstrapReplica(regionId, candidate);
             activeReplicaCount++;
             if (activeReplicaCount >= targetReplicationFactor) {
                 break;
@@ -255,6 +278,7 @@ public class RecoveryCoordinator {
                 logger.error("Replica recovery failed for region {} on {}: {}", regionId, replica, e.getMessage());
             } finally {
                 inFlightRecoveries.remove(taskKey);
+                reconciledPairs.remove(taskKey);
             }
         });
     }
