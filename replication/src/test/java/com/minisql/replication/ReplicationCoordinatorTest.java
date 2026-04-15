@@ -104,6 +104,74 @@ class ReplicationCoordinatorTest {
         }
     }
 
+    @Test
+    @DisplayName("idle system with no write traffic does not trigger primary stale")
+    void testIdleSystemNotDetectedAsStale() throws InterruptedException {
+        FakeTransportClient transport = new FakeTransportClient();
+        ReplicationCoordinator coordinator = new ReplicationCoordinator(
+            ReplicationConfig.builder(3)
+                .healthCheckIntervalMs(100)   // very short interval so the check runs quickly
+                .build(),
+            null,
+            transport
+        );
+        coordinator.start();
+
+        try {
+            Region region = new Region("region-idle", "orders", new byte[]{0x00}, new byte[]{0x7F});
+            ServerId primary = new ServerId("primary", 16020);
+            ServerId secondary1 = new ServerId("secondary-1", 16021);
+            ServerId secondary2 = new ServerId("secondary-2", 16022);
+            coordinator.createReplicaGroup(region, List.of(primary, secondary1, secondary2));
+
+            // Wait well past the stale threshold (healthCheckIntervalMs * 3 = 300ms)
+            Thread.sleep(600);
+
+            // Primary should still be the same — no failover triggered
+            assertEquals(primary, coordinator.getReplicaGroup(region.getRegionId()).getPrimary());
+        } finally {
+            coordinator.stop();
+        }
+    }
+
+    @Test
+    @DisplayName("health check refreshes primary lastUpdateTime as heartbeat")
+    void testHealthCheckRefreshesPrimaryHeartbeat() throws InterruptedException {
+        FakeTransportClient transport = new FakeTransportClient();
+        ReplicationCoordinator coordinator = new ReplicationCoordinator(
+            ReplicationConfig.builder(3)
+                .healthCheckIntervalMs(100)
+                .build(),
+            null,
+            transport
+        );
+        coordinator.start();
+
+        try {
+            Region region = new Region("region-hb", "orders", new byte[]{0x00}, new byte[]{0x7F});
+            ServerId primary = new ServerId("primary", 16020);
+            ServerId secondary1 = new ServerId("secondary-1", 16021);
+            ServerId secondary2 = new ServerId("secondary-2", 16022);
+            coordinator.createReplicaGroup(region, List.of(primary, secondary1, secondary2));
+
+            // Record the initial lastUpdateTime
+            long initialTime = coordinator.getReplicaGroup(region.getRegionId())
+                .getReplicaState(primary).getLastUpdateTime();
+
+            // Wait for several health check cycles
+            Thread.sleep(500);
+
+            // The primary's lastUpdateTime should have been refreshed by health checks
+            long afterTime = coordinator.getReplicaGroup(region.getRegionId())
+                .getReplicaState(primary).getLastUpdateTime();
+            assertTrue(afterTime > initialTime,
+                "Primary lastUpdateTime should be refreshed by health check heartbeat");
+            assertEquals(primary, coordinator.getReplicaGroup(region.getRegionId()).getPrimary());
+        } finally {
+            coordinator.stop();
+        }
+    }
+
     private KeyValue sampleMutation() {
         KeyValue kv = new KeyValue();
         kv.setRowKey(new byte[]{0x01});

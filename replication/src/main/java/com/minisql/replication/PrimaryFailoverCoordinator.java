@@ -82,6 +82,11 @@ public class PrimaryFailoverCoordinator {
         if (state.getLastUpdateTime() == 0L) {
             return true;
         }
+        // An idle replica (no replication activity) is considered healthy.
+        // Staleness only matters when replication was previously active but stalled.
+        if (!state.isReplicationActive()) {
+            return true;
+        }
         long unhealthyThreshold = config.getHealthCheckIntervalMs() * 3;
         return System.currentTimeMillis() - state.getLastUpdateTime() <= unhealthyThreshold;
     }

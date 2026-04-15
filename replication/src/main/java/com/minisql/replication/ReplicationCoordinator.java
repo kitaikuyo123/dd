@@ -382,21 +382,11 @@ public class ReplicationCoordinator {
                 continue;
             }
 
-            ReplicaGroup.ReplicaState state = group.getReplicaState(primary);
-            if (state == null || state.getLastUpdateTime() == 0L) {
-                continue;
-            }
-            long timeSinceLastUpdate = System.currentTimeMillis() - state.getLastUpdateTime();
-            if (timeSinceLastUpdate > config.getHealthCheckIntervalMs() * 3L && group.getReplicas().size() > 1) {
-                logger.warn("Primary stale detected for region {}, notifying Master to trigger failover", regionId);
-                try {
-                    ServerId oldPrimary = primary;
-                    failoverCoordinator.failover(regionId);
-                    ServerId newPrimary = group.getPrimary();
-                    logger.info("Failover completed for region {}: {} -> {}", regionId, oldPrimary, newPrimary);
-                } catch (Exception e) {
-                    logger.error("Auto-failover failed for region {}: {}", regionId, e.getMessage());
-                }
+            // Refresh the primary's lastUpdateTime as a heartbeat.
+            // If this health check can run, the primary process is alive.
+            ReplicaGroup.ReplicaState primaryState = group.getReplicaState(primary);
+            if (primaryState != null) {
+                primaryState.setLastUpdateTime(System.currentTimeMillis());
             }
         }
     }

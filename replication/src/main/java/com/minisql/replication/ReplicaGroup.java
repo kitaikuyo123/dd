@@ -81,6 +81,7 @@ public class ReplicaGroup {
         state.setLastAppliedSequenceId(appliedSequenceId);
         state.setReplicationLag(lagInBytes);
         state.setLastUpdateTime(System.currentTimeMillis());
+        state.setReplicationActive(true);
         ReplicaRole role = replicaRoles.get(replica);
         if (role != null) {
             state.setRole(role);
@@ -120,6 +121,7 @@ public class ReplicaGroup {
         private volatile long lastAppliedSequenceId;
         private volatile long replicationLag;
         private volatile long lastUpdateTime;
+        private volatile boolean replicationActive;
         private volatile ReplicaRole role = ReplicaRole.SECONDARY;
 
         public long getLastAppliedSequenceId() {
@@ -152,6 +154,14 @@ public class ReplicaGroup {
 
         public void setRole(ReplicaRole role) {
             this.role = role;
+        }
+
+        public boolean isReplicationActive() {
+            return replicationActive;
+        }
+
+        public void setReplicationActive(boolean replicationActive) {
+            this.replicationActive = replicationActive;
         }
     }
 }
