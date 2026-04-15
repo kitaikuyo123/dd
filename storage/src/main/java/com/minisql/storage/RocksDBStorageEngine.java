@@ -38,6 +38,15 @@ public class RocksDBStorageEngine implements StorageEngine {
                 dir.mkdirs();
             }
 
+            // Clean up stale LOCK file from previous runs
+            File lockFile = new File(dir, "LOCK");
+            if (lockFile.exists()) {
+                logger.warn("Found stale LOCK file at {}, deleting...", dbPath);
+                if (!lockFile.delete()) {
+                    logger.warn("Failed to delete stale LOCK file");
+                }
+            }
+
             Options options = buildOptions(config);
             this.db = RocksDB.open(options, dbPath);
             this.defaultCf = null; // default column family

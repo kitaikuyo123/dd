@@ -50,9 +50,18 @@ public class RegionManager {
 
     /**
      * Opens a region and creates its storage using the RegionServer shared pool.
+     * If the region is already open, this is a no-op (idempotent).
      */
     public void openRegion(Region region) {
         String regionId = region.getRegionId();
+
+        // Idempotent: skip if already open
+        if (regionStates.get(regionId) == RegionState.OPEN
+                && regionStorages.containsKey(regionId)) {
+            logger.info("Region {} is already open, skipping duplicate open", regionId);
+            return;
+        }
+
         regionStates.put(regionId, RegionState.OPENING);
 
         try {

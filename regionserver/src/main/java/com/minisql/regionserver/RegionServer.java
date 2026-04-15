@@ -86,7 +86,7 @@ public class RegionServer {
         startGrpcServer();
 
         logger.info("RegionServer started on {}:{}", serverId.getHost(), serverId.getPort());
-        logger.info("Using MySQL storage engine");
+        logger.info("Using storage engine: {}", engineFactory.getClass().getSimpleName().replace("EngineFactory", ""));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("*** Shutting down gRPC server since JVM is shutting down");
