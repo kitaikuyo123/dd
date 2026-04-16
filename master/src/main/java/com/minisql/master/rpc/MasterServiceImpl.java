@@ -36,6 +36,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private static final Logger logger = LoggerFactory.getLogger(MasterServiceImpl.class);
     private static final long DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS = 10_000L;
+    private static final long DEFAULT_LOAD_BALANCE_INTERVAL_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final boolean DEFAULT_LOAD_BALANCE_ENABLED = true;
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -61,6 +63,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
     private final long hotSpotDetectorIntervalMs;
+    private final boolean loadBalanceEnabled;
+    private final long loadBalanceIntervalMs;
 
     // Master 状态
     private final String clusterId;
@@ -94,8 +98,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
             failoverCoordinator, recoveryCoordinator, lifecycleManager, commandClient,
             DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS,
-            null);
-        applyCoordinatorThresholds(config);
+            null,
+            parseBooleanProperty(config, "load.balance.enabled", DEFAULT_LOAD_BALANCE_ENABLED),
+            parseLongProperty(config, "load.balance.interval.ms", DEFAULT_LOAD_BALANCE_INTERVAL_MS),
+            config);
     }
 
     public MasterServiceImpl(ClusterManager clusterManager,
@@ -109,6 +115,26 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              RegionServerCommandClient commandClient,
                              long hotSpotDetectorIntervalMs,
                              HotSpotCoordinator.HotSpotSettings hotSpotSettings) {
+        this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
+            failoverCoordinator, recoveryCoordinator, lifecycleManager, commandClient,
+            hotSpotDetectorIntervalMs, hotSpotSettings,
+            DEFAULT_LOAD_BALANCE_ENABLED, DEFAULT_LOAD_BALANCE_INTERVAL_MS, null);
+    }
+
+    public MasterServiceImpl(ClusterManager clusterManager,
+                             MetadataManager metadataManager,
+                             LoadBalancer loadBalancer,
+                             ReplicationCoordinator replicationCoordinator,
+                             ReplicaMonitor replicaMonitor,
+                             FailoverCoordinator failoverCoordinator,
+                             RecoveryCoordinator recoveryCoordinator,
+                             ReplicaLifecycleManager lifecycleManager,
+                             RegionServerCommandClient commandClient,
+                             long hotSpotDetectorIntervalMs,
+                             HotSpotCoordinator.HotSpotSettings hotSpotSettings,
+                             boolean loadBalanceEnabled,
+                             long loadBalanceIntervalMs,
+                             Properties config) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.loadBalancer = loadBalancer;
@@ -136,11 +162,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             this.hotSpotCoordinator.configure(hotSpotSettings);
         }
         this.hotSpotDetectorIntervalMs = Math.max(1_000L, hotSpotDetectorIntervalMs);
+        this.loadBalanceEnabled = loadBalanceEnabled;
+        this.loadBalanceIntervalMs = Math.max(1_000L, loadBalanceIntervalMs);
         this.serverFailureRecoveryExecutor = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "ServerFailure-Recovery");
             t.setDaemon(true);
             return t;
         });
+        applyCoordinatorThresholds(config);
         this.clusterId = UUID.randomUUID().toString();
         logger.info(
             "HotSpot detector config applied: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
@@ -150,6 +179,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             this.hotSpotCoordinator.getGrowthThreshold(),
             this.hotSpotCoordinator.getTargetReadReplicaCount(),
             this.hotSpotCoordinator.getCooldownMs());
+        logger.info("LoadBalance config applied: enabled={} interval={}ms",
+            this.loadBalanceEnabled, this.loadBalanceIntervalMs);
 
         // 启动自动合并检查
         mergeCoordinator.start();
@@ -160,6 +191,38 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         startHotSpotScheduler();
         startRegionSplitScheduler();
         startServerFailureCheckScheduler();
+    }
+
+    private static boolean parseBooleanProperty(Properties config, String key, boolean defaultValue) {
+        if (config == null) {
+            return defaultValue;
+        }
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return defaultValue;
+        }
+        String normalized = rawValue.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("true".equals(normalized) || "false".equals(normalized)) {
+            return Boolean.parseBoolean(normalized);
+        }
+        logger.warn("Ignoring invalid boolean property {}={}, fallback to {}", key, rawValue, defaultValue);
+        return defaultValue;
+    }
+
+    private static long parseLongProperty(Properties config, String key, long defaultValue) {
+        if (config == null) {
+            return defaultValue;
+        }
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(rawValue.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Ignoring invalid long property {}={}, fallback to {}", key, rawValue, defaultValue);
+            return defaultValue;
+        }
     }
 
     private void applyCoordinatorThresholds(Properties config) {
@@ -234,6 +297,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
      * 启动定期负载均衡调度器
      */
     private void startLoadBalanceScheduler() {
+        if (!loadBalanceEnabled) {
+            logger.info("LoadBalance scheduler disabled by configuration");
+            return;
+        }
         balanceScheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "LoadBalance-Scheduler");
             t.setDaemon(true);
@@ -243,10 +310,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         // 每 5 分钟检查一次负载平衡
         balanceScheduler.scheduleAtFixedRate(
             this::runLoadBalance,
-            5, 5, TimeUnit.MINUTES
+            loadBalanceIntervalMs, loadBalanceIntervalMs, TimeUnit.MILLISECONDS
         );
 
-        logger.info("LoadBalance scheduler started, interval: 5 minutes");
+        logger.info("LoadBalance scheduler started, interval: {} ms", loadBalanceIntervalMs);
     }
 
     /**
