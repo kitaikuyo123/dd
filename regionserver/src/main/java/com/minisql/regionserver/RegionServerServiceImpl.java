@@ -654,6 +654,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
+            logger.error("Failed to start migration for region {}", request.getRegionId(), e);
             RegionServerProto.MigrateResponse response = RegionServerProto.MigrateResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build();
@@ -682,6 +683,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
+            logger.error("Failed to finalize migration for region {}", regionId, e);
             regionServer.getRegionManager().unblockWrites(regionId);
             RegionServerProto.FinalizeMigrationResponse response = RegionServerProto.FinalizeMigrationResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
@@ -1181,7 +1183,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                     batch.add(convertToProto(kv));
 
                     if (batch.size() >= batchSize) {
-                        sendBatch(stub, regionId, batch);
+                        sendSnapshotBatch(stub, regionId, batch);
                         totalSent += batch.size();
                         batch.clear();
                     }
@@ -1189,7 +1191,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
                 // 发送剩余数据
                 if (!batch.isEmpty()) {
-                    sendBatch(stub, regionId, batch);
+                    sendSnapshotBatch(stub, regionId, batch);
                     totalSent += batch.size();
                 }
 
@@ -1207,16 +1209,21 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     /**
      * 发送批量数据
      */
-    private void sendBatch(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
-                          String regionId, List<CommonProto.KeyValue> batch) {
-        RegionServerProto.PutRequest request = RegionServerProto.PutRequest.newBuilder()
+    private void sendSnapshotBatch(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
+                                   String regionId, List<CommonProto.KeyValue> batch) {
+        RegionServerProto.LogEntry snapshotEntry = RegionServerProto.LogEntry.newBuilder()
+            .setSequenceId(0L)
+            .setTimestamp(System.currentTimeMillis())
+            .addAllMutations(batch)
+            .build();
+        RegionServerProto.ReplicateRequest request = RegionServerProto.ReplicateRequest.newBuilder()
             .setRegionId(regionId)
-            .addAllKeyValues(batch)
+            .addEntries(snapshotEntry)
             .build();
 
-        RegionServerProto.PutResponse response = stub.put(request);
+        RegionServerProto.ReplicateResponse response = stub.replicate(request);
         if (!response.getStatus().getSuccess()) {
-            throw new RuntimeException("Failed to send batch: " + response.getStatus().getMessage());
+            throw new RuntimeException("Failed to send snapshot batch: " + response.getStatus().getMessage());
         }
     }
 

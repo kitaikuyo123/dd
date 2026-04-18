@@ -393,10 +393,7 @@ public class RecoveryCoordinator {
         lifecycleManager.transition(regionId, replica,
             ReplicaLifecycleManager.ReplicaLifecycleState.CATCHING_UP,
             "Waiting for replica catch-up");
-        ReplicaGroup group = replicationCoordinator.getReplicaGroup(regionId);
-        if (group == null) {
-            throw new IllegalStateException("Replica group not found for region " + regionId);
-        }
+        ReplicaGroup group = ensureReplicaGroup(regionId);
 
         List<ServerId> replicas = group.getReplicas();
         if (!replicas.contains(replica)) {
@@ -409,6 +406,42 @@ public class RecoveryCoordinator {
         if (!replicationCoordinator.resyncReplicaSync(regionId, replica, 60000)) {
             throw new IllegalStateException("Full sync failed while resyncing replica " + replica);
         }
+    }
+
+    private ReplicaGroup ensureReplicaGroup(String regionId) {
+        ReplicaGroup existing = replicationCoordinator.getReplicaGroup(regionId);
+        if (existing != null) {
+            return existing;
+        }
+
+        Region region = metadataManager.getRegion(regionId);
+        if (region == null) {
+            throw new IllegalStateException("Replica group not found and region metadata missing: " + regionId);
+        }
+
+        List<ServerId> orderedReplicas = new ArrayList<>();
+        if (region.getPrimary() != null) {
+            orderedReplicas.add(region.getPrimary());
+        }
+        for (ServerId replica : region.getReplicas()) {
+            if (replica != null && !orderedReplicas.contains(replica)) {
+                orderedReplicas.add(replica);
+            }
+        }
+
+        if (orderedReplicas.isEmpty()) {
+            throw new IllegalStateException("Replica group not found and no replicas in metadata for region " + regionId);
+        }
+
+        replicationCoordinator.createReplicaGroup(region, orderedReplicas);
+        logger.warn("[RECOVERY-RECONCILE] Rebuilt missing replica group for region {} from metadata replicas={}",
+            regionId, orderedReplicas);
+
+        ReplicaGroup rebuilt = replicationCoordinator.getReplicaGroup(regionId);
+        if (rebuilt == null) {
+            throw new IllegalStateException("Failed to rebuild replica group for region " + regionId);
+        }
+        return rebuilt;
     }
 
     private void markReplicaReady(String regionId, ServerId replica) {

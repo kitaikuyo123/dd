@@ -13,10 +13,16 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class LoadBalancer {
 
+    private static final double DEFAULT_BALANCE_THRESHOLD = 20.0;
+    private static final long DEFAULT_MIN_MIGRATION_INTERVAL_MS = 300000L;
+    private static final double DEFAULT_MAX_TARGET_QPS = 5000.0;
+
     private final LoadCalculator loadCalculator = new LoadCalculator();
     private final Random random = new Random();
     private volatile Strategy strategy = Strategy.LOAD_BASED;
     private volatile int roundRobinIndex = 0;
+    private volatile double balanceThreshold = DEFAULT_BALANCE_THRESHOLD;
+    private volatile long minMigrationIntervalMs = DEFAULT_MIN_MIGRATION_INTERVAL_MS;
 
     public enum Strategy {
         RANDOM,
@@ -50,6 +56,7 @@ public class LoadBalancer {
 
         // 请求历史记录（用于计算增长率）
         private final Map<String, RequestHistory> requestHistories = new ConcurrentHashMap<>();
+        private volatile double maxTargetQps = DEFAULT_MAX_TARGET_QPS;
 
         public LoadCalculator() {
         }
@@ -108,12 +115,10 @@ public class LoadBalancer {
 
             // 计算当前的真实 QPS (原逻辑中 growthRate 即为 QPS)
             double currentQps = history.getGrowthRate();
-            
-            // 默认单节点设计的最高满峰 QPS 为 5000
-            double MAX_TARGET_QPS = 5000.0;
-            
+
             // 基于真实 QPS 计算负载分数，而非累积请求总数
-            double baseScore = Math.min(100, (currentQps / MAX_TARGET_QPS) * 100.0);
+            double effectiveMaxTargetQps = maxTargetQps > 0.0 ? maxTargetQps : DEFAULT_MAX_TARGET_QPS;
+            double baseScore = Math.min(100, (currentQps / effectiveMaxTargetQps) * 100.0);
 
             // 如果单节点当前 QPS 高于 500，稍微增加惩罚分数，避免瞬间倾斜
             if (currentQps > 500) {
@@ -153,7 +158,7 @@ public class LoadBalancer {
             private long lastRequestCount = 0;
             private double growthRate = 0;
 
-            void addRecord(long totalRequests) {
+            synchronized void addRecord(long totalRequests) {
                 long now = System.currentTimeMillis();
                 long timeDelta = now - lastTimestamp;
 
@@ -166,17 +171,18 @@ public class LoadBalancer {
                 lastRequestCount = totalRequests;
             }
 
-            double getGrowthRate() {
+            synchronized double getGrowthRate() {
                 return growthRate;
             }
         }
+
+        public void setMaxTargetQps(double maxTargetQps) {
+            if (maxTargetQps <= 0.0) {
+                return;
+            }
+            this.maxTargetQps = maxTargetQps;
+        }
     }
-
-    // 均衡阈值：负载差异超过此值触发迁移
-    private static final double BALANCE_THRESHOLD = 20.0;
-
-    // 最小迁移间隔（毫秒）
-    private static final long MIN_MIGRATION_INTERVAL = 300000; // 5分钟
 
     // 上次迁移时间
     private volatile long lastBalanceTime = 0;
@@ -187,6 +193,32 @@ public class LoadBalancer {
 
     public Strategy getStrategy() {
         return strategy;
+    }
+
+    public void setBalanceThreshold(double balanceThreshold) {
+        if (balanceThreshold <= 0.0) {
+            return;
+        }
+        this.balanceThreshold = balanceThreshold;
+    }
+
+    public double getBalanceThreshold() {
+        return balanceThreshold;
+    }
+
+    public void setMinMigrationIntervalMs(long minMigrationIntervalMs) {
+        if (minMigrationIntervalMs < 0L) {
+            return;
+        }
+        this.minMigrationIntervalMs = minMigrationIntervalMs;
+    }
+
+    public long getMinMigrationIntervalMs() {
+        return minMigrationIntervalMs;
+    }
+
+    public void setMaxTargetQps(double maxTargetQps) {
+        loadCalculator.setMaxTargetQps(maxTargetQps);
     }
 
     /**
@@ -254,7 +286,7 @@ public class LoadBalancer {
 
         // 检查迁移冷却时间
         long now = System.currentTimeMillis();
-        if (now - lastBalanceTime < MIN_MIGRATION_INTERVAL) {
+        if (now - lastBalanceTime < minMigrationIntervalMs) {
             return actions; // 冷却期内不迁移
         }
 
@@ -276,9 +308,9 @@ public class LoadBalancer {
 
         for (Map.Entry<ClusterManager.ServerInfo, Double> entry : loadScores.entrySet()) {
             double diff = entry.getValue() - avgLoad;
-            if (diff > BALANCE_THRESHOLD) {
+            if (diff > balanceThreshold) {
                 overloadedServers.add(entry.getKey());
-            } else if (diff < -BALANCE_THRESHOLD) {
+            } else if (diff < -balanceThreshold) {
                 underloadedServers.add(entry.getKey());
             }
         }
@@ -351,6 +383,10 @@ public class LoadBalancer {
             if (excludedRegions.contains(regionId)) {
                 continue;
             }
+            if (target != null && target.getRegionLoads().containsKey(regionId)) {
+                // Target already hosts this region (primary or replica), skip invalid move.
+                continue;
+            }
 
             ClusterManager.RegionLoad load = entry.getValue();
 
@@ -397,7 +433,7 @@ public class LoadBalancer {
 
     private BalanceAction computeSimpleStrategyAction(List<ClusterManager.ServerInfo> servers) {
         long now = System.currentTimeMillis();
-        if (now - lastBalanceTime < MIN_MIGRATION_INTERVAL) {
+        if (now - lastBalanceTime < minMigrationIntervalMs) {
             return null;
         }
 

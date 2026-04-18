@@ -1,0 +1,21 @@
+-- Verify each table still has 2 rows after migrations.
+SELECT COUNT(*) AS lb_skew_01_rows FROM lb_skew_01;
+SELECT COUNT(*) AS lb_skew_02_rows FROM lb_skew_02;
+SELECT COUNT(*) AS lb_skew_03_rows FROM lb_skew_03;
+SELECT COUNT(*) AS lb_skew_04_rows FROM lb_skew_04;
+SELECT COUNT(*) AS lb_skew_05_rows FROM lb_skew_05;
+SELECT COUNT(*) AS lb_skew_06_rows FROM lb_skew_06;
+SELECT COUNT(*) AS lb_skew_07_rows FROM lb_skew_07;
+SELECT COUNT(*) AS lb_skew_08_rows FROM lb_skew_08;
+SELECT COUNT(*) AS lb_skew_09_rows FROM lb_skew_09;
+SELECT COUNT(*) AS lb_skew_10_rows FROM lb_skew_10;
+SELECT COUNT(*) AS lb_skew_11_rows FROM lb_skew_11;
+SELECT COUNT(*) AS lb_skew_12_rows FROM lb_skew_12;
+SELECT COUNT(*) AS lb_skew_13_rows FROM lb_skew_13;
+SELECT COUNT(*) AS lb_skew_14_rows FROM lb_skew_14;
+SELECT COUNT(*) AS lb_skew_15_rows FROM lb_skew_15;
+SELECT COUNT(*) AS lb_skew_16_rows FROM lb_skew_16;
+SELECT COUNT(*) AS lb_skew_17_rows FROM lb_skew_17;
+SELECT COUNT(*) AS lb_skew_18_rows FROM lb_skew_18;
+SELECT COUNT(*) AS lb_skew_19_rows FROM lb_skew_19;
+SELECT COUNT(*) AS lb_skew_20_rows FROM lb_skew_20;

@@ -67,6 +67,7 @@ public class RegionMigrationCoordinator {
             ServerId sourceServer = action.getSource();
             ServerId targetServer = action.getTarget();
             boolean targetOpened = false;
+            boolean targetAlreadyHosted = false;
             boolean sourceFinalized = false;
             boolean targetPromoted = false;
 
@@ -75,6 +76,7 @@ public class RegionMigrationCoordinator {
                 failMigration(migrationStatus, "Region not found");
                 return;
             }
+            targetAlreadyHosted = region.getReplicas() != null && region.getReplicas().contains(targetServer);
 
             updateMigrationState(migrationStatus, MigrationState.OPENING_TARGET, "Opening target region");
             transition(regionId, targetServer,
@@ -95,13 +97,13 @@ public class RegionMigrationCoordinator {
                 "Starting initial catch-up");
             long expectedSequenceId = notifyServerStartMigration(sourceServer, regionId, targetServer);
             if (expectedSequenceId < 0) {
-                rollbackMigration(migrationStatus, targetOpened, sourceFinalized, targetPromoted);
+                rollbackMigration(migrationStatus, targetOpened && !targetAlreadyHosted, sourceFinalized, targetPromoted);
                 return;
             }
 
             boolean syncCompleted = waitForReplicationSync(regionId, targetServer, expectedSequenceId);
             if (!syncCompleted) {
-                rollbackMigration(migrationStatus, targetOpened, sourceFinalized, targetPromoted);
+                rollbackMigration(migrationStatus, targetOpened && !targetAlreadyHosted, sourceFinalized, targetPromoted);
                 return;
             }
 
@@ -112,7 +114,7 @@ public class RegionMigrationCoordinator {
                 "Blocking source writes for migration");
             long finalSequenceId = notifyServerFinalizeMigration(sourceServer, regionId, targetServer, expectedSequenceId);
             if (finalSequenceId < 0) {
-                rollbackMigration(migrationStatus, targetOpened, sourceFinalized, targetPromoted);
+                rollbackMigration(migrationStatus, targetOpened && !targetAlreadyHosted, sourceFinalized, targetPromoted);
                 return;
             }
             sourceFinalized = true;
@@ -120,7 +122,7 @@ public class RegionMigrationCoordinator {
             updateMigrationState(migrationStatus, MigrationState.WAITING_FINAL_SYNC, "Waiting for final target catch-up");
             boolean finalSyncCompleted = waitForReplicationSync(regionId, targetServer, finalSequenceId);
             if (!finalSyncCompleted) {
-                rollbackMigration(migrationStatus, targetOpened, sourceFinalized, targetPromoted);
+                rollbackMigration(migrationStatus, targetOpened && !targetAlreadyHosted, sourceFinalized, targetPromoted);
                 return;
             }
 
@@ -130,7 +132,7 @@ public class RegionMigrationCoordinator {
                 "Promoting target after catch-up");
             boolean promoted = notifyServerPromoteToPrimary(targetServer, regionId);
             if (!promoted) {
-                rollbackMigration(migrationStatus, targetOpened, sourceFinalized, targetPromoted);
+                rollbackMigration(migrationStatus, targetOpened && !targetAlreadyHosted, sourceFinalized, targetPromoted);
                 return;
             }
             targetPromoted = true;
@@ -149,6 +151,10 @@ public class RegionMigrationCoordinator {
             clusterManager.assignRegionToServer(regionId, targetServer);
             region.setPrimary(targetServer);
             region.addReplica(targetServer);
+            region.removeReplica(sourceServer);
+            clusterManager.addReplica(regionId, targetServer);
+            clusterManager.removeReplica(regionId, sourceServer);
+            clusterManager.removeRegionLoad(sourceServer, regionId);
             metadataManager.registerRegionForTable(region, targetServer);
             transition(regionId, targetServer,
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
@@ -193,7 +199,12 @@ public class RegionMigrationCoordinator {
         try {
             RegionServerProto.MigrateResponse response =
                 commandClient.startMigration(sourceServer, regionId, targetServer, TimeUnit.MINUTES.toMillis(1));
-            return response.getStatus().getSuccess() ? response.getSourceSequenceId() : -1L;
+            if (response.getStatus().getSuccess()) {
+                return response.getSourceSequenceId();
+            }
+            logger.warn("startMigration rejected for region {} from {} to {}: {}",
+                regionId, sourceServer, targetServer, response.getStatus().getMessage());
+            return -1L;
         } catch (Exception e) {
             logger.error("Failed to notify server start migration: {}", e.getMessage(), e);
             return -1L;
@@ -205,7 +216,12 @@ public class RegionMigrationCoordinator {
         try {
             RegionServerProto.FinalizeMigrationResponse response =
                 commandClient.finalizeMigration(sourceServer, regionId, targetServer, fromSequenceId);
-            return response.getStatus().getSuccess() ? response.getSourceSequenceId() : -1L;
+            if (response.getStatus().getSuccess()) {
+                return response.getSourceSequenceId();
+            }
+            logger.warn("finalizeMigration rejected for region {} from {} to {}: {}",
+                regionId, sourceServer, targetServer, response.getStatus().getMessage());
+            return -1L;
         } catch (Exception e) {
             logger.error("Failed to finalize migration on source server: {}", e.getMessage(), e);
             return -1L;
@@ -234,6 +250,9 @@ public class RegionMigrationCoordinator {
                     if (lastAppliedSequenceId >= expectedSequenceId) {
                         return true;
                     }
+                } else {
+                    logger.warn("Replication lag query failed for region {} on target {}: {}",
+                        regionId, targetServer, response.getStatus().getMessage());
                 }
 
                 Thread.sleep(500);
@@ -249,7 +268,7 @@ public class RegionMigrationCoordinator {
         return false;
     }
 
-    private void rollbackMigration(MigrationStatus status, boolean targetOpened, boolean sourceFinalized,
+    private void rollbackMigration(MigrationStatus status, boolean targetOpenedByMigration, boolean sourceFinalized,
                                    boolean targetPromoted) {
         updateMigrationState(status, MigrationState.ROLLING_BACK, "Rolling back failed migration");
 
@@ -257,7 +276,7 @@ public class RegionMigrationCoordinator {
             if (sourceFinalized) {
                 notifyServerAbortMigration(status.sourceServer, status.regionId);
             }
-            if (targetOpened) {
+            if (targetOpenedByMigration) {
                 notifyServerCloseRegionSync(status.targetServer, status.regionId, false);
             }
             updateMigrationState(status, MigrationState.ROLLED_BACK, "Rollback completed");

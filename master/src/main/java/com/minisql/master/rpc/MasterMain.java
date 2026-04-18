@@ -65,6 +65,8 @@ public class MasterMain {
     private Properties config;
     private long hotSpotDetectorIntervalMs = 10_000L;
     private HotSpotCoordinator.HotSpotSettings hotSpotSettings;
+    private boolean loadBalanceEnabled = true;
+    private long loadBalanceIntervalMs = TimeUnit.MINUTES.toMillis(5);
 
     public static void main(String[] args) {
         MasterMain master = new MasterMain();
@@ -183,7 +185,25 @@ public class MasterMain {
         loadBalancer = new LoadBalancer();
         LoadBalancer.Strategy strategy = LoadBalancer.Strategy.fromString(
             config.getProperty("load.balance.strategy", "load_based"));
+        double loadBalanceThreshold = parseDoubleProperty(config, "load.balance.threshold", 20.0d);
+        long minMigrationIntervalMs = Math.max(0L,
+            parseLongProperty(config, "load.balance.min.migration.interval.ms", TimeUnit.MINUTES.toMillis(5)));
+        double loadBalanceMaxTargetQps = parseDoubleProperty(config, "load.balance.request.max.target.qps", 5000.0d);
         loadBalancer.setStrategy(strategy);
+        loadBalancer.setBalanceThreshold(loadBalanceThreshold);
+        loadBalancer.setMinMigrationIntervalMs(minMigrationIntervalMs);
+        loadBalancer.setMaxTargetQps(loadBalanceMaxTargetQps);
+        loadBalanceEnabled = parseBooleanProperty(config, "load.balance.enabled", true);
+        loadBalanceIntervalMs = Math.max(1_000L,
+            parseLongProperty(config, "load.balance.interval.ms", TimeUnit.MINUTES.toMillis(5)));
+        logger.info(
+            "Configured load balance properties: enabled={} interval={}ms strategy={} threshold={} minMigrationInterval={}ms maxTargetQps={}",
+            loadBalanceEnabled,
+            loadBalanceIntervalMs,
+            strategy,
+            loadBalancer.getBalanceThreshold(),
+            loadBalancer.getMinMigrationIntervalMs(),
+            loadBalanceMaxTargetQps);
         hotSpotDetectorIntervalMs = parseLongProperty(config, "hotspot.detector.interval.ms", 10_000L);
         long hotSpotReadThreshold = parseLongProperty(config, "hotspot.read.threshold.per.interval", 200L);
         long hotSpotWriteThreshold = parseLongProperty(config, "hotspot.write.threshold.per.interval", 100L);
@@ -230,6 +250,7 @@ public class MasterMain {
         recoveryCoordinator.start();
 
         monitoringService = new MonitoringService(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
+        monitoringService.setLoadBalanceRequestTargetQps(loadBalanceMaxTargetQps);
         replicaMonitor.registerCallback(monitoringService.replicaEventCallback());
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
@@ -311,7 +332,10 @@ public class MasterMain {
             replicaLifecycleManager,
             new GrpcRegionServerCommandClient(clusterManager),
             hotSpotDetectorIntervalMs,
-            hotSpotSettings
+            hotSpotSettings,
+            loadBalanceEnabled,
+            loadBalanceIntervalMs,
+            config
         );
         serviceImpl.setMonitoringService(monitoringService);
         serviceImpl.setZkClient(zkClient);
@@ -454,6 +478,19 @@ public class MasterMain {
             logger.warn("Invalid double property {}={}, fallback to {}", key, value, defaultValue);
             return defaultValue;
         }
+    }
+
+    private boolean parseBooleanProperty(Properties config, String key, boolean defaultValue) {
+        String value = config.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("true".equals(normalized) || "false".equals(normalized)) {
+            return Boolean.parseBoolean(normalized);
+        }
+        logger.warn("Invalid boolean property {}={}, fallback to {}", key, value, defaultValue);
+        return defaultValue;
     }
     private void addShutdownHook() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
