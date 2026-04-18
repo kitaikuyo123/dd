@@ -1,0 +1,68 @@
+-- Region-skew-driven load balance setup.
+-- Run this while ONLY RS1 is online so all regions start on one node.
+
+CREATE TABLE lb_skew_01 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_02 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_03 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_04 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_05 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_06 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_07 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_08 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_09 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_10 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_11 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_12 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_13 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_14 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_15 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_16 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_17 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_18 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_19 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+CREATE TABLE lb_skew_20 (id INT PRIMARY KEY, bucket INT, amount INT, status STRING);
+
+INSERT INTO lb_skew_01 (id, bucket, amount, status) VALUES (1, 1, 100, 'warm');
+INSERT INTO lb_skew_01 (id, bucket, amount, status) VALUES (2, 1, 200, 'warm');
+INSERT INTO lb_skew_02 (id, bucket, amount, status) VALUES (1, 2, 100, 'warm');
+INSERT INTO lb_skew_02 (id, bucket, amount, status) VALUES (2, 2, 200, 'warm');
+INSERT INTO lb_skew_03 (id, bucket, amount, status) VALUES (1, 3, 100, 'warm');
+INSERT INTO lb_skew_03 (id, bucket, amount, status) VALUES (2, 3, 200, 'warm');
+INSERT INTO lb_skew_04 (id, bucket, amount, status) VALUES (1, 4, 100, 'warm');
+INSERT INTO lb_skew_04 (id, bucket, amount, status) VALUES (2, 4, 200, 'warm');
+INSERT INTO lb_skew_05 (id, bucket, amount, status) VALUES (1, 5, 100, 'warm');
+INSERT INTO lb_skew_05 (id, bucket, amount, status) VALUES (2, 5, 200, 'warm');
+INSERT INTO lb_skew_06 (id, bucket, amount, status) VALUES (1, 6, 100, 'warm');
+INSERT INTO lb_skew_06 (id, bucket, amount, status) VALUES (2, 6, 200, 'warm');
+INSERT INTO lb_skew_07 (id, bucket, amount, status) VALUES (1, 7, 100, 'warm');
+INSERT INTO lb_skew_07 (id, bucket, amount, status) VALUES (2, 7, 200, 'warm');
+INSERT INTO lb_skew_08 (id, bucket, amount, status) VALUES (1, 8, 100, 'warm');
+INSERT INTO lb_skew_08 (id, bucket, amount, status) VALUES (2, 8, 200, 'warm');
+INSERT INTO lb_skew_09 (id, bucket, amount, status) VALUES (1, 9, 100, 'warm');
+INSERT INTO lb_skew_09 (id, bucket, amount, status) VALUES (2, 9, 200, 'warm');
+INSERT INTO lb_skew_10 (id, bucket, amount, status) VALUES (1, 10, 100, 'warm');
+INSERT INTO lb_skew_10 (id, bucket, amount, status) VALUES (2, 10, 200, 'warm');
+INSERT INTO lb_skew_11 (id, bucket, amount, status) VALUES (1, 11, 100, 'warm');
+INSERT INTO lb_skew_11 (id, bucket, amount, status) VALUES (2, 11, 200, 'warm');
+INSERT INTO lb_skew_12 (id, bucket, amount, status) VALUES (1, 12, 100, 'warm');
+INSERT INTO lb_skew_12 (id, bucket, amount, status) VALUES (2, 12, 200, 'warm');
+INSERT INTO lb_skew_13 (id, bucket, amount, status) VALUES (1, 13, 100, 'warm');
+INSERT INTO lb_skew_13 (id, bucket, amount, status) VALUES (2, 13, 200, 'warm');
+INSERT INTO lb_skew_14 (id, bucket, amount, status) VALUES (1, 14, 100, 'warm');
+INSERT INTO lb_skew_14 (id, bucket, amount, status) VALUES (2, 14, 200, 'warm');
+INSERT INTO lb_skew_15 (id, bucket, amount, status) VALUES (1, 15, 100, 'warm');
+INSERT INTO lb_skew_15 (id, bucket, amount, status) VALUES (2, 15, 200, 'warm');
+INSERT INTO lb_skew_16 (id, bucket, amount, status) VALUES (1, 16, 100, 'warm');
+INSERT INTO lb_skew_16 (id, bucket, amount, status) VALUES (2, 16, 200, 'warm');
+INSERT INTO lb_skew_17 (id, bucket, amount, status) VALUES (1, 17, 100, 'warm');
+INSERT INTO lb_skew_17 (id, bucket, amount, status) VALUES (2, 17, 200, 'warm');
+INSERT INTO lb_skew_18 (id, bucket, amount, status) VALUES (1, 18, 100, 'warm');
+INSERT INTO lb_skew_18 (id, bucket, amount, status) VALUES (2, 18, 200, 'warm');
+INSERT INTO lb_skew_19 (id, bucket, amount, status) VALUES (1, 19, 100, 'warm');
+INSERT INTO lb_skew_19 (id, bucket, amount, status) VALUES (2, 19, 200, 'warm');
+INSERT INTO lb_skew_20 (id, bucket, amount, status) VALUES (1, 20, 100, 'warm');
+INSERT INTO lb_skew_20 (id, bucket, amount, status) VALUES (2, 20, 200, 'warm');
+
+SELECT COUNT(*) AS skew01_rows FROM lb_skew_01;
+SELECT COUNT(*) AS skew10_rows FROM lb_skew_10;
+SELECT COUNT(*) AS skew20_rows FROM lb_skew_20;

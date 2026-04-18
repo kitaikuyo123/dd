@@ -972,22 +972,21 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         throw new RuntimeException("Failed to open region on server: " + primaryServer);
                     }
 
-                    // 创建副本组（如果选择了多个服务器）
-                    if (selectedServers.size() > 1) {
-                        replicationCoordinator.createReplicaGroup(region, selectedServers);
-                        logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
-                            region.getRegionId(), selectedServers.size());
-                        if (selectedServers.size() < replicationFactor) {
-                            logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
-                                region.getRegionId(), selectedServers.size(), replicationFactor);
-                        }
-                        for (int i = 1; i < selectedServers.size(); i++) {
-                            ServerId replicaServer = selectedServers.get(i);
-                            logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
-                                replicaServer, region.getRegionId());
-                            recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
-                        }
-                    } else if (selectedServers.size() == 1) {
+                    // 无论当前有多少可用节点，都先创建副本组，避免后续恢复阶段找不到 group。
+                    replicationCoordinator.createReplicaGroup(region, selectedServers);
+                    logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
+                        region.getRegionId(), selectedServers.size());
+                    if (selectedServers.size() < replicationFactor) {
+                        logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
+                            region.getRegionId(), selectedServers.size(), replicationFactor);
+                    }
+                    for (int i = 1; i < selectedServers.size(); i++) {
+                        ServerId replicaServer = selectedServers.get(i);
+                        logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
+                            replicaServer, region.getRegionId());
+                        recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
+                    }
+                    if (selectedServers.size() == 1) {
                         logger.warn("[CREATE TABLE] WARNING: Region {} initialized with primary only; no secondary replica available at create time",
                             region.getRegionId());
                     }

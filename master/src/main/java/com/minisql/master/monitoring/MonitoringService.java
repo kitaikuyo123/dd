@@ -33,6 +33,7 @@ public class MonitoringService {
     private final ReplicaLifecycleManager lifecycleManager;
     private final SqlMetricsRegistry sqlMetricsRegistry;
     private final ClusterEventTimeline eventTimeline;
+    private final LoadBalancer.LoadCalculator displayLoadCalculator;
     private volatile HotSpotCoordinator hotSpotCoordinator;
 
     public MonitoringService(ClusterManager clusterManager,
@@ -45,10 +46,15 @@ public class MonitoringService {
         this.lifecycleManager = lifecycleManager;
         this.sqlMetricsRegistry = new SqlMetricsRegistry();
         this.eventTimeline = new ClusterEventTimeline();
+        this.displayLoadCalculator = new LoadBalancer.LoadCalculator();
     }
 
     public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
         this.hotSpotCoordinator = hotSpotCoordinator;
+    }
+
+    public void setLoadBalanceRequestTargetQps(double maxTargetQps) {
+        displayLoadCalculator.setMaxTargetQps(maxTargetQps);
     }
 
     public void recordSqlMetric(String sqlType, String tableName, boolean success, long latencyMs,
@@ -255,10 +261,9 @@ public class MonitoringService {
 
     public List<Map<String, Object>> regionReplicas() {
         List<Map<String, Object>> result = new ArrayList<>();
-        LoadBalancer.LoadCalculator loadCalculator = new LoadBalancer.LoadCalculator();
         for (ClusterManager.ServerInfo info : clusterManager.getActiveServers()) {
             String serverName = toServerName(info.getServerId());
-            double serverLoadScore = loadCalculator.calculateLoadScore(info);
+            double serverLoadScore = displayLoadCalculator.calculateLoadScore(info);
             for (Map.Entry<String, ClusterManager.RegionLoad> entry : info.getRegionLoads().entrySet()) {
                 String regionId = entry.getKey();
                 Region region = metadataManager.getRegion(regionId);

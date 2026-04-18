@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
+import java.lang.management.MemoryUsage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -40,6 +41,9 @@ public class HeartbeatSender {
     private volatile boolean running;
     private volatile String zkConnectString;
     private volatile ZkManager zkManager;
+    private final com.sun.management.OperatingSystemMXBean operatingSystemMxBean;
+    private volatile long lastCpuSampleWallClockNs = -1L;
+    private volatile long lastCpuSampleProcessCpuNs = -1L;
 
     private com.minisql.storage.MySQLConfig mysqlConfig;
     private long diskCapacityMb = 1024L;
@@ -52,6 +56,10 @@ public class HeartbeatSender {
         this.serverId = serverId;
         this.regionManager = regionManager;
         this.heartbeatIntervalMs = heartbeatIntervalMs;
+        java.lang.management.OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+        this.operatingSystemMxBean = osBean instanceof com.sun.management.OperatingSystemMXBean
+            ? (com.sun.management.OperatingSystemMXBean) osBean
+            : null;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "HeartbeatSender");
             t.setDaemon(true);
@@ -302,11 +310,8 @@ public class HeartbeatSender {
     private MasterProto.ServerMetrics collectServerMetrics() {
         try {
             MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
-            double cpuUsage = 0.0;
-
-            long totalMemory = memoryBean.getHeapMemoryUsage().getMax();
-            long usedMemory = memoryBean.getHeapMemoryUsage().getUsed();
-            double memoryUsage = totalMemory > 0 ? (double) usedMemory / totalMemory : 0.0;
+            double cpuUsage = collectProcessCpuUsagePercent();
+            double memoryUsage = collectProcessMemoryUsagePercent(memoryBean);
 
             long totalSpace = diskCapacityMb * 1024L * 1024L;
             long usedSpace = 0L;
@@ -328,5 +333,69 @@ public class HeartbeatSender {
             logger.error("Error collecting server metrics", e);
             return MasterProto.ServerMetrics.getDefaultInstance();
         }
+    }
+
+    private double collectProcessCpuUsagePercent() {
+        if (operatingSystemMxBean == null) {
+            return 0.0;
+        }
+
+        double processLoad = operatingSystemMxBean.getProcessCpuLoad();
+        if (processLoad >= 0.0) {
+            return clampPercent(processLoad * 100.0);
+        }
+
+        long nowNs = System.nanoTime();
+        long processCpuNs = operatingSystemMxBean.getProcessCpuTime();
+        long previousWallClockNs = lastCpuSampleWallClockNs;
+        long previousProcessCpuNs = lastCpuSampleProcessCpuNs;
+        lastCpuSampleWallClockNs = nowNs;
+        lastCpuSampleProcessCpuNs = processCpuNs;
+
+        if (previousWallClockNs <= 0L || previousProcessCpuNs < 0L) {
+            return 0.0;
+        }
+
+        long wallClockDeltaNs = nowNs - previousWallClockNs;
+        long processCpuDeltaNs = processCpuNs - previousProcessCpuNs;
+        if (wallClockDeltaNs <= 0L || processCpuDeltaNs < 0L) {
+            return 0.0;
+        }
+
+        int cpuCores = Math.max(1, operatingSystemMxBean.getAvailableProcessors());
+        double cpuPercent = (processCpuDeltaNs * 100.0) / (wallClockDeltaNs * cpuCores);
+        return clampPercent(cpuPercent);
+    }
+
+    private double collectProcessMemoryUsagePercent(MemoryMXBean memoryBean) {
+        MemoryUsage heapUsage = memoryBean.getHeapMemoryUsage();
+        MemoryUsage nonHeapUsage = memoryBean.getNonHeapMemoryUsage();
+
+        long heapUsed = Math.max(0L, heapUsage.getUsed());
+        long nonHeapUsed = Math.max(0L, nonHeapUsage.getUsed());
+
+        long heapCapacity = resolveCapacity(heapUsage.getMax(), heapUsage.getCommitted());
+        long nonHeapCapacity = Math.max(nonHeapUsed, nonHeapUsage.getCommitted());
+        long totalCapacity = heapCapacity + Math.max(0L, nonHeapCapacity);
+        if (totalCapacity <= 0L) {
+            return 0.0;
+        }
+
+        double usagePercent = ((heapUsed + nonHeapUsed) * 100.0) / totalCapacity;
+        return clampPercent(usagePercent);
+    }
+
+    private long resolveCapacity(long max, long committed) {
+        if (max > 0L) {
+            return max;
+        }
+        return Math.max(0L, committed);
+    }
+
+    private static double clampPercent(double value) {
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            return 0.0;
+        }
+        return Math.max(0.0, Math.min(100.0, value));
     }
 }

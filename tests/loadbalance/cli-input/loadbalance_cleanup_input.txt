@@ -1,0 +1,2 @@
+source tests/loadbalance/sql/loadbalance_cleanup.sql
+quit

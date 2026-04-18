@@ -185,12 +185,25 @@ public class MasterMain {
         loadBalancer = new LoadBalancer();
         LoadBalancer.Strategy strategy = LoadBalancer.Strategy.fromString(
             config.getProperty("load.balance.strategy", "load_based"));
+        double loadBalanceThreshold = parseDoubleProperty(config, "load.balance.threshold", 20.0d);
+        long minMigrationIntervalMs = Math.max(0L,
+            parseLongProperty(config, "load.balance.min.migration.interval.ms", TimeUnit.MINUTES.toMillis(5)));
+        double loadBalanceMaxTargetQps = parseDoubleProperty(config, "load.balance.request.max.target.qps", 5000.0d);
         loadBalancer.setStrategy(strategy);
+        loadBalancer.setBalanceThreshold(loadBalanceThreshold);
+        loadBalancer.setMinMigrationIntervalMs(minMigrationIntervalMs);
+        loadBalancer.setMaxTargetQps(loadBalanceMaxTargetQps);
         loadBalanceEnabled = parseBooleanProperty(config, "load.balance.enabled", true);
         loadBalanceIntervalMs = Math.max(1_000L,
             parseLongProperty(config, "load.balance.interval.ms", TimeUnit.MINUTES.toMillis(5)));
-        logger.info("Configured load balance properties: enabled={} interval={}ms strategy={}",
-            loadBalanceEnabled, loadBalanceIntervalMs, strategy);
+        logger.info(
+            "Configured load balance properties: enabled={} interval={}ms strategy={} threshold={} minMigrationInterval={}ms maxTargetQps={}",
+            loadBalanceEnabled,
+            loadBalanceIntervalMs,
+            strategy,
+            loadBalancer.getBalanceThreshold(),
+            loadBalancer.getMinMigrationIntervalMs(),
+            loadBalanceMaxTargetQps);
         hotSpotDetectorIntervalMs = parseLongProperty(config, "hotspot.detector.interval.ms", 10_000L);
         long hotSpotReadThreshold = parseLongProperty(config, "hotspot.read.threshold.per.interval", 200L);
         long hotSpotWriteThreshold = parseLongProperty(config, "hotspot.write.threshold.per.interval", 100L);
@@ -237,6 +250,7 @@ public class MasterMain {
         recoveryCoordinator.start();
 
         monitoringService = new MonitoringService(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
+        monitoringService.setLoadBalanceRequestTargetQps(loadBalanceMaxTargetQps);
         replicaMonitor.registerCallback(monitoringService.replicaEventCallback());
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
