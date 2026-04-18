@@ -4,6 +4,7 @@
 # Log files
 *.log
 logs/
+docs/
 
 # Package files
 *.jar
@@ -89,10 +90,3 @@ surefire-reports/
 *.exec
 *.ec
 jacoco.exec
-
-# Documentation
-claude.md
-introduction.md
-
-# Server Properties
-regionserver/src/main/resources/*.properties

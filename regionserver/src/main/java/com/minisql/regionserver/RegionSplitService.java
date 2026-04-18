@@ -226,7 +226,7 @@ public class RegionSplitService {
     /**
      * 分裂结果
      */
-    private List<byte[]> sampleDistinctRowKeys(MySQLRegionStorage storage,
+    private List<byte[]> sampleDistinctRowKeys(RegionStorage storage,
                                                byte[] startKey,
                                                byte[] endKey,
                                                int sampleLimit) {
@@ -313,13 +313,13 @@ public class RegionSplitService {
         return true;
     }
 
-    private void cleanupSplitStorage(String regionId, MySQLRegionStorage storage) {
+    private void cleanupSplitStorage(String regionId, RegionStorage storage) {
         if (storage == null) {
             return;
         }
 
         try {
-            storage.dropTable();
+            storage.dropData();
         } catch (Exception e) {
             logger.warn("Failed to drop split temp table for region {}: {}", regionId, e.getMessage());
         }

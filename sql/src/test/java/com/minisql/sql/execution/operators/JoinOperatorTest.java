@@ -5,17 +5,23 @@ import com.minisql.sql.execution.QueryPlan;
 import com.minisql.sql.execution.Row;
 import org.junit.jupiter.api.Test;
 
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
+@DisplayName("JoinOperator 单元测试")
 class JoinOperatorTest {
 
+    // ---- 原有测试 ----
+
     @Test
+    @DisplayName("INNER JOIN EQUALS: hasMore 不消耗首行，连接结果正确")
     void hasMoreDoesNotConsumeFirstRow() throws IOException {
         JoinOperator operator = new JoinOperator(
             new MockOperator(List.of(
@@ -43,12 +49,135 @@ class JoinOperatorTest {
         assertFalse(operator.hasMore());
     }
 
+    // ---- 补充测试 ----
+
+    @Test
+    @DisplayName("INNER JOIN 无匹配行返回空")
+    void innerJoinNoMatch() throws IOException {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(List.of(
+                new Row(new String[] {"id"}, new Object[] {1})
+            )),
+            new MockOperator(List.of(
+                new Row(new String[] {"user_id"}, new Object[] {99})
+            )),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        operator.open();
+        assertFalse(operator.hasMore());
+    }
+
+    @Test
+    @DisplayName("INNER JOIN 左表为空返回空")
+    void innerJoinEmptyLeft() throws IOException {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(Collections.emptyList(), new String[] {"id"}),
+            new MockOperator(List.of(
+                new Row(new String[] {"user_id"}, new Object[] {1})
+            ), new String[] {"user_id"}),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        operator.open();
+        assertFalse(operator.hasMore());
+    }
+
+    @Test
+    @DisplayName("INNER JOIN 右表为空返回空")
+    void innerJoinEmptyRight() throws IOException {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(List.of(
+                new Row(new String[] {"id"}, new Object[] {1})
+            ), new String[] {"id"}),
+            new MockOperator(Collections.emptyList(), new String[] {"user_id"}),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        operator.open();
+        assertFalse(operator.hasMore());
+    }
+
+    @Test
+    @DisplayName("INNER JOIN 一对多连接")
+    void innerJoinOneToMany() throws IOException {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(List.of(
+                new Row(new String[] {"id", "name"}, new Object[] {1, "alice"})
+            )),
+            new MockOperator(List.of(
+                new Row(new String[] {"user_id", "city"}, new Object[] {1, "shanghai"}),
+                new Row(new String[] {"user_id", "city"}, new Object[] {1, "beijing"})
+            )),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        operator.open();
+        assertTrue(operator.hasMore());
+        operator.nextRow();
+        assertTrue(operator.hasMore());
+        operator.nextRow();
+        assertFalse(operator.hasMore());
+    }
+
+    @Test
+    @DisplayName("getOutputColumns 包含左右表所有列")
+    void getOutputColumns() {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(List.of(new Row(new String[] {"id", "name"}, new Object[] {1, "a"}))),
+            new MockOperator(List.of(new Row(new String[] {"user_id", "city"}, new Object[] {1, "b"}))),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        String[] cols = operator.getOutputColumns();
+        assertEquals(4, cols.length);
+        assertEquals("id", cols[0]);
+        assertEquals("name", cols[1]);
+        assertEquals("user_id", cols[2]);
+        assertEquals("city", cols[3]);
+    }
+
+    @Test
+    @DisplayName("close 和 reset 生命周期")
+    void closeAndReset() throws IOException {
+        JoinOperator operator = new JoinOperator(
+            new MockOperator(List.of(
+                new Row(new String[] {"id"}, new Object[] {1})
+            ), new String[] {"id"}),
+            new MockOperator(List.of(
+                new Row(new String[] {"user_id"}, new Object[] {1})
+            ), new String[] {"user_id"}),
+            QueryPlan.JoinType.INNER,
+            new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
+        );
+
+        operator.open();
+        assertTrue(operator.hasMore());
+        operator.close();
+
+        // reset 重新打开
+        operator.reset();
+        assertTrue(operator.hasMore());
+    }
+
     private static class MockOperator extends Operator {
         private final List<Row> rows;
+        private final String[] columns;
         private int index;
 
         private MockOperator(List<Row> rows) {
             this.rows = rows;
+            this.columns = rows.isEmpty() ? new String[0] : rows.get(0).getColumns();
+        }
+
+        private MockOperator(List<Row> rows, String[] columns) {
+            this.rows = rows;
+            this.columns = columns;
         }
 
         @Override
@@ -78,7 +207,7 @@ class JoinOperatorTest {
 
         @Override
         public String[] getOutputColumns() {
-            return rows.isEmpty() ? new String[0] : Arrays.copyOf(rows.get(0).getColumns(), rows.get(0).getColumns().length);
+            return columns;
         }
     }
 }
