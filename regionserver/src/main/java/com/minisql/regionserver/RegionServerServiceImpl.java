@@ -432,11 +432,49 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
      * 处理 Region 分裂请求
      */
     @Override
+    public void getSplitKey(RegionServerProto.GetSplitKeyRequest request,
+                            StreamObserver<RegionServerProto.GetSplitKeyResponse> responseObserver) {
+        try {
+            String regionId = request.getRegionId();
+            byte[] splitKey = regionServer.getSplitService().findBestSplitPoint(regionId);
+
+            if (splitKey == null || splitKey.length == 0) {
+                RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                    .setStatus(createErrorStatus("Cannot find suitable split point"))
+                    .build();
+                responseObserver.onNext(response);
+                responseObserver.onCompleted();
+                return;
+            }
+
+            RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                .setStatus(createSuccessStatus())
+                .setSplitKey(com.google.protobuf.ByteString.copyFrom(splitKey))
+                .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+
+            logger.info("Provided split key for region: {}", regionId);
+        } catch (Exception e) {
+            logger.error("Failed to compute split key", e);
+            RegionServerProto.GetSplitKeyResponse response = RegionServerProto.GetSplitKeyResponse.newBuilder()
+                .setStatus(createErrorStatus(e.getMessage()))
+                .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+    }
+
+    /**
+     * 处理 Region 分裂请求
+     */
+    @Override
     public void splitRegion(RegionServerProto.SplitRegionRequest request,
                             StreamObserver<RegionServerProto.SplitRegionResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
             byte[] splitKey = request.getSplitKey().isEmpty() ? null : request.getSplitKey().toByteArray();
+            logger.info("Received split request for region: {} (splitKeyProvided={})", regionId, splitKey != null);
 
             // 如果没有指定分裂点，自动查找
             if (splitKey == null) {
@@ -481,6 +519,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
+            logger.info("Split request handled successfully for region: {}", regionId);
 
         } catch (Exception e) {
             RegionServerProto.SplitRegionResponse response = RegionServerProto.SplitRegionResponse.newBuilder()
@@ -615,6 +654,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
+            logger.error("Failed to start migration for region {}", request.getRegionId(), e);
             RegionServerProto.MigrateResponse response = RegionServerProto.MigrateResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build();
@@ -643,6 +683,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
+            logger.error("Failed to finalize migration for region {}", regionId, e);
             regionServer.getRegionManager().unblockWrites(regionId);
             RegionServerProto.FinalizeMigrationResponse response = RegionServerProto.FinalizeMigrationResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
@@ -1142,7 +1183,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                     batch.add(convertToProto(kv));
 
                     if (batch.size() >= batchSize) {
-                        sendBatch(stub, regionId, batch);
+                        sendSnapshotBatch(stub, regionId, batch);
                         totalSent += batch.size();
                         batch.clear();
                     }
@@ -1150,7 +1191,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
                 // 发送剩余数据
                 if (!batch.isEmpty()) {
-                    sendBatch(stub, regionId, batch);
+                    sendSnapshotBatch(stub, regionId, batch);
                     totalSent += batch.size();
                 }
 
@@ -1168,16 +1209,21 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     /**
      * 发送批量数据
      */
-    private void sendBatch(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
-                          String regionId, List<CommonProto.KeyValue> batch) {
-        RegionServerProto.PutRequest request = RegionServerProto.PutRequest.newBuilder()
+    private void sendSnapshotBatch(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
+                                   String regionId, List<CommonProto.KeyValue> batch) {
+        RegionServerProto.LogEntry snapshotEntry = RegionServerProto.LogEntry.newBuilder()
+            .setSequenceId(0L)
+            .setTimestamp(System.currentTimeMillis())
+            .addAllMutations(batch)
+            .build();
+        RegionServerProto.ReplicateRequest request = RegionServerProto.ReplicateRequest.newBuilder()
             .setRegionId(regionId)
-            .addAllKeyValues(batch)
+            .addEntries(snapshotEntry)
             .build();
 
-        RegionServerProto.PutResponse response = stub.put(request);
+        RegionServerProto.ReplicateResponse response = stub.replicate(request);
         if (!response.getStatus().getSuccess()) {
-            throw new RuntimeException("Failed to send batch: " + response.getStatus().getMessage());
+            throw new RuntimeException("Failed to send snapshot batch: " + response.getStatus().getMessage());
         }
     }
 

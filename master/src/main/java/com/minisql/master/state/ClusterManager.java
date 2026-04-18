@@ -98,6 +98,13 @@ public class ClusterManager {
         }
     }
 
+    public void removeRegionLoad(ServerId serverId, String regionId) {
+        ServerInfo info = activeServers.get(serverKey(serverId));
+        if (info != null) {
+            info.removeRegionLoad(regionId);
+        }
+    }
+
     /**
      * 更新服务器指标
      */

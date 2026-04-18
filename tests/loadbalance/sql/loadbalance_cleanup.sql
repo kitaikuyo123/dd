@@ -1,0 +1,21 @@
+-- Cleanup skew test tables
+DROP TABLE lb_skew_01;
+DROP TABLE lb_skew_02;
+DROP TABLE lb_skew_03;
+DROP TABLE lb_skew_04;
+DROP TABLE lb_skew_05;
+DROP TABLE lb_skew_06;
+DROP TABLE lb_skew_07;
+DROP TABLE lb_skew_08;
+DROP TABLE lb_skew_09;
+DROP TABLE lb_skew_10;
+DROP TABLE lb_skew_11;
+DROP TABLE lb_skew_12;
+DROP TABLE lb_skew_13;
+DROP TABLE lb_skew_14;
+DROP TABLE lb_skew_15;
+DROP TABLE lb_skew_16;
+DROP TABLE lb_skew_17;
+DROP TABLE lb_skew_18;
+DROP TABLE lb_skew_19;
+DROP TABLE lb_skew_20;

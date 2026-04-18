@@ -249,7 +249,7 @@ createApp({
       { key: "serverId", label: "Server", render: row => row.serverId || "-" },
       { key: "lastHeartbeat", label: "Heartbeat", render: row => formatTime(row.lastHeartbeat) },
       { key: "cpuUsage", label: "CPU", render: row => Number(row.cpuUsage || 0).toFixed(2) },
-      { key: "memoryUsage", label: "Memory", render: row => `${(Number(row.memoryUsage || 0) * 100).toFixed(1)}%` },
+      { key: "memoryUsage", label: "Memory", render: row => `${Number(row.memoryUsage || 0).toFixed(1)}%` },
       { key: "regionCount", label: "Regions", render: row => formatNumber(row.regionCount) },
       { key: "readRequests", label: "Reads", render: row => formatNumber(row.readRequests) },
       { key: "writeRequests", label: "Writes", render: row => formatNumber(row.writeRequests) },

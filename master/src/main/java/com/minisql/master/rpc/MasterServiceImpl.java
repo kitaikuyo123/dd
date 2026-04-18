@@ -35,6 +35,9 @@ import java.util.stream.Collectors;
 public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private static final Logger logger = LoggerFactory.getLogger(MasterServiceImpl.class);
+    private static final long DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS = 10_000L;
+    private static final long DEFAULT_LOAD_BALANCE_INTERVAL_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final boolean DEFAULT_LOAD_BALANCE_ENABLED = true;
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -59,6 +62,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private final Map<String, Long> regionSplitCooldownUntilMs = new ConcurrentHashMap<>();
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
+    private final long hotSpotDetectorIntervalMs;
+    private final boolean loadBalanceEnabled;
+    private final long loadBalanceIntervalMs;
 
     // Master 状态
     private final String clusterId;
@@ -74,7 +80,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              ReplicaLifecycleManager lifecycleManager,
                              Properties config) {
         this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
-            failoverCoordinator, recoveryCoordinator, lifecycleManager, new GrpcRegionServerCommandClient(clusterManager), config);
+            failoverCoordinator, recoveryCoordinator, lifecycleManager,
+            new GrpcRegionServerCommandClient(clusterManager),
+            config);
     }
 
     public MasterServiceImpl(ClusterManager clusterManager,
@@ -86,6 +94,46 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                              RecoveryCoordinator recoveryCoordinator,
                              ReplicaLifecycleManager lifecycleManager,
                              RegionServerCommandClient commandClient,
+                             Properties config) {
+        this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
+            failoverCoordinator, recoveryCoordinator, lifecycleManager, commandClient,
+            DEFAULT_HOTSPOT_DETECTOR_INTERVAL_MS,
+            null,
+            parseBooleanProperty(config, "load.balance.enabled", DEFAULT_LOAD_BALANCE_ENABLED),
+            parseLongProperty(config, "load.balance.interval.ms", DEFAULT_LOAD_BALANCE_INTERVAL_MS),
+            config);
+    }
+
+    public MasterServiceImpl(ClusterManager clusterManager,
+                             MetadataManager metadataManager,
+                             LoadBalancer loadBalancer,
+                             ReplicationCoordinator replicationCoordinator,
+                             ReplicaMonitor replicaMonitor,
+                             FailoverCoordinator failoverCoordinator,
+                             RecoveryCoordinator recoveryCoordinator,
+                             ReplicaLifecycleManager lifecycleManager,
+                             RegionServerCommandClient commandClient,
+                             long hotSpotDetectorIntervalMs,
+                             HotSpotCoordinator.HotSpotSettings hotSpotSettings) {
+        this(clusterManager, metadataManager, loadBalancer, replicationCoordinator, replicaMonitor,
+            failoverCoordinator, recoveryCoordinator, lifecycleManager, commandClient,
+            hotSpotDetectorIntervalMs, hotSpotSettings,
+            DEFAULT_LOAD_BALANCE_ENABLED, DEFAULT_LOAD_BALANCE_INTERVAL_MS, null);
+    }
+
+    public MasterServiceImpl(ClusterManager clusterManager,
+                             MetadataManager metadataManager,
+                             LoadBalancer loadBalancer,
+                             ReplicationCoordinator replicationCoordinator,
+                             ReplicaMonitor replicaMonitor,
+                             FailoverCoordinator failoverCoordinator,
+                             RecoveryCoordinator recoveryCoordinator,
+                             ReplicaLifecycleManager lifecycleManager,
+                             RegionServerCommandClient commandClient,
+                             long hotSpotDetectorIntervalMs,
+                             HotSpotCoordinator.HotSpotSettings hotSpotSettings,
+                             boolean loadBalanceEnabled,
+                             long loadBalanceIntervalMs,
                              Properties config) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
@@ -100,41 +148,43 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             clusterManager, metadataManager, commandClient, lifecycleManager);
         this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
+        this.splitCoordinator.setRecoveryCoordinator(recoveryCoordinator);
+        this.splitCoordinator.setReplicationCoordinator(replicationCoordinator);
+        this.splitCoordinator.setReplicaMonitor(replicaMonitor);
+        this.splitCoordinator.setLifecycleManager(lifecycleManager);
+        this.mergeCoordinator.setRecoveryCoordinator(recoveryCoordinator);
+        this.mergeCoordinator.setReplicationCoordinator(replicationCoordinator);
+        this.mergeCoordinator.setReplicaMonitor(replicaMonitor);
+        this.mergeCoordinator.setLifecycleManager(lifecycleManager);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
-
-        // Apply configurable thresholds from properties
-        if (config != null) {
-            String splitThresholdMb = config.getProperty("region.split.threshold.mb");
-            if (splitThresholdMb != null) {
-                splitCoordinator.setSplitThresholdSize(Long.parseLong(splitThresholdMb) * 1024 * 1024);
-            }
-            String mergeThresholdMb = config.getProperty("region.merge.threshold.mb");
-            if (mergeThresholdMb != null) {
-                mergeCoordinator.setMergeThresholdSize(Long.parseLong(mergeThresholdMb) * 1024 * 1024);
-            }
-            String maxMergeGb = config.getProperty("region.merge.max.size.gb");
-            if (maxMergeGb != null) {
-                mergeCoordinator.setMaxMergeSize(Long.parseLong(maxMergeGb) * 1024 * 1024 * 1024);
-            }
-            String minMergeMb = config.getProperty("region.merge.min.size.mb");
-            if (minMergeMb != null) {
-                mergeCoordinator.setMinMergeSize(Long.parseLong(minMergeMb) * 1024 * 1024);
-            }
-            String mergeCooldownMs = config.getProperty("region.merge.cooldown.ms");
-            if (mergeCooldownMs != null) {
-                mergeCoordinator.setMergeCooldownMs(Long.parseLong(mergeCooldownMs));
-            }
+        if (hotSpotSettings != null) {
+            this.hotSpotCoordinator.configure(hotSpotSettings);
         }
+        this.hotSpotDetectorIntervalMs = Math.max(1_000L, hotSpotDetectorIntervalMs);
+        this.loadBalanceEnabled = loadBalanceEnabled;
+        this.loadBalanceIntervalMs = Math.max(1_000L, loadBalanceIntervalMs);
         this.serverFailureRecoveryExecutor = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "ServerFailure-Recovery");
             t.setDaemon(true);
             return t;
         });
+        applyCoordinatorThresholds(config);
         this.clusterId = UUID.randomUUID().toString();
+        logger.info(
+            "HotSpot detector config applied: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
+            this.hotSpotDetectorIntervalMs,
+            this.hotSpotCoordinator.getReadThresholdPerInterval(),
+            this.hotSpotCoordinator.getWriteThresholdPerInterval(),
+            this.hotSpotCoordinator.getGrowthThreshold(),
+            this.hotSpotCoordinator.getTargetReadReplicaCount(),
+            this.hotSpotCoordinator.getCooldownMs());
+        logger.info("LoadBalance config applied: enabled={} interval={}ms",
+            this.loadBalanceEnabled, this.loadBalanceIntervalMs);
 
         // 启动自动合并检查
         mergeCoordinator.start();
+        splitCoordinator.start();
 
         // 启动定期调度器
         startLoadBalanceScheduler();
@@ -143,8 +193,90 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         startServerFailureCheckScheduler();
     }
 
+    private static boolean parseBooleanProperty(Properties config, String key, boolean defaultValue) {
+        if (config == null) {
+            return defaultValue;
+        }
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return defaultValue;
+        }
+        String normalized = rawValue.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("true".equals(normalized) || "false".equals(normalized)) {
+            return Boolean.parseBoolean(normalized);
+        }
+        logger.warn("Ignoring invalid boolean property {}={}, fallback to {}", key, rawValue, defaultValue);
+        return defaultValue;
+    }
+
+    private static long parseLongProperty(Properties config, String key, long defaultValue) {
+        if (config == null) {
+            return defaultValue;
+        }
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(rawValue.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Ignoring invalid long property {}={}, fallback to {}", key, rawValue, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    private void applyCoordinatorThresholds(Properties config) {
+        if (config == null) {
+            return;
+        }
+
+        Long splitThresholdMb = parseLongProperty(config, "region.split.threshold.mb");
+        if (splitThresholdMb != null) {
+            splitCoordinator.setSplitThresholdSize(splitThresholdMb * 1024 * 1024);
+        }
+
+        Long splitTableCooldownMs = parseLongProperty(config, "region.split.table.cooldown.ms");
+        if (splitTableCooldownMs != null) {
+            splitCoordinator.setTableSplitCooldownMs(splitTableCooldownMs);
+        }
+
+        Long mergeThresholdMb = parseLongProperty(config, "region.merge.threshold.mb");
+        if (mergeThresholdMb != null) {
+            mergeCoordinator.setMergeThresholdSize(mergeThresholdMb * 1024 * 1024);
+        }
+
+        Long maxMergeGb = parseLongProperty(config, "region.merge.max.size.gb");
+        if (maxMergeGb != null) {
+            mergeCoordinator.setMaxMergeSize(maxMergeGb * 1024 * 1024 * 1024);
+        }
+
+        Long minMergeMb = parseLongProperty(config, "region.merge.min.size.mb");
+        if (minMergeMb != null) {
+            mergeCoordinator.setMinMergeSize(minMergeMb * 1024 * 1024);
+        }
+
+        Long mergeCooldownMs = parseLongProperty(config, "region.merge.cooldown.ms");
+        if (mergeCooldownMs != null) {
+            mergeCoordinator.setMergeCooldownMs(mergeCooldownMs);
+        }
+    }
+
+    private Long parseLongProperty(Properties config, String key) {
+        String rawValue = config.getProperty(key);
+        if (rawValue == null || rawValue.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(rawValue.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Ignoring invalid long property {}={}", key, rawValue);
+            return null;
+        }
+    }
+
     public void setMonitoringService(MonitoringService monitoringService) {
         this.monitoringService = monitoringService;
+        this.monitoringService.setHotSpotCoordinator(hotSpotCoordinator);
         this.migrationCoordinator.setMonitoringService(monitoringService);
         this.splitCoordinator.setMonitoringService(monitoringService);
         this.mergeCoordinator.setMonitoringService(monitoringService);
@@ -165,6 +297,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
      * 启动定期负载均衡调度器
      */
     private void startLoadBalanceScheduler() {
+        if (!loadBalanceEnabled) {
+            logger.info("LoadBalance scheduler disabled by configuration");
+            return;
+        }
         balanceScheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "LoadBalance-Scheduler");
             t.setDaemon(true);
@@ -174,10 +310,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         // 每 5 分钟检查一次负载平衡
         balanceScheduler.scheduleAtFixedRate(
             this::runLoadBalance,
-            5, 5, TimeUnit.MINUTES
+            loadBalanceIntervalMs, loadBalanceIntervalMs, TimeUnit.MILLISECONDS
         );
 
-        logger.info("LoadBalance scheduler started, interval: 5 minutes");
+        logger.info("LoadBalance scheduler started, interval: {} ms", loadBalanceIntervalMs);
     }
 
     /**
@@ -191,8 +327,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         });
         hotSpotScheduler.scheduleAtFixedRate(
             this::checkHotSpots,
-            10, 10, TimeUnit.SECONDS
+            hotSpotDetectorIntervalMs, hotSpotDetectorIntervalMs, TimeUnit.MILLISECONDS
         );
+        logger.info("HotSpot detector scheduler started, interval: {} ms", hotSpotDetectorIntervalMs);
     }
 
     /**
@@ -310,6 +447,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             serverFailureCheckScheduler.shutdownNow();
         }
         serverFailureRecoveryExecutor.shutdownNow();
+        splitCoordinator.stop();
         mergeCoordinator.stop();
     }
 
@@ -385,6 +523,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 return;
             }
 
+            pruneFailedReplicaReferences(regionId, failedServer, region, primaryFailed);
             clusterManager.updateRegionState(regionId, Region.State.OFFLINE);
             if (primaryFailed) {
                 lifecycleManager.transition(regionId, failedServer,
@@ -414,6 +553,25 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             logger.warn("Failed to recover region {}: {}", regionId, e.getMessage());
         } finally {
             recoveringRegions.remove(regionId);
+        }
+    }
+
+    private void pruneFailedReplicaReferences(String regionId, ServerId failedServer, Region region, boolean primaryFailed) {
+        if (failedServer == null || region == null) {
+            return;
+        }
+
+        clusterManager.removeReplica(regionId, failedServer);
+        replicaMonitor.removeReplica(regionId, failedServer);
+        region.removeReplica(failedServer);
+
+        if (primaryFailed && failedServer.equals(region.getPrimary())) {
+            region.setPrimary(null);
+            return;
+        }
+
+        if (region.getPrimary() != null) {
+            metadataManager.registerRegionForTable(region, region.getPrimary());
         }
     }
 
@@ -553,15 +711,20 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             // for server liveness and failover triggers.
             if (request.getRegionLoadsCount() > 0) {
                 for (MasterProto.RegionLoad load : request.getRegionLoadsList()) {
-                    clusterManager.updateRegionLoad(serverId, load.getRegionId(),
-                        convertRegionLoad(load));
-                    hotSpotCoordinator.recordRegionLoad(load.getRegionId(), convertRegionLoad(load));
+                    String regionId = load.getRegionId();
+                    if (!isExpectedReporter(regionId, serverId)) {
+                        clusterManager.removeRegionLoad(serverId, regionId);
+                        logger.debug("Ignore stale region load report: region={} reporter={}", regionId, serverId);
+                        continue;
+                    }
+                    clusterManager.updateRegionLoad(serverId, regionId, convertRegionLoad(load));
+                    hotSpotCoordinator.recordRegionLoad(regionId, serverId, convertRegionLoad(load));
 
                     // 更新副本监控心跳
-                    ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, load.getRegionId());
-                    replicaMonitor.updateHeartbeat(load.getRegionId(), serverId, lagSnapshot.lagInEntries);
+                    ReplicationLagSnapshot lagSnapshot = fetchReplicationLag(serverId, regionId);
+                    replicaMonitor.updateHeartbeat(regionId, serverId, lagSnapshot.lagInEntries);
                     clusterManager.updateReplicaSequenceId(
-                        load.getRegionId(),
+                        regionId,
                         serverId,
                         lagSnapshot.lastAppliedSequenceId
                     );
@@ -809,22 +972,21 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         throw new RuntimeException("Failed to open region on server: " + primaryServer);
                     }
 
-                    // 创建副本组（如果选择了多个服务器）
-                    if (selectedServers.size() > 1) {
-                        replicationCoordinator.createReplicaGroup(region, selectedServers);
-                        logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
-                            region.getRegionId(), selectedServers.size());
-                        if (selectedServers.size() < replicationFactor) {
-                            logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
-                                region.getRegionId(), selectedServers.size(), replicationFactor);
-                        }
-                        for (int i = 1; i < selectedServers.size(); i++) {
-                            ServerId replicaServer = selectedServers.get(i);
-                            logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
-                                replicaServer, region.getRegionId());
-                            recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
-                        }
-                    } else if (selectedServers.size() == 1) {
+                    // 无论当前有多少可用节点，都先创建副本组，避免后续恢复阶段找不到 group。
+                    replicationCoordinator.createReplicaGroup(region, selectedServers);
+                    logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
+                        region.getRegionId(), selectedServers.size());
+                    if (selectedServers.size() < replicationFactor) {
+                        logger.warn("[CREATE TABLE] WARNING: Region {} initialized with {} replicas, below target replication factor {}",
+                            region.getRegionId(), selectedServers.size(), replicationFactor);
+                    }
+                    for (int i = 1; i < selectedServers.size(); i++) {
+                        ServerId replicaServer = selectedServers.get(i);
+                        logger.info("[CREATE TABLE] Bootstrapping replica {} for region {}",
+                            replicaServer, region.getRegionId());
+                        recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
+                    }
+                    if (selectedServers.size() == 1) {
                         logger.warn("[CREATE TABLE] WARNING: Region {} initialized with primary only; no secondary replica available at create time",
                             region.getRegionId());
                     }
@@ -1205,6 +1367,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             clusterManager.promoteReplicaToPrimary(regionId, newPrimary);
             clusterManager.addReplica(regionId, newPrimary);
+            if (replicationCoordinator != null) {
+                try {
+                    replicationCoordinator.promoteToPrimary(regionId, newPrimary);
+                } catch (Exception e) {
+                    logger.warn("Failed to sync replication primary for region {} to {} during reportPrimaryChange: {}",
+                        regionId, newPrimary, e.getMessage());
+                }
+            }
             region.setPrimary(newPrimary);
             if (!region.getReplicas().contains(newPrimary)) {
                 region.addReplica(newPrimary);
@@ -1340,6 +1510,36 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         } catch (Exception e) {
             logger.warn("Failed to release distributed lock: {}", e.getMessage(), e);
         }
+    }
+
+    private boolean isExpectedReporter(String regionId, ServerId reporter) {
+        if (regionId == null || regionId.isBlank() || reporter == null) {
+            return false;
+        }
+
+        Region region = metadataManager.getRegion(regionId);
+        if (region == null) {
+            return false;
+        }
+
+        ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+        if (sameEndpoint(primary, reporter)) {
+            return true;
+        }
+
+        for (ServerId replica : region.getReplicas()) {
+            if (sameEndpoint(replica, reporter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean sameEndpoint(ServerId left, ServerId right) {
+        if (left == null || right == null) {
+            return false;
+        }
+        return left.getPort() == right.getPort() && left.getHost().equals(right.getHost());
     }
 
     private ServerId convertServerId(CommonProto.ServerId proto) {

@@ -7,8 +7,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Region split service.
@@ -16,6 +20,7 @@ import java.util.UUID;
 public class RegionSplitService {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionSplitService.class);
+    private static final int MAX_SPLIT_KEY_SAMPLE_SIZE = 4096;
 
     private final RegionManager regionManager;
 
@@ -75,6 +80,24 @@ public class RegionSplitService {
             throw new IOException("Region not found: " + regionId);
         }
 
+        int sampleLimit = MAX_SPLIT_KEY_SAMPLE_SIZE;
+        if (sampleLimit > 0) {
+            List<byte[]> rowKeySamples = sampleDistinctRowKeys(
+                storage, region.getStartKey(), region.getEndKey(), sampleLimit);
+            if (rowKeySamples.size() < 2) {
+                logger.warn("Split key unavailable for region {}: distinctRowKeys={}", regionId, rowKeySamples.size());
+                return null;
+            }
+
+            rowKeySamples.sort(BytesUtil::compareTo);
+            byte[] splitKey = selectMedianValidSplitKey(rowKeySamples, region);
+            if (splitKey == null) {
+                logger.warn("Split key unavailable for region {}: no valid candidate in range", regionId);
+                return null;
+            }
+            return Arrays.copyOf(splitKey, splitKey.length);
+        }
+
         // 策略：中点分裂（简单均匀）
         byte[] start = region.getStartKey();
         byte[] end = region.getEndKey();
@@ -109,8 +132,18 @@ public class RegionSplitService {
         if (oldRegion == null) {
             throw new IOException("Region not found: " + regionId);
         }
+        if (splitKey == null || splitKey.length == 0) {
+            splitKey = findBestSplitPoint(regionId);
+        }
+        if (!isValidSplitKey(oldRegion, splitKey)) {
+            throw new IllegalStateException(
+                "Invalid split key for region " + regionId + ": " + BytesUtil.bytesToHex(splitKey));
+        }
 
         logger.info("Splitting region: {} at key: {}", regionId, BytesUtil.bytesToHex(splitKey));
+        boolean parentRegionClosed = false;
+        regionManager.blockWrites(regionId);
+        try {
 
         // 1. 创建两个新 Region 元数据
         String leftRegionId = oldRegion.getTableName() + "_l_" + UUID.randomUUID().toString().substring(0, 6);
@@ -155,10 +188,19 @@ public class RegionSplitService {
             rightCount++;
         }
         logger.info("Migrated {} entries to right region", rightCount);
+        if (leftCount == 0 || rightCount == 0) {
+            cleanupSplitStorage(leftRegionId, leftStorage);
+            cleanupSplitStorage(rightRegionId, rightStorage);
+            throw new IllegalStateException(String.format(
+                "Split aborted for region %s: unbalanced split key %s (leftEntries=%d, rightEntries=%d). " +
+                    "Likely a single-key or extremely skewed hotspot that split cannot mitigate.",
+                regionId, BytesUtil.bytesToHex(splitKey), leftCount, rightCount));
+        }
 
         // 5. 关闭旧 Region（不删除表，用于回滚）
         logger.info("Closing old region: {}", regionId);
         regionManager.closeRegion(regionId, true);
+        parentRegionClosed = true;
 
         // 6. 注册并打开新 Region
         regionManager.registerOpenedRegion(leftRegion, leftStorage);
@@ -173,11 +215,122 @@ public class RegionSplitService {
         result.setSplitKey(splitKey);
 
         return result;
+        } finally {
+            // Parent region remains open when split fails before closeRegion.
+            if (!parentRegionClosed && regionManager.getRegion(regionId) != null) {
+                regionManager.unblockWrites(regionId);
+            }
+        }
     }
 
     /**
      * 分裂结果
      */
+    private List<byte[]> sampleDistinctRowKeys(MySQLRegionStorage storage,
+                                               byte[] startKey,
+                                               byte[] endKey,
+                                               int sampleLimit) {
+        List<byte[]> samples = new ArrayList<>(Math.max(16, sampleLimit));
+        long distinctCount = 0L;
+        byte[] lastRowKey = null;
+
+        Iterator<KeyValue> iterator = storage.scan(startKey, endKey);
+        while (iterator.hasNext()) {
+            KeyValue kv = iterator.next();
+            byte[] rowKey = kv.getRowKey();
+            if (rowKey == null) {
+                continue;
+            }
+            if (lastRowKey != null && BytesUtil.equals(lastRowKey, rowKey)) {
+                continue;
+            }
+
+            lastRowKey = rowKey;
+            byte[] rowKeyCopy = Arrays.copyOf(rowKey, rowKey.length);
+            distinctCount++;
+
+            if (samples.size() < sampleLimit) {
+                samples.add(rowKeyCopy);
+            } else {
+                long replacementIndex = ThreadLocalRandom.current().nextLong(distinctCount);
+                if (replacementIndex < sampleLimit) {
+                    samples.set((int) replacementIndex, rowKeyCopy);
+                }
+            }
+        }
+
+        logger.info("Collected split-key samples: distinctRows={}, sampledRows={}", distinctCount, samples.size());
+        return samples;
+    }
+
+    private byte[] selectMedianValidSplitKey(List<byte[]> sortedRowKeys, Region region) {
+        if (sortedRowKeys == null || sortedRowKeys.size() < 2) {
+            return null;
+        }
+
+        int mid = sortedRowKeys.size() / 2;
+        for (int offset = 0; offset < sortedRowKeys.size(); offset++) {
+            int leftIndex = mid - offset;
+            if (isCandidateIndexValid(leftIndex, sortedRowKeys.size())) {
+                byte[] candidate = sortedRowKeys.get(leftIndex);
+                if (isValidSplitKey(region, candidate)) {
+                    return candidate;
+                }
+            }
+
+            int rightIndex = mid + offset;
+            if (rightIndex != leftIndex && isCandidateIndexValid(rightIndex, sortedRowKeys.size())) {
+                byte[] candidate = sortedRowKeys.get(rightIndex);
+                if (isValidSplitKey(region, candidate)) {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private boolean isCandidateIndexValid(int index, int size) {
+        // Keep at least one row-key on each side.
+        return index > 0 && index < size - 1;
+    }
+
+    private boolean isValidSplitKey(Region region, byte[] splitKey) {
+        if (region == null || splitKey == null || splitKey.length == 0) {
+            return false;
+        }
+
+        byte[] startKey = region.getStartKey();
+        if (startKey != null && startKey.length > 0 && BytesUtil.compareTo(splitKey, startKey) <= 0) {
+            return false;
+        }
+
+        byte[] endKey = region.getEndKey();
+        if (endKey != null && endKey.length > 0 && BytesUtil.compareTo(splitKey, endKey) >= 0) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void cleanupSplitStorage(String regionId, MySQLRegionStorage storage) {
+        if (storage == null) {
+            return;
+        }
+
+        try {
+            storage.dropTable();
+        } catch (Exception e) {
+            logger.warn("Failed to drop split temp table for region {}: {}", regionId, e.getMessage());
+        }
+
+        try {
+            storage.close();
+        } catch (Exception e) {
+            logger.warn("Failed to close split temp storage for region {}: {}", regionId, e.getMessage());
+        }
+    }
+
     public static class RegionSplitResult {
         private String parentRegionId;
         private com.minisql.common.model.Region leftRegion;

@@ -5,10 +5,14 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.*;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.master.monitoring.MonitoringService;
+import com.minisql.master.recover.RecoveryCoordinator;
 import com.minisql.master.rpc.GrpcRegionServerCommandClient;
 import com.minisql.master.rpc.RegionServerCommandClient;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
+import com.minisql.master.state.ReplicaLifecycleManager;
+import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
@@ -27,13 +31,18 @@ public class RegionSplitCoordinator {
 
     // 分裂阈值：单个 Region 最大大小（默认 10GB）
     private static final long DEFAULT_splitThresholdSize = 10L * 1024 * 1024 * 1024;
+    private static final long DEFAULT_TABLE_SPLIT_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(2);
     private volatile long splitThresholdSize = DEFAULT_splitThresholdSize;
+    private volatile long tableSplitCooldownMs = DEFAULT_TABLE_SPLIT_COOLDOWN_MS;
 
     // 待分裂的 Region 队列
     private final BlockingQueue<SplitTask> splitQueue = new LinkedBlockingQueue<>();
 
     // 正在分裂的 Region（防止重复分裂）
     private final Set<String> splittingRegions = ConcurrentHashMap.newKeySet();
+    // 已加入分裂队列但尚未开始执行的 Region（防止重复入队）
+    private final Set<String> queuedRegions = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> tableSplitCooldownUntilMs = new ConcurrentHashMap<>();
 
     // 分裂线程池
     private final ExecutorService splitExecutor;
@@ -46,6 +55,10 @@ public class RegionSplitCoordinator {
     private MonitoringService monitoringService;
     private volatile ZkClient zkClient;
     private RegionMergeCoordinator mergeCoordinator;
+    private volatile RecoveryCoordinator recoveryCoordinator;
+    private volatile ReplicationCoordinator replicationCoordinator;
+    private volatile ReplicaMonitor replicaMonitor;
+    private volatile ReplicaLifecycleManager lifecycleManager;
 
     private volatile boolean running = false;
 
@@ -84,8 +97,28 @@ public class RegionSplitCoordinator {
         this.mergeCoordinator = mergeCoordinator;
     }
 
+    public void setRecoveryCoordinator(RecoveryCoordinator recoveryCoordinator) {
+        this.recoveryCoordinator = recoveryCoordinator;
+    }
+
+    public void setReplicationCoordinator(ReplicationCoordinator replicationCoordinator) {
+        this.replicationCoordinator = replicationCoordinator;
+    }
+
+    public void setReplicaMonitor(ReplicaMonitor replicaMonitor) {
+        this.replicaMonitor = replicaMonitor;
+    }
+
+    public void setLifecycleManager(ReplicaLifecycleManager lifecycleManager) {
+        this.lifecycleManager = lifecycleManager;
+    }
+
     public void setSplitThresholdSize(long splitThresholdSize) {
         this.splitThresholdSize = splitThresholdSize;
+    }
+
+    public void setTableSplitCooldownMs(long tableSplitCooldownMs) {
+        this.tableSplitCooldownMs = Math.max(0L, tableSplitCooldownMs);
     }
 
     /**
@@ -109,6 +142,9 @@ public class RegionSplitCoordinator {
     public void stop() {
         running = false;
         splitExecutor.shutdown();
+        splitQueue.clear();
+        queuedRegions.clear();
+        tableSplitCooldownUntilMs.clear();
 
         logger.info("RegionSplitCoordinator stopped");
     }
@@ -122,14 +158,37 @@ public class RegionSplitCoordinator {
     }
 
     public boolean scheduleSplit(String regionId, String tableName, ServerId serverId, ClusterManager.RegionLoad load) {
-        if (splittingRegions.contains(regionId)) {
+        if (!running) {
+            logger.warn("RegionSplitCoordinator is not running, reject split schedule for region: {}", regionId);
             return false;
         }
+
+        clearExpiredTableSplitCooldowns();
+        if (isTableInSplitCooldown(tableName)) {
+            long remainingMs = tableSplitCooldownUntilMs.getOrDefault(tableName, 0L) - System.currentTimeMillis();
+            logger.info("Skip split scheduling for region {} in table {} due to table split cooldown (remaining={}ms)",
+                regionId, tableName, Math.max(0L, remainingMs));
+            return false;
+        }
+
+        if (splittingRegions.contains(regionId) || queuedRegions.contains(regionId)) {
+            logger.info("Skip split scheduling for region {} (already splitting or queued)", regionId);
+            return false;
+        }
+
+        if (!queuedRegions.add(regionId)) {
+            logger.info("Skip split scheduling for region {} (queue add race detected)", regionId);
+            return false;
+        }
+
         SplitTask task = new SplitTask(regionId, tableName, serverId, load);
         boolean offered = splitQueue.offer(task);
         if (offered) {
             logger.info("Scheduled split for region: {} (size: {})",
                 regionId, formatSize(load.getStoreFileSize() + load.getMemStoreSize()));
+        } else {
+            queuedRegions.remove(regionId);
+            logger.warn("Failed to enqueue split task for region: {}", regionId);
         }
         return offered;
     }
@@ -142,6 +201,7 @@ public class RegionSplitCoordinator {
             try {
                 SplitTask task = splitQueue.poll(1, TimeUnit.SECONDS);
                 if (task != null) {
+                    queuedRegions.remove(task.getRegionId());
                     executeSplit(task);
                 }
             } catch (InterruptedException e) {
@@ -173,7 +233,7 @@ public class RegionSplitCoordinator {
             // 1. 获取分裂点（从 RegionServer 获取）
             byte[] splitKey = getSplitKeyFromServer(task.getServerId(), regionId);
             if (splitKey == null) {
-                logger.warn("Failed to get split key for region: {}", regionId);
+                logger.warn("Failed to get split key for region: {} (server={})", regionId, task.getServerId());
                 return;
             }
 
@@ -184,7 +244,7 @@ public class RegionSplitCoordinator {
                 "Region split started", null);
             SplitResult result = notifyServerSplitRegion(task.getServerId(), regionId, splitKey);
             if (result == null) {
-                logger.warn("Split failed for region: {}", regionId);
+                logger.warn("Split failed for region: {} (server={})", regionId, task.getServerId());
                 return;
             }
 
@@ -196,13 +256,20 @@ public class RegionSplitCoordinator {
             ServerId rightServer = selectServerForNewRegion(result.getRightRegion());  // 右半部分可能迁移
 
             // 5. 如果右半部分分配到新服务器，执行迁移
+            if (rightServer == null) {
+                rightServer = leftServer;
+            }
             if (!rightServer.equals(leftServer)) {
                 migrateRegion(result.getRightRegion().getRegionId(), leftServer, rightServer);
             }
 
+            ensureReplicaTopology(result.getLeftRegion().getRegionId());
+            ensureReplicaTopology(result.getRightRegion().getRegionId());
+
             logger.info("Split completed for region: {} -> {} (on {}), {} (on {})",
                     regionId, result.getLeftRegion().getRegionId(), leftServer,
                     result.getRightRegion().getRegionId(), rightServer);
+            recordTableSplit(task.getTableName());
             recordEvent("REGION_SPLIT_COMPLETED", "INFO", regionId, task.getServerId(),
                 "Region split completed",
                 result.getLeftRegion().getRegionId() + "," + result.getRightRegion().getRegionId());
@@ -230,6 +297,8 @@ public class RegionSplitCoordinator {
             if (response.getStatus().getSuccess()) {
                 return response.getSplitKey().toByteArray();
             }
+            logger.warn("RegionServer returned failed split key response: region={} server={} message={}",
+                regionId, serverId, response.getStatus().getMessage());
         } catch (Exception e) {
             logger.error("Failed to get split key from server: {}", e.getMessage(), e);
         }
@@ -248,6 +317,8 @@ public class RegionSplitCoordinator {
                         convertProtoToRegion(response.getRightRegion())
                 );
             }
+            logger.warn("RegionServer rejected split request: region={} server={} message={}",
+                regionId, serverId, response.getStatus().getMessage());
         } catch (Exception e) {
             logger.error("Failed to split region on server: {}", e.getMessage(), e);
         }
@@ -259,15 +330,28 @@ public class RegionSplitCoordinator {
      */
     private void updateMetadataAfterSplit(String oldRegionId, ServerId primaryServer, SplitResult result) {
         // 1. 移除旧的 Region
+        Region oldRegion = metadataManager.getRegion(oldRegionId);
+        String tableName = oldRegion != null ? oldRegion.getTableName() : null;
+        cleanupRegionRuntime(oldRegionId, tableName);
         metadataManager.removeRegion(oldRegionId);
-        clusterManager.unassignRegion(oldRegionId);
+        metadataManager.removeRegion(result.getLeftRegion().getRegionId());
+        metadataManager.removeRegion(result.getRightRegion().getRegionId());
 
         // 2. 注册新的 Region
-        metadataManager.registerRegionForTable(result.getLeftRegion(), primaryServer);
-        metadataManager.registerRegionForTable(result.getRightRegion(), primaryServer);
+        registerSplitRegion(result.getLeftRegion(), primaryServer);
+        registerSplitRegion(result.getRightRegion(), primaryServer);
 
         logger.info("ZooKeeper metadata updated for split regions: {} and {}",
             result.getLeftRegion().getRegionId(), result.getRightRegion().getRegionId());
+    }
+
+    private void registerSplitRegion(Region region, ServerId primaryServer) {
+        metadataManager.registerRegionForTable(region, primaryServer);
+        if (primaryServer != null) {
+            clusterManager.assignRegionToServer(region.getRegionId(), primaryServer);
+            clusterManager.addReplica(region.getRegionId(), primaryServer);
+            clusterManager.updateRegionState(region.getRegionId(), Region.State.OPEN);
+        }
     }
 
     /**
@@ -294,12 +378,18 @@ public class RegionSplitCoordinator {
         }
 
         // 2. 先执行命令，再提交 assignment，避免半迁移状态写入元数据
+        region.removeReplica(sourceServer);
+        region.setPrimary(targetServer);
+        region.addReplica(targetServer);
+
         notifyServerCloseRegion(sourceServer, regionId);
         notifyServerOpenRegion(targetServer, region);
         clusterManager.unassignRegion(regionId);
         clusterManager.assignRegionToServer(regionId, targetServer);
-        region.setPrimary(targetServer);
-        region.addReplica(targetServer);
+        clusterManager.removeReplica(regionId, sourceServer);
+        clusterManager.addReplica(regionId, targetServer);
+        clusterManager.removeRegionLoad(sourceServer, regionId);
+        clusterManager.updateRegionState(regionId, Region.State.OPEN);
         metadataManager.registerRegionForTable(region, targetServer);
 
         logger.info("Migration completed for region: {}", regionId);
@@ -399,14 +489,123 @@ public class RegionSplitCoordinator {
         load.setRegionId(regionId);
         load.setStoreFileSize(splitThresholdSize + 1);  // 强制超过阈值触发分裂
 
-        return scheduleSplit(regionId, region.getTableName(), serverId, load);
+        boolean scheduled = scheduleSplit(regionId, region.getTableName(), serverId, load);
+        if (scheduled) {
+            logger.info("Hotspot split request accepted for region: {}", regionId);
+        } else {
+            logger.info("Hotspot split request not scheduled for region: {} (already splitting/queued or coordinator not running)",
+                regionId);
+        }
+        return scheduled;
     }
 
     /**
      * 获取正在分裂的 Region 列表
      */
+    private void recordTableSplit(String tableName) {
+        if (tableName == null || tableName.isBlank() || tableSplitCooldownMs <= 0) {
+            return;
+        }
+        tableSplitCooldownUntilMs.put(tableName, System.currentTimeMillis() + tableSplitCooldownMs);
+    }
+
+    private boolean isTableInSplitCooldown(String tableName) {
+        if (tableName == null || tableName.isBlank() || tableSplitCooldownMs <= 0) {
+            return false;
+        }
+        return tableSplitCooldownUntilMs.getOrDefault(tableName, 0L) > System.currentTimeMillis();
+    }
+
+    private void clearExpiredTableSplitCooldowns() {
+        if (tableSplitCooldownUntilMs.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        tableSplitCooldownUntilMs.entrySet().removeIf(entry -> entry.getValue() <= now);
+    }
+
     public Set<String> getSplittingRegions() {
         return new HashSet<>(splittingRegions);
+    }
+
+    private void ensureReplicaTopology(String regionId) {
+        Region region = metadataManager.getRegion(regionId);
+        if (region == null || region.getPrimary() == null) {
+            return;
+        }
+
+        int targetReplicationFactor = resolveReplicationFactor(region);
+        List<ServerId> selectedServers = selectServersForReplication(region, targetReplicationFactor);
+        if (selectedServers.isEmpty()) {
+            selectedServers.add(region.getPrimary());
+        }
+
+        region.setPrimary(selectedServers.get(0));
+        region.setReplicas(new ArrayList<>(selectedServers));
+        metadataManager.registerRegionForTable(region, region.getPrimary());
+        clusterManager.assignRegionToServer(regionId, region.getPrimary());
+        clusterManager.updateRegionState(regionId, Region.State.OPEN);
+        for (ServerId server : selectedServers) {
+            clusterManager.addReplica(regionId, server);
+        }
+
+        if (replicationCoordinator != null) {
+            replicationCoordinator.removeReplicaGroup(regionId);
+            replicationCoordinator.createReplicaGroup(region, selectedServers);
+        }
+
+        if (recoveryCoordinator != null) {
+            for (int i = 1; i < selectedServers.size(); i++) {
+                recoveryCoordinator.bootstrapReplica(regionId, selectedServers.get(i));
+            }
+        }
+    }
+
+    private List<ServerId> selectServersForReplication(Region region, int replicationFactor) {
+        int normalizedFactor = Math.max(1, replicationFactor);
+        LinkedHashSet<ServerId> selected = new LinkedHashSet<>();
+        if (region.getPrimary() != null) {
+            selected.add(region.getPrimary());
+        }
+        if (region.getReplicas() != null) {
+            selected.addAll(region.getReplicas());
+        }
+
+        List<ClusterManager.ServerInfo> candidates = new ArrayList<>(clusterManager.getActiveServersList());
+        candidates.removeIf(info -> info == null || info.getServerId() == null || selected.contains(info.getServerId()));
+        while (selected.size() < normalizedFactor && !candidates.isEmpty()) {
+            ServerId serverId = loadBalancer.selectServerForRegion(region, candidates);
+            if (serverId == null) {
+                break;
+            }
+            selected.add(serverId);
+            candidates.removeIf(info -> serverId.equals(info.getServerId()));
+        }
+        return new ArrayList<>(selected);
+    }
+
+    private int resolveReplicationFactor(Region region) {
+        com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
+        if (table != null && table.getProperties() != null) {
+            return Math.max(1, table.getProperties().getReplicationFactor());
+        }
+        return 3;
+    }
+
+    private void cleanupRegionRuntime(String regionId, String tableName) {
+        clusterManager.removeRegionMetadata(tableName, regionId);
+        if (replicaMonitor != null) {
+            replicaMonitor.removeRegion(regionId);
+        }
+        if (lifecycleManager != null) {
+            lifecycleManager.removeRegion(regionId);
+        }
+        if (recoveryCoordinator != null) {
+            recoveryCoordinator.clearDesiredReplicaCount(regionId);
+        }
+        if (replicationCoordinator != null) {
+            replicationCoordinator.removeReplicaGroup(regionId);
+        }
     }
 
     private void recordEvent(String type, String severity, String regionId, ServerId serverId,
@@ -449,15 +648,18 @@ public class RegionSplitCoordinator {
      */
     private static class SplitTask {
         private final String regionId;
+        private final String tableName;
         private final ServerId serverId;
 
         public SplitTask(String regionId, String tableName,
                          ServerId serverId, ClusterManager.RegionLoad load) {
             this.regionId = regionId;
+            this.tableName = tableName;
             this.serverId = serverId;
         }
 
         public String getRegionId() { return regionId; }
+        public String getTableName() { return tableName; }
         public ServerId getServerId() { return serverId; }
 
     }

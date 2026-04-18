@@ -53,10 +53,12 @@ public class RegionStorage {
     }
 
     public Iterator<KeyValue> scan(byte[] startKey, byte[] endKey) {
+        readRequestCount.incrementAndGet();
         return storageEngine.scan(startKey, endKey);
     }
 
     public Iterator<KeyValue> scan(StorageScanFilter filter) {
+        readRequestCount.incrementAndGet();
         return storageEngine.scan(filter);
     }
 

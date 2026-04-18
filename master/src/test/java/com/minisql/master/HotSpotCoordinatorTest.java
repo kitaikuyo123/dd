@@ -452,7 +452,7 @@ class HotSpotCoordinatorTest {
             load.setRegionId(regionId);
             load.setReadRequests(readRequest);
             load.setWriteRequests(0L);
-            manager.recordRegionLoad(regionId, load);
+            manager.recordRegionLoad(regionId, null, load);
             Thread.sleep(50);
         }
     }
@@ -464,7 +464,7 @@ class HotSpotCoordinatorTest {
             load.setRegionId(regionId);
             load.setReadRequests(0L);
             load.setWriteRequests(writeRequest);
-            manager.recordRegionLoad(regionId, load);
+            manager.recordRegionLoad(regionId, null, load);
             Thread.sleep(50);
         }
     }
@@ -476,7 +476,7 @@ class HotSpotCoordinatorTest {
             load.setRegionId(regionId);
             load.setReadRequests(pair[0]);
             load.setWriteRequests(pair[1]);
-            manager.recordRegionLoad(regionId, load);
+            manager.recordRegionLoad(regionId, null, load);
             Thread.sleep(50);
         }
     }
