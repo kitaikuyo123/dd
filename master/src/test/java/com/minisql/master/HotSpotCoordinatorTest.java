@@ -223,14 +223,8 @@ class HotSpotCoordinatorTest {
         clusterManager.registerServer(staleServer);
         clusterManager.registerServer(healthyServer);
 
-        // Simulate stale server heartbeat expiry
-        ClusterManager.ServerInfo staleInfo = clusterManager.getActiveServersList().stream()
-            .filter(s -> s.getServerId().equals(staleServer))
-            .findFirst()
-            .orElse(null);
-        if (staleInfo != null) {
-            staleInfo.setLastHeartbeat(System.currentTimeMillis() - 120000);
-        }
+        // Simulate ZK ephemeral node disappearance (server offline)
+        clusterManager.removeServer(staleServer);
 
         Region region = createRegion("region-stale-test", "users", primary);
         metadataManager.registerRegion(region);

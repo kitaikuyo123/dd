@@ -206,7 +206,7 @@ class MasterServiceImplTest {
         metadataManager.createTable(table);
         Region region = new Region("orders_r1", "orders", new byte[]{0x00}, new byte[]{0x7F});
         region.setPrimary(failedPrimary);
-        region.setReplicas(List.of(failedPrimary, secondary));
+        region.setReplicas(new java.util.ArrayList<>(List.of(failedPrimary, secondary)));
         metadataManager.registerRegionForTable(region, failedPrimary);
         clusterManager.assignRegionToServer(region.getRegionId(), failedPrimary);
         clusterManager.addReplica(region.getRegionId(), failedPrimary);

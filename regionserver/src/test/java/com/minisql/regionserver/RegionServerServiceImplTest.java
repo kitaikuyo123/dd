@@ -23,7 +23,8 @@ class RegionServerServiceImplTest {
             "localhost",
             16020,
             MySQLConfig.builder("jdbc:mysql://localhost:3306/test", "root", "root").build(),
-            null
+            null,
+            3
         );
 
         Region region = new Region("region-1", "products", "a".getBytes(), "z".getBytes());

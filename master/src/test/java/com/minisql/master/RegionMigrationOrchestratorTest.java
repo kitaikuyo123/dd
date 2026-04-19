@@ -46,7 +46,7 @@ class RegionMigrationOrchestratorTest {
 
         RecordingCommandClient commandClient = new RecordingCommandClient(clusterManager);
         RegionMigrationCoordinator orchestrator =
-            new RegionMigrationCoordinator(clusterManager, metadataManager, commandClient, lifecycleManager);
+            new RegionMigrationCoordinator(clusterManager, metadataManager, new LoadBalancer(), commandClient, lifecycleManager);
 
         orchestrator.execute(new LoadBalancer.BalanceAction(region.getRegionId(), source, target));
 
