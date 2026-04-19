@@ -217,11 +217,10 @@ public class MasterMain {
             hotSpotTargetReadReplicaCount,
             hotSpotCooldownMs);
         logger.info(
-            "Configured hotspot properties: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
+            "Configured hotspot properties: interval={}ms readThreshold={} writeThreshold={} targetReadReplicaCount={} cooldown={}ms",
             hotSpotDetectorIntervalMs,
             hotSpotReadThreshold,
             hotSpotWriteThreshold,
-            hotSpotGrowthThreshold,
             hotSpotTargetReadReplicaCount,
             hotSpotCooldownMs);
 
@@ -237,7 +236,6 @@ public class MasterMain {
         rebuildReplicationGroups();
 
         replicaMonitor = new ReplicaMonitor(clusterManager);
-        replicaMonitor.start();
         replicaLifecycleManager = new ReplicaLifecycleManager();
         rebuildReplicaRuntimeState();
 
@@ -515,9 +513,6 @@ public class MasterMain {
         }
         if (failoverCoordinator != null) {
             failoverCoordinator.shutdown();
-        }
-        if (replicaMonitor != null) {
-            replicaMonitor.stop();
         }
         if (recoveryCoordinator != null) {
             recoveryCoordinator.stop();

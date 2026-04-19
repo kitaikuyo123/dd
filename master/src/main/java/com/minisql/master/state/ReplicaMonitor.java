@@ -16,12 +16,10 @@ public class ReplicaMonitor {
 
     private static final Logger logger = LoggerFactory.getLogger(ReplicaMonitor.class);
 
-    private final ScheduledExecutorService scheduler;
     private final Map<String, List<ReplicaInfo>> regionReplicas = new ConcurrentHashMap<>();
 
     // 配置参数
     private final long replicationLagThresholdMs;
-    private final long healthCheckIntervalMs;
 
     // 故障回调接口
     public interface FailoverCallback {
@@ -34,51 +32,12 @@ public class ReplicaMonitor {
     private final List<FailoverCallback> callbacks = new CopyOnWriteArrayList<>();
 
     public ReplicaMonitor(ClusterManager clusterManager) {
-        this(clusterManager, 5000, 15000, 10000, 5000);
+        this(clusterManager, 10000);
     }
 
     public ReplicaMonitor(ClusterManager clusterManager,
-                          long heartbeatIntervalMs,
-                          long heartbeatTimeoutMs,
-                          long replicationLagThresholdMs,
-                          long healthCheckIntervalMs) {
+                          long replicationLagThresholdMs) {
         this.replicationLagThresholdMs = replicationLagThresholdMs;
-        this.healthCheckIntervalMs = healthCheckIntervalMs;
-
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "Replica-Monitor");
-            t.setDaemon(true);
-            return t;
-        });
-    }
-
-    /**
-     * 启动监控器
-     */
-    public void start() {
-        scheduler.scheduleAtFixedRate(
-            this::performHealthCheck,
-            healthCheckIntervalMs,
-            healthCheckIntervalMs,
-            TimeUnit.MILLISECONDS
-        );
-        logger.info("ReplicaMonitor started with health check interval: {}ms", healthCheckIntervalMs);
-    }
-
-    /**
-     * 停止监控器
-     */
-    public void stop() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
-        logger.info("ReplicaMonitor stopped");
     }
 
     /**
@@ -177,14 +136,6 @@ public class ReplicaMonitor {
         }
     }
 
-    /**
-     * 执行健康检查
-     */
-    private void performHealthCheck() {
-        // Membership and failure convergence are driven by ZooKeeper node events.
-        // Heartbeat no longer marks replicas offline/online to avoid dual failure
-        // pipelines and delayed or conflicting convergence.
-    }
 
     /**
      * 注册故障回调

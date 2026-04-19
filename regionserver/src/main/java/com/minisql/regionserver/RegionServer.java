@@ -72,10 +72,6 @@ public class RegionServer {
         this(host, port, mysqlConfig, null, masterAddress, replicationFactor);
     }
 
-    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress) {
-        this(host, port, mysqlConfig, masterAddress, 3);
-    }
-
     public void start() throws IOException {
         running = true;
 
@@ -278,15 +274,6 @@ public class RegionServer {
         storage.delete(rowKey);
     }
 
-    public void flushRegion(String regionId) throws IOException {
-        checkRegionOpen(regionId);
-        regionManager.flushRegion(regionId);
-    }
-
-    public void compactRegion(String regionId, boolean major) throws IOException {
-        checkRegionOpen(regionId);
-        regionManager.compactRegion(regionId, major);
-    }
 
     private void checkRegionOpen(String regionId) {
         boolean isOpen = regionManager.isRegionOpen(regionId);
@@ -337,10 +324,6 @@ public class RegionServer {
         }
         // Legacy path: no factory provided, create MySQL on-the-fly
         return new com.minisql.storage.MySQLEngineFactory(getOrCreateSharedDataSource());
-    }
-
-    public MySQLConfig getMySQLConfig() {
-        return mysqlConfig;
     }
 
     public ReplicationCoordinator getReplicationCoordinator() {

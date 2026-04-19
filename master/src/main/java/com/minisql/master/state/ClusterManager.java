@@ -236,26 +236,6 @@ public class ClusterManager {
     }
 
     /**
-     * 检测故障节点
-     */
-    public List<ServerId> detectFailedServers(long timeoutMs) {
-        return Collections.emptyList();
-    }
-
-    public List<ServerId> detectStaleMetricServers(long timeoutMs) {
-        List<ServerId> failedServers = new ArrayList<>();
-        long now = System.currentTimeMillis();
-
-        for (ServerInfo info : activeServers.values()) {
-            if (now - info.getLastHeartbeat() > timeoutMs) {
-                failedServers.add(info.getServerId());
-            }
-        }
-
-        return failedServers;
-    }
-
-    /**
      * 移除故障服务器
      */
     public void removeServer(ServerId serverId) {
@@ -306,7 +286,11 @@ public class ClusterManager {
     }
 
     /**
-     * 检查服务器是否活跃
+     * 检查服务器是否活跃。
+     * 由 ZooKeeper 临时节点事件驱动：
+     * - onServerAdded → registerServer() → true
+     * - onServerRemoved → removeServer() → false
+     * 心跳不参与存活判断，只更新 metrics。
      */
     public boolean isServerActive(com.minisql.common.model.ServerId serverId) {
         return activeServers.containsKey(serverKey(serverId));

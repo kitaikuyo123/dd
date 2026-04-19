@@ -123,8 +123,4 @@ public class RegionStorage {
     public long getMemStoreSize() {
         return 0;
     }
-
-    public void logPrimaryPromotion(String serverId) throws IOException {
-        logger.info("Primary promotion logged for region: {} on server: {}", regionId, serverId);
-    }
 }

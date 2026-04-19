@@ -1,6 +1,6 @@
 package com.minisql.master.rpc;
 
-import com.minisql.common.Constants;
+
 import com.minisql.common.model.*;
 import com.minisql.common.proto.*;
 import com.minisql.master.monitoring.MonitoringService;
@@ -58,8 +58,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private ScheduledExecutorService balanceScheduler;
     private ScheduledExecutorService hotSpotScheduler;
     private ScheduledExecutorService regionSplitScheduler;
-    private ScheduledExecutorService serverFailureCheckScheduler;
-    private final Map<String, Long> regionSplitCooldownUntilMs = new ConcurrentHashMap<>();
+
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
     private final long hotSpotDetectorIntervalMs;
@@ -145,9 +144,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.lifecycleManager = lifecycleManager;
         this.commandClient = commandClient;
         this.migrationCoordinator = new RegionMigrationCoordinator(
-            clusterManager, metadataManager, commandClient, lifecycleManager);
+            clusterManager, metadataManager, loadBalancer, commandClient, lifecycleManager);
         this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
-        this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager);
+        this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.splitCoordinator.setRecoveryCoordinator(recoveryCoordinator);
         this.splitCoordinator.setReplicationCoordinator(replicationCoordinator);
         this.splitCoordinator.setReplicaMonitor(replicaMonitor);
@@ -172,11 +171,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         applyCoordinatorThresholds(config);
         this.clusterId = UUID.randomUUID().toString();
         logger.info(
-            "HotSpot detector config applied: interval={}ms readThreshold={} writeThreshold={} growthThreshold={} targetReadReplicaCount={} cooldown={}ms",
+            "HotSpot detector config applied: interval={}ms readThreshold={} writeThreshold={} targetReadReplicaCount={} cooldown={}ms",
             this.hotSpotDetectorIntervalMs,
             this.hotSpotCoordinator.getReadThresholdPerInterval(),
             this.hotSpotCoordinator.getWriteThresholdPerInterval(),
-            this.hotSpotCoordinator.getGrowthThreshold(),
             this.hotSpotCoordinator.getTargetReadReplicaCount(),
             this.hotSpotCoordinator.getCooldownMs());
         logger.info("LoadBalance config applied: enabled={} interval={}ms",
@@ -190,7 +188,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         startLoadBalanceScheduler();
         startHotSpotScheduler();
         startRegionSplitScheduler();
-        startServerFailureCheckScheduler();
     }
 
     private static boolean parseBooleanProperty(Properties config, String key, boolean defaultValue) {
@@ -348,23 +345,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     }
 
     /**
-     * 启动服务器失败检测调度器
-     */
-    private void startServerFailureCheckScheduler() {
-        long heartbeatTimeoutMs = Constants.DEFAULT_HEARTBEAT_TIMEOUT_MS;
-        long checkIntervalMs = Constants.DEFAULT_HEARTBEAT_INTERVAL_MS * 2;
-        serverFailureCheckScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "ServerFailure-Detector");
-            t.setDaemon(true);
-            return t;
-        });
-        serverFailureCheckScheduler.scheduleAtFixedRate(
-            () -> checkFailedServers(heartbeatTimeoutMs),
-            checkIntervalMs, checkIntervalMs, TimeUnit.MILLISECONDS
-        );
-    }
-
-    /**
      * 检查并执行热点动作
      */
     private void checkHotSpots() {
@@ -380,17 +360,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     /**
      * 检查 Region 分裂建议
+     * Split cooldown is handled entirely by RegionSplitCoordinator (table-level + queue dedup).
      */
     private void checkRegionSplitSuggestions() {
-        long now = System.currentTimeMillis();
-        regionSplitCooldownUntilMs.entrySet().removeIf(entry -> entry.getValue() <= now);
-
         try {
             for (ClusterManager.ServerInfo serverInfo : clusterManager.getActiveServers()) {
                 for (Map.Entry<String, ClusterManager.RegionLoad> entry : serverInfo.getRegionLoads().entrySet()) {
                     String regionId = entry.getKey();
-                    if (regionSplitCooldownUntilMs.getOrDefault(regionId, 0L) > now
-                        || splitCoordinator.getSplittingRegions().contains(regionId)) {
+                    if (splitCoordinator.getSplittingRegions().contains(regionId)) {
                         continue;
                     }
 
@@ -406,7 +383,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
                     ServerId serverId = serverInfo.getServerId();
                     splitCoordinator.scheduleSplit(regionId, region.getTableName(), serverId, load);
-                    regionSplitCooldownUntilMs.put(regionId, now + TimeUnit.MINUTES.toMillis(10));
                 }
             }
         } catch (Exception e) {
@@ -414,24 +390,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
     }
 
-    /**
-     * 检查失败的服务器
-     */
-    private void checkFailedServers(long heartbeatTimeoutMs) {
-        try {
-            List<ServerId> staleServers = clusterManager.detectStaleMetricServers(heartbeatTimeoutMs);
-            if (staleServers.isEmpty()) {
-                return;
-            }
-
-            for (ServerId staleServer : staleServers) {
-                recordEvent("METRICS_STALE", "WARN", null, null, null, staleServer,
-                    "Heartbeat metrics are stale; ZooKeeper membership remains authoritative", null);
-            }
-        } catch (Exception e) {
-            logger.warn("Error checking failed servers: {}", e.getMessage());
-        }
-    }
 
     public void shutdown() {
         if (balanceScheduler != null) {
@@ -442,9 +400,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
         if (regionSplitScheduler != null) {
             regionSplitScheduler.shutdownNow();
-        }
-        if (serverFailureCheckScheduler != null) {
-            serverFailureCheckScheduler.shutdownNow();
         }
         serverFailureRecoveryExecutor.shutdownNow();
         splitCoordinator.stop();
@@ -474,7 +429,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     }
 
     /**
-     * 执行负载均衡动作
+     * 执行负载均衡动作 — runs migrations asynchronously to avoid blocking scheduler/RPC threads.
      */
     private void executeBalanceActions(List<LoadBalancer.BalanceAction> actions) {
         for (LoadBalancer.BalanceAction action : actions) {
@@ -482,11 +437,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 logger.warn("Skipping null balance action");
                 continue;
             }
-            try {
-                migrationCoordinator.execute(action);
-            } catch (Exception e) {
-                logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
-            }
+            serverFailureRecoveryExecutor.submit(() -> {
+                try {
+                    migrationCoordinator.execute(action);
+                } catch (Exception e) {
+                    logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
+                }
+            });
         }
     }
 
@@ -1326,8 +1283,14 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     .setType(MasterProto.ActionType.MOVE)
                     .build());
 
-                // 执行迁移动作
-                migrationCoordinator.execute(action);
+                // Execute migration asynchronously to avoid blocking the gRPC thread
+                serverFailureRecoveryExecutor.submit(() -> {
+                    try {
+                        migrationCoordinator.execute(action);
+                    } catch (Exception e) {
+                        logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
+                    }
+                });
             }
 
             MasterProto.BalanceResponse response = MasterProto.BalanceResponse.newBuilder()

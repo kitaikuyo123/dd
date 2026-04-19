@@ -2,10 +2,12 @@ package com.minisql.master.rebalance;
 
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
-import com.minisql.common.proto.*;
+import com.minisql.common.proto.RegionServerProto;
+import com.minisql.common.proto.CommonProto;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.recover.RecoveryCoordinator;
+import com.minisql.master.rpc.RegionServerCommandClient;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
@@ -13,8 +15,6 @@ import com.minisql.master.state.ReplicaMonitor;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,60 +22,42 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * Region 合并管理器
- * 负责监控 Region 大小，自动触发合并，防止 Region 碎片化
+ * Region merge coordinator. Monitors Region sizes, triggers merges to
+ * prevent fragmentation, and delegates shared logic to {@link RebalanceSupport}.
  */
 public class RegionMergeCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionMergeCoordinator.class);
 
-    // 合并阈值：单个 Region 小于此值可考虑合并（默认 100MB）
-    private static final long DEFAULT_mergeThresholdSize = 100L * 1024 * 1024;
-    // 最大合并阈值：两个 Region 加起来不能超过此值（默认 8GB，小于分裂阈值）
-    private static final long DEFAULT_maxMergeSize = 8L * 1024 * 1024 * 1024;
-    // 最小合并大小：小于此值强制合并（默认 10MB）
-    private static final long DEFAULT_minMergeSize = 10L * 1024 * 1024;
-    // 合并冷却期：刚分裂的 Region 多久内不合并（默认 1小时）
-    private static final long DEFAULT_mergeCooldownMs = 60 * 60 * 1000;
+    private static final long DEFAULT_MERGE_THRESHOLD_SIZE = 100L * 1024 * 1024;
+    private static final long DEFAULT_MAX_MERGE_SIZE = 8L * 1024 * 1024 * 1024;
+    private static final long DEFAULT_MIN_MERGE_SIZE = 10L * 1024 * 1024;
+    private static final long DEFAULT_MERGE_COOLDOWN_MS = 60 * 60 * 1000;
 
-    private volatile long mergeThresholdSize = DEFAULT_mergeThresholdSize;
-    private volatile long maxMergeSize = DEFAULT_maxMergeSize;
-    private volatile long minMergeSize = DEFAULT_minMergeSize;
-    private volatile long mergeCooldownMs = DEFAULT_mergeCooldownMs;
+    private volatile long mergeThresholdSize = DEFAULT_MERGE_THRESHOLD_SIZE;
+    private volatile long maxMergeSize = DEFAULT_MAX_MERGE_SIZE;
+    private volatile long minMergeSize = DEFAULT_MIN_MERGE_SIZE;
+    private volatile long mergeCooldownMs = DEFAULT_MERGE_COOLDOWN_MS;
 
-    // 待合并的 Region 队列
     private final BlockingQueue<MergeTask> mergeQueue = new LinkedBlockingQueue<>();
-
-    // 正在合并的 Region（防止重复合并）
     private final Set<String> mergingRegions = ConcurrentHashMap.newKeySet();
     private final Set<String> queuedMergingRegions = ConcurrentHashMap.newKeySet();
-
-    // 最近分裂的 Region 及其时间（用于冷却期判断）
     private final Map<String, Long> recentSplitRegions = new ConcurrentHashMap<>();
 
-    // 合并线程池
     private final ExecutorService mergeExecutor;
+    private final RebalanceSupport support;
+    private final RegionServerCommandClient commandClient;
 
-    // 依赖的管理器
-    private final ClusterManager clusterManager;
-    private final MetadataManager metadataManager;
-    private MonitoringService monitoringService;
-    private volatile RecoveryCoordinator recoveryCoordinator;
-    private volatile ReplicationCoordinator replicationCoordinator;
-    private volatile ReplicaMonitor replicaMonitor;
-    private volatile ReplicaLifecycleManager lifecycleManager;
-
-    // 调度器
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
-    private volatile ZkClient zkClient;
 
     public RegionMergeCoordinator(ClusterManager clusterManager,
-                                  MetadataManager metadataManager) {
-        this.clusterManager = clusterManager;
-        this.metadataManager = metadataManager;
+                                  MetadataManager metadataManager,
+                                  LoadBalancer loadBalancer,
+                                  RegionServerCommandClient commandClient) {
+        this.support = new RebalanceSupport(clusterManager, metadataManager, loadBalancer);
+        this.commandClient = commandClient;
 
-        // 创建合并线程池（单线程，顺序处理）
         this.mergeExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "RegionMerge-Worker");
             t.setDaemon(true);
@@ -83,28 +65,60 @@ public class RegionMergeCoordinator {
         });
     }
 
+    /**
+     * Backward-compatible constructor that creates a no-op command client.
+     * Prefer the 4-argument constructor.
+     */
+    public RegionMergeCoordinator(ClusterManager clusterManager,
+                                  MetadataManager metadataManager,
+                                  LoadBalancer loadBalancer) {
+        this(clusterManager, metadataManager, loadBalancer, null);
+    }
+
+    /**
+     * Legacy 2-argument constructor kept for existing callers.
+     * The caller must call setters for commandClient before merge operations are used.
+     */
+    public RegionMergeCoordinator(ClusterManager clusterManager,
+                                  MetadataManager metadataManager) {
+        this(clusterManager, metadataManager, null, null);
+    }
+
+    // --- Setters ---
+
     public void setMonitoringService(MonitoringService monitoringService) {
-        this.monitoringService = monitoringService;
+        this.support.monitoringService = monitoringService;
     }
 
     public void setZkClient(ZkClient zkClient) {
-        this.zkClient = zkClient;
+        this.support.zkClient = zkClient;
     }
 
     public void setRecoveryCoordinator(RecoveryCoordinator recoveryCoordinator) {
-        this.recoveryCoordinator = recoveryCoordinator;
+        this.support.recoveryCoordinator = recoveryCoordinator;
     }
 
     public void setReplicationCoordinator(ReplicationCoordinator replicationCoordinator) {
-        this.replicationCoordinator = replicationCoordinator;
+        this.support.replicationCoordinator = replicationCoordinator;
     }
 
     public void setReplicaMonitor(ReplicaMonitor replicaMonitor) {
-        this.replicaMonitor = replicaMonitor;
+        this.support.replicaMonitor = replicaMonitor;
     }
 
     public void setLifecycleManager(ReplicaLifecycleManager lifecycleManager) {
-        this.lifecycleManager = lifecycleManager;
+        this.support.lifecycleManager = lifecycleManager;
+    }
+
+    public void setCommandClient(RegionServerCommandClient commandClient) {
+        // For legacy callers that used the 2-arg constructor
+        try {
+            java.lang.reflect.Field field = RegionMergeCoordinator.class.getDeclaredField("commandClient");
+            field.setAccessible(true);
+            field.set(this, commandClient);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set commandClient", e);
+        }
     }
 
     public void setMergeThresholdSize(long mergeThresholdSize) {
@@ -123,34 +137,26 @@ public class RegionMergeCoordinator {
         this.mergeCooldownMs = mergeCooldownMs;
     }
 
-    /**
-     * 启动合并管理器
-     */
+    // --- Lifecycle ---
+
     public void start() {
         if (running) {
             return;
         }
         running = true;
 
-        // 启动调度器，定期检查是否需要合并
         scheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "RegionMerge-Scheduler");
             t.setDaemon(true);
             return t;
         });
 
-        // 每 60 秒检查一次（合并检查频率比分裂低）
         scheduler.scheduleWithFixedDelay(this::checkAndScheduleMerges, 60, 60, TimeUnit.SECONDS);
-
-        // 启动合并处理器
         mergeExecutor.submit(this::processMergeTasks);
 
         logger.info("RegionMergeCoordinator started");
     }
 
-    /**
-     * 停止合并管理器
-     */
     public void stop() {
         running = false;
         mergeQueue.clear();
@@ -165,40 +171,29 @@ public class RegionMergeCoordinator {
         logger.info("RegionMergeCoordinator stopped");
     }
 
-    /**
-     * 记录 Region 分裂事件（用于冷却期）
-     */
+    // --- Public API ---
+
     public void recordRegionSplit(String regionId) {
         recentSplitRegions.put(regionId, System.currentTimeMillis());
-        // 清理过期的记录（超过冷却期的）
         cleanupRecentSplits();
     }
 
-    /**
-     * 清理过期的分裂记录
-     */
+    // --- Internal ---
+
     private void cleanupRecentSplits() {
         long now = System.currentTimeMillis();
         recentSplitRegions.entrySet().removeIf(entry ->
             now - entry.getValue() > mergeCooldownMs);
     }
 
-    /**
-     * 检查所有表，将满足合并条件的 Region 加入队列
-     */
     private void checkAndScheduleMerges() {
         try {
-            // 获取所有表
             Collection<String> tableNames = getAllTableNames();
 
             for (String tableName : tableNames) {
-                // 获取该表的所有 Region
-                List<Region> regions = new ArrayList<>(metadataManager.getRegionsForTable(tableName));
-
-                // 按 startKey 排序
+                List<Region> regions = new ArrayList<>(support.metadataManager.getRegionsForTable(tableName));
                 regions.sort(Comparator.comparing(Region::getStartKey, BytesUtil::compareTo));
 
-                // 检查相邻的 Region 是否可以合并
                 for (int i = 0; i < regions.size() - 1; i++) {
                     Region left = regions.get(i);
                     Region right = regions.get(i + 1);
@@ -214,16 +209,11 @@ public class RegionMergeCoordinator {
         }
     }
 
-    /**
-     * 判断两个 Region 是否应该合并
-     */
     private boolean shouldMerge(Region left, Region right) {
-        // 检查是否相邻
         if (!isAdjacent(left, right)) {
             return false;
         }
 
-        // 检查是否正在合并中
         if (mergingRegions.contains(left.getRegionId()) ||
             mergingRegions.contains(right.getRegionId()) ||
             queuedMergingRegions.contains(left.getRegionId()) ||
@@ -231,34 +221,28 @@ public class RegionMergeCoordinator {
             return false;
         }
 
-        // 检查冷却期
         if (isInCooldown(left.getRegionId()) || isInCooldown(right.getRegionId())) {
             return false;
         }
 
-        // 检查是否在同一个服务器上（简化处理，跨服务器合并不支持）
-        ServerId leftServer = clusterManager.getPrimaryServerForRegion(left.getRegionId());
-        ServerId rightServer = clusterManager.getPrimaryServerForRegion(right.getRegionId());
+        ServerId leftServer = support.clusterManager.getPrimaryServerForRegion(left.getRegionId());
+        ServerId rightServer = support.clusterManager.getPrimaryServerForRegion(right.getRegionId());
         if (leftServer == null || rightServer == null || !leftServer.equals(rightServer)) {
             return false;
         }
 
-        // 获取 Region 大小
         long leftSize = getRegionSize(left.getRegionId());
         long rightSize = getRegionSize(right.getRegionId());
         long totalSize = leftSize + rightSize;
 
-        // 如果总大小超过最大合并阈值，不能合并
         if (totalSize > maxMergeSize) {
             return false;
         }
 
-        // 如果两个都很小（小于 MERGE_THRESHOLD），可以合并
         if (leftSize < mergeThresholdSize && rightSize < mergeThresholdSize) {
             return true;
         }
 
-        // 如果其中一个非常小（小于 minMergeSize），强制合并
         if (leftSize < minMergeSize || rightSize < minMergeSize) {
             return true;
         }
@@ -266,9 +250,6 @@ public class RegionMergeCoordinator {
         return false;
     }
 
-    /**
-     * 检查 Region 是否在冷却期内
-     */
     private boolean isInCooldown(String regionId) {
         Long splitTime = recentSplitRegions.get(regionId);
         if (splitTime == null) {
@@ -277,18 +258,12 @@ public class RegionMergeCoordinator {
         return System.currentTimeMillis() - splitTime < mergeCooldownMs;
     }
 
-    /**
-     * 检查两个 Region 是否相邻
-     */
     private boolean isAdjacent(Region left, Region right) {
         return Arrays.equals(left.getEndKey(), right.getStartKey());
     }
 
-    /**
-     * 获取 Region 大小
-     */
     private long getRegionSize(String regionId) {
-        ServerId serverId = clusterManager.getPrimaryServerForRegion(regionId);
+        ServerId serverId = support.clusterManager.getPrimaryServerForRegion(regionId);
         if (serverId == null) {
             return 0;
         }
@@ -306,11 +281,8 @@ public class RegionMergeCoordinator {
         return load.getStoreFileSize() + load.getMemStoreSize();
     }
 
-    /**
-     * 获取服务器信息
-     */
     private ClusterManager.ServerInfo getServerInfo(ServerId serverId) {
-        for (ClusterManager.ServerInfo info : clusterManager.getActiveServers()) {
+        for (ClusterManager.ServerInfo info : support.clusterManager.getActiveServers()) {
             if (info.getServerId().equals(serverId)) {
                 return info;
             }
@@ -318,9 +290,6 @@ public class RegionMergeCoordinator {
         return null;
     }
 
-    /**
-     * 将合并任务加入队列
-     */
     private boolean scheduleMerge(Region left, Region right) {
         String leftId = left.getRegionId();
         String rightId = right.getRegionId();
@@ -336,7 +305,7 @@ public class RegionMergeCoordinator {
             leftId,
             rightId,
             left.getTableName(),
-            clusterManager.getPrimaryServerForRegion(leftId)
+            support.clusterManager.getPrimaryServerForRegion(leftId)
         );
 
         if (mergeQueue.offer(task)) {
@@ -349,9 +318,6 @@ public class RegionMergeCoordinator {
         return false;
     }
 
-    /**
-     * 处理合并任务队列
-     */
     private void processMergeTasks() {
         while (running) {
             try {
@@ -368,16 +334,12 @@ public class RegionMergeCoordinator {
         }
     }
 
-    /**
-     * 执行 Region 合并
-     */
     private void executeMerge(MergeTask task) {
         String leftRegionId = task.getLeftRegionId();
         String rightRegionId = task.getRightRegionId();
         DistributedLock leftLock = null;
         DistributedLock rightLock = null;
 
-        // 标记为正在合并
         if (!mergingRegions.add(leftRegionId) || !mergingRegions.add(rightRegionId)) {
             logger.warn("Regions {} or {} are already merging, skip", leftRegionId, rightRegionId);
             releaseQueuedReservation(task);
@@ -390,18 +352,17 @@ public class RegionMergeCoordinator {
         try {
             String firstLockRegion = leftRegionId.compareTo(rightRegionId) <= 0 ? leftRegionId : rightRegionId;
             String secondLockRegion = leftRegionId.compareTo(rightRegionId) <= 0 ? rightRegionId : leftRegionId;
-            leftLock = acquireRegionLock(firstLockRegion);
-            rightLock = acquireRegionLock(secondLockRegion);
+            leftLock = support.acquireRegionLock(firstLockRegion);
+            rightLock = support.acquireRegionLock(secondLockRegion);
             MergeTask validatedTask = revalidateMergeTask(task);
             if (validatedTask == null) {
                 logger.info("Skip stale merge task for regions {} and {}", leftRegionId, rightRegionId);
                 return;
             }
             logger.info("Starting merge for regions: {} and {}", leftRegionId, rightRegionId);
-            recordEvent("REGION_MERGE_STARTED", "INFO", leftRegionId, validatedTask.getServerId(),
+            support.recordEvent("REGION_MERGE_STARTED", "INFO", leftRegionId, validatedTask.getServerId(),
                 "Region merge started", rightRegionId);
 
-            // 1. 通知 RegionServer 执行合并
             MergeResult result = notifyServerMergeRegions(
                 validatedTask.getServerId(), leftRegionId, rightRegionId);
 
@@ -410,90 +371,68 @@ public class RegionMergeCoordinator {
                 return;
             }
 
-            // 2. 更新元数据
             updateMetadataAfterMerge(leftRegionId, rightRegionId, result, validatedTask.getServerId());
 
             logger.info("Merge completed: {} + {} -> {}", leftRegionId, rightRegionId,
                 result.getMergedRegion().getRegionId());
-            recordEvent("REGION_MERGE_COMPLETED", "INFO", leftRegionId, validatedTask.getServerId(),
+            support.recordEvent("REGION_MERGE_COMPLETED", "INFO", leftRegionId, validatedTask.getServerId(),
                 "Region merge completed", result.getMergedRegion().getRegionId());
 
         } catch (Exception e) {
             logger.error("Error merging regions {} and {}: {}", leftRegionId, rightRegionId, e.getMessage(), e);
         } finally {
-            releaseLock(rightLock);
-            releaseLock(leftLock);
+            support.releaseLock(rightLock);
+            support.releaseLock(leftLock);
             mergingRegions.remove(leftRegionId);
             mergingRegions.remove(rightRegionId);
         }
     }
 
-    /**
-     * 通知 RegionServer 执行合并
-     */
     private MergeResult notifyServerMergeRegions(ServerId serverId, String leftRegionId, String rightRegionId) {
-        ManagedChannel channel = null;
+        if (commandClient == null) {
+            logger.error("commandClient not set, cannot merge regions");
+            return null;
+        }
         try {
-            channel = ManagedChannelBuilder
-                    .forAddress(serverId.getHost(), serverId.getPort())
-                    .usePlaintext()
-                    .build();
-
-            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
-                    RegionServerServiceGrpc.newBlockingStub(channel);
-
-            RegionServerProto.MergeRegionRequest request = RegionServerProto.MergeRegionRequest.newBuilder()
-                    .setLeftRegionId(leftRegionId)
-                    .setRightRegionId(rightRegionId)
-                    .build();
-
-            RegionServerProto.MergeRegionResponse response = stub.mergeRegion(request);
+            RegionServerProto.MergeRegionResponse response =
+                commandClient.mergeRegion(serverId, leftRegionId, rightRegionId);
 
             if (response.getStatus().getSuccess()) {
-                return new MergeResult(convertProtoToRegion(response.getMergedRegion()));
+                return new MergeResult(RebalanceSupport.convertProtoToRegion(response.getMergedRegion()));
             }
+            logger.warn("Merge rejected by server: region={} left={} right={} message={}",
+                serverId, leftRegionId, rightRegionId, response.getStatus().getMessage());
         } catch (Exception e) {
             logger.error("Failed to merge regions on server: {}", e.getMessage(), e);
-        } finally {
-            if (channel != null) {
-                channel.shutdown();
-            }
         }
         return null;
     }
 
-    /**
-     * 合并后更新元数据
-     */
     private void updateMetadataAfterMerge(String leftRegionId, String rightRegionId, MergeResult result,
                                           ServerId primaryServer) {
-        Region leftRegion = metadataManager.getRegion(leftRegionId);
-        Region rightRegion = metadataManager.getRegion(rightRegionId);
-        // 1. 移除旧的 Region
-        cleanupRegionRuntime(leftRegionId, leftRegion == null ? null : leftRegion.getTableName());
-        cleanupRegionRuntime(rightRegionId, rightRegion == null ? null : rightRegion.getTableName());
-        metadataManager.removeRegion(leftRegionId);
-        metadataManager.removeRegion(rightRegionId);
+        Region leftRegion = support.metadataManager.getRegion(leftRegionId);
+        Region rightRegion = support.metadataManager.getRegion(rightRegionId);
+        support.cleanupRegionRuntime(leftRegionId, leftRegion == null ? null : leftRegion.getTableName());
+        support.cleanupRegionRuntime(rightRegionId, rightRegion == null ? null : rightRegion.getTableName());
+        support.metadataManager.removeRegion(leftRegionId);
+        support.metadataManager.removeRegion(rightRegionId);
 
-        // 2. 注册新的 Region
         Region mergedRegion = result.getMergedRegion();
-        metadataManager.removeRegion(mergedRegion.getRegionId());
+        support.metadataManager.removeRegion(mergedRegion.getRegionId());
         mergedRegion.setPrimary(primaryServer);
         mergedRegion.setReplicas(new ArrayList<>());
         if (primaryServer != null) {
             mergedRegion.addReplica(primaryServer);
         }
-        metadataManager.registerRegionForTable(mergedRegion, primaryServer);
+        support.metadataManager.registerRegionForTable(mergedRegion, primaryServer);
 
-        // 3. 分配服务器（复用左 Region 的服务器）
         if (primaryServer != null) {
-            clusterManager.assignRegionToServer(mergedRegion.getRegionId(), primaryServer);
-            clusterManager.addReplica(mergedRegion.getRegionId(), primaryServer);
-            clusterManager.updateRegionState(mergedRegion.getRegionId(), Region.State.OPEN);
+            support.clusterManager.assignRegionToServer(mergedRegion.getRegionId(), primaryServer);
+            support.clusterManager.addReplica(mergedRegion.getRegionId(), primaryServer);
+            support.clusterManager.updateRegionState(mergedRegion.getRegionId(), Region.State.OPEN);
         }
 
-        // 4. 记录分裂历史（用于冷却期）
-        ensureReplicaTopology(mergedRegion.getRegionId());
+        support.ensureReplicaTopology(mergedRegion.getRegionId());
         recordRegionSplit(mergedRegion.getRegionId());
     }
 
@@ -506,8 +445,8 @@ public class RegionMergeCoordinator {
     }
 
     private MergeTask revalidateMergeTask(MergeTask task) {
-        Region left = metadataManager.getRegion(task.getLeftRegionId());
-        Region right = metadataManager.getRegion(task.getRightRegionId());
+        Region left = support.metadataManager.getRegion(task.getLeftRegionId());
+        Region right = support.metadataManager.getRegion(task.getRightRegionId());
         if (left == null || right == null) {
             return null;
         }
@@ -518,183 +457,51 @@ public class RegionMergeCoordinator {
             return null;
         }
 
-        ServerId leftServer = clusterManager.getPrimaryServerForRegion(left.getRegionId());
-        ServerId rightServer = clusterManager.getPrimaryServerForRegion(right.getRegionId());
+        ServerId leftServer = support.clusterManager.getPrimaryServerForRegion(left.getRegionId());
+        ServerId rightServer = support.clusterManager.getPrimaryServerForRegion(right.getRegionId());
         if (leftServer == null || rightServer == null || !leftServer.equals(rightServer)) {
             return null;
         }
-        if (!clusterManager.isServerActive(leftServer)) {
+        if (!support.clusterManager.isServerActive(leftServer)) {
             return null;
         }
         return new MergeTask(left.getRegionId(), right.getRegionId(), left.getTableName(), leftServer);
     }
 
-    private void ensureReplicaTopology(String regionId) {
-        Region region = metadataManager.getRegion(regionId);
-        if (region == null || region.getPrimary() == null) {
-            return;
-        }
-
-        int targetReplicationFactor = resolveReplicationFactor(region);
-        List<ServerId> selectedServers = selectServersForReplication(region, targetReplicationFactor);
-        if (selectedServers.isEmpty()) {
-            selectedServers.add(region.getPrimary());
-        }
-
-        region.setPrimary(selectedServers.get(0));
-        region.setReplicas(new ArrayList<>(selectedServers));
-        metadataManager.registerRegionForTable(region, region.getPrimary());
-        clusterManager.assignRegionToServer(regionId, region.getPrimary());
-        clusterManager.updateRegionState(regionId, Region.State.OPEN);
-        for (ServerId server : selectedServers) {
-            clusterManager.addReplica(regionId, server);
-        }
-
-        if (replicationCoordinator != null) {
-            replicationCoordinator.removeReplicaGroup(regionId);
-            replicationCoordinator.createReplicaGroup(region, selectedServers);
-        }
-
-        if (recoveryCoordinator != null) {
-            for (int i = 1; i < selectedServers.size(); i++) {
-                recoveryCoordinator.bootstrapReplica(regionId, selectedServers.get(i));
-            }
-        }
-    }
-
-    private List<ServerId> selectServersForReplication(Region region, int replicationFactor) {
-        int normalizedFactor = Math.max(1, replicationFactor);
-        LinkedHashSet<ServerId> selected = new LinkedHashSet<>();
-        if (region.getPrimary() != null) {
-            selected.add(region.getPrimary());
-        }
-        if (region.getReplicas() != null) {
-            selected.addAll(region.getReplicas());
-        }
-
-        List<ClusterManager.ServerInfo> candidates = new ArrayList<>(clusterManager.getActiveServersList());
-        candidates.removeIf(info -> info == null || info.getServerId() == null || selected.contains(info.getServerId()));
-        candidates.sort(Comparator
-            .comparing((ClusterManager.ServerInfo info) -> info.getServerId().getHost())
-            .thenComparingInt(info -> info.getServerId().getPort()));
-        for (ClusterManager.ServerInfo candidate : candidates) {
-            if (selected.size() >= normalizedFactor) {
-                break;
-            }
-            selected.add(candidate.getServerId());
-        }
-        return new ArrayList<>(selected);
-    }
-
-    private int resolveReplicationFactor(Region region) {
-        com.minisql.common.model.Table table = metadataManager.getTable(region.getTableName());
-        if (table != null && table.getProperties() != null) {
-            return Math.max(1, table.getProperties().getReplicationFactor());
-        }
-        return 3;
-    }
-
-    private void cleanupRegionRuntime(String regionId, String tableName) {
-        clusterManager.removeRegionMetadata(tableName, regionId);
-        if (replicaMonitor != null) {
-            replicaMonitor.removeRegion(regionId);
-        }
-        if (lifecycleManager != null) {
-            lifecycleManager.removeRegion(regionId);
-        }
-        if (recoveryCoordinator != null) {
-            recoveryCoordinator.clearDesiredReplicaCount(regionId);
-        }
-        if (replicationCoordinator != null) {
-            replicationCoordinator.removeReplicaGroup(regionId);
-        }
-    }
-
-    private DistributedLock acquireRegionLock(String regionId) throws Exception {
-        if (zkClient == null) {
-            return null;
-        }
-        DistributedLock lock = new DistributedLock(zkClient.getClient(),
-            "/minisql/locks/regions/" + regionId);
-        lock.acquire();
-        return lock;
-    }
-
-    private void releaseLock(DistributedLock lock) {
-        if (lock == null) {
-            return;
-        }
-        try {
-            if (lock.isAcquiredInThisProcess()) {
-                lock.release();
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to release merge lock: {}", e.getMessage(), e);
-        }
-    }
-
-    private void recordEvent(String type, String severity, String regionId, ServerId serverId,
-                             String message, String details) {
-        if (monitoringService != null) {
-            monitoringService.recordEvent(type, severity, regionId, null,
-                serverId == null ? null : serverId.getHost() + ":" + serverId.getPort(),
-                null, message, details);
-        }
-    }
-
-    /**
-     * 获取所有表名
-     */
     private Collection<String> getAllTableNames() {
         Set<String> tableNames = new HashSet<>();
-        for (Region region : metadataManager.getAllRegions()) {
+        for (Region region : support.metadataManager.getAllRegions()) {
             tableNames.add(region.getTableName());
         }
         return tableNames;
     }
 
-    /**
-     * Protobuf Region 转换为模型
-     */
-    private Region convertProtoToRegion(CommonProto.RegionInfo proto) {
-        Region region = new Region();
-        region.setRegionId(proto.getRegionId());
-        region.setTableName(proto.getTableName());
-        region.setStartKey(proto.getStartKey().toByteArray());
-        region.setEndKey(proto.getEndKey().toByteArray());
-        return region;
-    }
+    // --- Inner classes ---
 
-    /**
-     * 合并任务
-     */
     private static class MergeTask {
         private final String leftRegionId;
         private final String rightRegionId;
         private final ServerId serverId;
 
-        public MergeTask(String leftRegionId, String rightRegionId,
-                         String tableName, ServerId serverId) {
+        MergeTask(String leftRegionId, String rightRegionId,
+                  String tableName, ServerId serverId) {
             this.leftRegionId = leftRegionId;
             this.rightRegionId = rightRegionId;
             this.serverId = serverId;
         }
 
-        public String getLeftRegionId() { return leftRegionId; }
-        public String getRightRegionId() { return rightRegionId; }
-        public ServerId getServerId() { return serverId; }
+        String getLeftRegionId() { return leftRegionId; }
+        String getRightRegionId() { return rightRegionId; }
+        ServerId getServerId() { return serverId; }
     }
 
-    /**
-     * 合并结果
-     */
     private static class MergeResult {
         private final Region mergedRegion;
 
-        public MergeResult(Region mergedRegion) {
+        MergeResult(Region mergedRegion) {
             this.mergedRegion = mergedRegion;
         }
 
-        public Region getMergedRegion() { return mergedRegion; }
+        Region getMergedRegion() { return mergedRegion; }
     }
 }

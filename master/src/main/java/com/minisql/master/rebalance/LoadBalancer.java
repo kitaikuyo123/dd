@@ -20,7 +20,7 @@ public class LoadBalancer {
     private final LoadCalculator loadCalculator = new LoadCalculator();
     private final Random random = new Random();
     private volatile Strategy strategy = Strategy.LOAD_BASED;
-    private volatile int roundRobinIndex = 0;
+    private int roundRobinIndex = 0; // guarded by this
     private volatile double balanceThreshold = DEFAULT_BALANCE_THRESHOLD;
     private volatile long minMigrationIntervalMs = DEFAULT_MIN_MIGRATION_INTERVAL_MS;
 
@@ -120,8 +120,9 @@ public class LoadBalancer {
             double effectiveMaxTargetQps = maxTargetQps > 0.0 ? maxTargetQps : DEFAULT_MAX_TARGET_QPS;
             double baseScore = Math.min(100, (currentQps / effectiveMaxTargetQps) * 100.0);
 
-            // 如果单节点当前 QPS 高于 500，稍微增加惩罚分数，避免瞬间倾斜
-            if (currentQps > 500) {
+            // If QPS exceeds 10% of max target, add penalty to avoid sudden skew
+            double penaltyThreshold = effectiveMaxTargetQps * 0.1;
+            if (currentQps > penaltyThreshold) {
                 baseScore += 10;
             }
 
@@ -151,12 +152,14 @@ public class LoadBalancer {
         }
 
         /**
-         * 请求历史记录
+         * 请求历史记录 — keeps a sliding window of up to 5 samples for QPS smoothing.
          */
         private static class RequestHistory {
+            private static final int WINDOW_SIZE = 5;
+            private final double[] rates = new double[WINDOW_SIZE];
             private long lastTimestamp = System.currentTimeMillis();
             private long lastRequestCount = 0;
-            private double growthRate = 0;
+            private int count = 0; // number of valid samples
 
             synchronized void addRecord(long totalRequests) {
                 long now = System.currentTimeMillis();
@@ -164,7 +167,14 @@ public class LoadBalancer {
 
                 if (timeDelta > 0 && lastRequestCount > 0) {
                     long requestDelta = totalRequests - lastRequestCount;
-                    growthRate = (requestDelta * 1000.0) / timeDelta; // 每秒请求增长
+                    double rate = (requestDelta * 1000.0) / timeDelta;
+                    // sliding window: shift left and append
+                    if (count < WINDOW_SIZE) {
+                        rates[count++] = rate;
+                    } else {
+                        System.arraycopy(rates, 1, rates, 0, WINDOW_SIZE - 1);
+                        rates[WINDOW_SIZE - 1] = rate;
+                    }
                 }
 
                 lastTimestamp = now;
@@ -172,7 +182,14 @@ public class LoadBalancer {
             }
 
             synchronized double getGrowthRate() {
-                return growthRate;
+                if (count == 0) {
+                    return 0;
+                }
+                double sum = 0;
+                for (int i = 0; i < count; i++) {
+                    sum += rates[i];
+                }
+                return sum / count;
             }
         }
 
@@ -431,7 +448,7 @@ public class LoadBalancer {
         return effective.get(index).getServerId();
     }
 
-    private BalanceAction computeSimpleStrategyAction(List<ClusterManager.ServerInfo> servers) {
+    private synchronized BalanceAction computeSimpleStrategyAction(List<ClusterManager.ServerInfo> servers) {
         long now = System.currentTimeMillis();
         if (now - lastBalanceTime < minMigrationIntervalMs) {
             return null;

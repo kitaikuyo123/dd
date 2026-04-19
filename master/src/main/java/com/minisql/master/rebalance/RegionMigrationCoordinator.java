@@ -25,31 +25,27 @@ public class RegionMigrationCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionMigrationCoordinator.class);
 
-    private final ClusterManager clusterManager;
-    private final MetadataManager metadataManager;
+    private final RebalanceSupport support;
     private final RegionServerCommandClient commandClient;
     private final ReplicaLifecycleManager lifecycleManager;
     private final Map<String, MigrationStatus> migrationStatuses = new ConcurrentHashMap<>();
 
-    private MonitoringService monitoringService;
-    private volatile ZkClient zkClient;
-
     public RegionMigrationCoordinator(ClusterManager clusterManager,
                                       MetadataManager metadataManager,
+                                      LoadBalancer loadBalancer,
                                       RegionServerCommandClient commandClient,
                                       ReplicaLifecycleManager lifecycleManager) {
-        this.clusterManager = clusterManager;
-        this.metadataManager = metadataManager;
+        this.support = new RebalanceSupport(clusterManager, metadataManager, loadBalancer);
         this.commandClient = commandClient;
         this.lifecycleManager = lifecycleManager;
     }
 
     public void setMonitoringService(MonitoringService monitoringService) {
-        this.monitoringService = monitoringService;
+        this.support.monitoringService = monitoringService;
     }
 
     public void setZkClient(ZkClient zkClient) {
-        this.zkClient = zkClient;
+        this.support.zkClient = zkClient;
     }
 
     public void execute(LoadBalancer.BalanceAction action) {
@@ -58,11 +54,11 @@ public class RegionMigrationCoordinator {
             action.getRegionId(), action.getSource(), action.getTarget());
 
         MigrationStatus migrationStatus = new MigrationStatus(
-            action.getRegionId(), action.getSource(), action.getTarget(), MigrationState.OPENING_TARGET);
+            action.getRegionId(), action.getSource(), action.getTarget());
         migrationStatuses.put(action.getRegionId(), migrationStatus);
 
         try {
-            lock = acquireRegionLock(action.getRegionId());
+            lock = support.acquireRegionLock(action.getRegionId());
             String regionId = action.getRegionId();
             ServerId sourceServer = action.getSource();
             ServerId targetServer = action.getTarget();
@@ -71,7 +67,7 @@ public class RegionMigrationCoordinator {
             boolean sourceFinalized = false;
             boolean targetPromoted = false;
 
-            Region region = metadataManager.getRegion(regionId);
+            Region region = support.metadataManager.getRegion(regionId);
             if (region == null) {
                 failMigration(migrationStatus, "Region not found");
                 return;
@@ -147,15 +143,15 @@ public class RegionMigrationCoordinator {
             }
 
             updateMigrationState(migrationStatus, MigrationState.COMMITTING_METADATA, "Committing metadata switch");
-            clusterManager.unassignRegion(regionId);
-            clusterManager.assignRegionToServer(regionId, targetServer);
+            support.clusterManager.unassignRegion(regionId);
+            support.clusterManager.assignRegionToServer(regionId, targetServer);
             region.setPrimary(targetServer);
             region.addReplica(targetServer);
             region.removeReplica(sourceServer);
-            clusterManager.addReplica(regionId, targetServer);
-            clusterManager.removeReplica(regionId, sourceServer);
-            clusterManager.removeRegionLoad(sourceServer, regionId);
-            metadataManager.registerRegionForTable(region, targetServer);
+            support.clusterManager.addReplica(regionId, targetServer);
+            support.clusterManager.removeReplica(regionId, sourceServer);
+            support.clusterManager.removeRegionLoad(sourceServer, regionId);
+            support.metadataManager.registerRegionForTable(region, targetServer);
             transition(regionId, targetServer,
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
                 "Balanced region now primary on target");
@@ -163,36 +159,22 @@ public class RegionMigrationCoordinator {
                 ReplicaLifecycleManager.ReplicaLifecycleState.REMOVED,
                 "Source replica closed after balance");
 
+            migrationStatus.setState(MigrationState.COMPLETED);
             updateMigrationState(migrationStatus, MigrationState.COMPLETED, "Migration completed");
             logger.info("Migration completed for region: {}", regionId);
         } catch (Exception e) {
             failMigration(migrationStatus, "Failed to execute balance action: " + e.getMessage());
         } finally {
-            releaseLock(lock);
+            support.releaseLock(lock);
         }
     }
 
-    private DistributedLock acquireRegionLock(String regionId) throws Exception {
-        if (zkClient == null) {
-            return null;
-        }
-        DistributedLock lock = new DistributedLock(zkClient.getClient(),
-            "/minisql/locks/regions/" + regionId);
-        lock.acquire();
-        return lock;
-    }
-
-    private void releaseLock(DistributedLock lock) {
-        if (lock == null) {
-            return;
-        }
-        try {
-            if (lock.isAcquiredInThisProcess()) {
-                lock.release();
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to release migration lock: {}", e.getMessage(), e);
-        }
+    /**
+     * Query the current migration state for a region, or null if no migration is in progress.
+     */
+    public MigrationState getMigrationState(String regionId) {
+        MigrationStatus status = migrationStatuses.get(regionId);
+        return status != null ? status.getState() : null;
     }
 
     private long notifyServerStartMigration(ServerId sourceServer, String regionId, ServerId targetServer) {
@@ -246,7 +228,7 @@ public class RegionMigrationCoordinator {
                     commandClient.getReplicationLag(targetServer, regionId, TimeUnit.SECONDS.toMillis(5));
                 if (response.getStatus().getSuccess()) {
                     long lastAppliedSequenceId = response.getLastAppliedSequenceId();
-                    clusterManager.updateReplicaSequenceId(regionId, targetServer, lastAppliedSequenceId);
+                    support.clusterManager.updateReplicaSequenceId(regionId, targetServer, lastAppliedSequenceId);
                     if (lastAppliedSequenceId >= expectedSequenceId) {
                         return true;
                     }
@@ -279,6 +261,7 @@ public class RegionMigrationCoordinator {
             if (targetOpenedByMigration) {
                 notifyServerCloseRegionSync(status.targetServer, status.regionId, false);
             }
+            status.setState(MigrationState.ROLLED_BACK);
             updateMigrationState(status, MigrationState.ROLLED_BACK, "Rollback completed");
             return;
         }
@@ -293,31 +276,33 @@ public class RegionMigrationCoordinator {
                 status.regionId, status.sourceServer, status.targetServer, state,
                 (detail != null && !detail.isEmpty() ? " detail=" + detail : ""));
         if (state == MigrationState.OPENING_TARGET || state == MigrationState.INITIAL_SYNC) {
-            recordEvent("REGION_MIGRATION_STARTED", "INFO", status.regionId, status.sourceServer,
+            support.recordEvent("REGION_MIGRATION_STARTED", "INFO", status.regionId, status.sourceServer,
                 status.targetServer, "Region migration started", detail);
         } else if (state == MigrationState.COMPLETED) {
-            recordEvent("REGION_MIGRATION_COMPLETED", "INFO", status.regionId, status.sourceServer,
+            support.recordEvent("REGION_MIGRATION_COMPLETED", "INFO", status.regionId, status.sourceServer,
                 status.targetServer, "Region migration completed", detail);
         }
     }
 
     private void failMigration(MigrationStatus status, String detail) {
+        status.setState(MigrationState.ROLLED_BACK);
         updateMigrationState(status, MigrationState.ROLLED_BACK, detail);
         logger.warn("[MIGRATION] region={} failed: {}", status.regionId, detail);
     }
 
     private void failMigrationRequiresManualIntervention(MigrationStatus status, String detail) {
+        status.setState(MigrationState.FAILED_REQUIRES_MANUAL_INTERVENTION);
         updateMigrationState(status, MigrationState.FAILED_REQUIRES_MANUAL_INTERVENTION, detail);
         logger.warn("[MIGRATION] region={} requires manual intervention: {}", status.regionId, detail);
     }
 
     private boolean notifyServerPromoteToPrimary(ServerId serverId, String regionId) {
         try {
-            long fencingToken = clusterManager.getFencingToken(regionId) + 1;
+            long fencingToken = support.clusterManager.getFencingToken(regionId) + 1;
             RegionServerProto.PromoteResponse response =
                 commandClient.promoteToPrimary(serverId, regionId, fencingToken);
             if (response.getStatus().getSuccess()) {
-                clusterManager.updateFencingToken(regionId, fencingToken);
+                support.clusterManager.updateFencingToken(regionId, fencingToken);
                 return true;
             }
             return false;
@@ -369,17 +354,9 @@ public class RegionMigrationCoordinator {
         lifecycleManager.transition(regionId, serverId, state, detail);
     }
 
-    private void recordEvent(String type, String severity, String regionId, ServerId sourceServer,
-                             ServerId targetServer, String message, String details) {
-        if (monitoringService != null) {
-            monitoringService.recordEvent(type, severity, regionId, null,
-                sourceServer == null ? null : sourceServer.getHost() + ":" + sourceServer.getPort(),
-                targetServer == null ? null : targetServer.getHost() + ":" + targetServer.getPort(),
-                message, details);
-        }
-    }
+    // --- Enums and inner classes ---
 
-    private enum MigrationState {
+    enum MigrationState {
         OPENING_TARGET,
         INITIAL_SYNC,
         FINALIZING_SOURCE,
@@ -393,15 +370,20 @@ public class RegionMigrationCoordinator {
         FAILED_REQUIRES_MANUAL_INTERVENTION
     }
 
-    private static final class MigrationStatus {
+    static final class MigrationStatus {
         private final String regionId;
         private final ServerId sourceServer;
         private final ServerId targetServer;
+        private volatile MigrationState state;
 
-        private MigrationStatus(String regionId, ServerId sourceServer, ServerId targetServer, MigrationState state) {
+        MigrationStatus(String regionId, ServerId sourceServer, ServerId targetServer) {
             this.regionId = regionId;
             this.sourceServer = sourceServer;
             this.targetServer = targetServer;
+            this.state = MigrationState.OPENING_TARGET;
         }
+
+        MigrationState getState() { return state; }
+        void setState(MigrationState state) { this.state = state; }
     }
 }

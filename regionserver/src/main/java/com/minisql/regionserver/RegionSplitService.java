@@ -29,9 +29,6 @@ public class RegionSplitService {
     // 最小分裂大小（防止过度分裂）
     private long minSplitSize = 1L * 1024 * 1024 * 1024; // Default 1GB
 
-    public static final long DEFAULT_SPLIT_THRESHOLD = 10L * 1024 * 1024 * 1024;
-    public static final long MIN_SPLIT_SIZE_LIMIT = 1L * 1024 * 1024 * 1024;
-
     public RegionSplitService(RegionManager regionManager) {
         this.regionManager = regionManager;
     }

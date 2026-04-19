@@ -27,7 +27,6 @@ public final class Constants {
 
     // Heartbeat defaults
     public static final int DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
-    public static final int DEFAULT_HEARTBEAT_TIMEOUT_MS = 15000;
 
     public static final int DEFAULT_REPLICATION_FACTOR = 3;
 
