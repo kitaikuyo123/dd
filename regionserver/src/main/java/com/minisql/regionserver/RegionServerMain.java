@@ -1,7 +1,5 @@
 package com.minisql.regionserver;
 
-import com.minisql.storage.MySQLConfig;
-import com.minisql.storage.MySQLEngineFactory;
 import com.minisql.storage.RocksDBConfig;
 import com.minisql.storage.RocksDBEngineFactory;
 import com.minisql.storage.StorageEngineFactory;
@@ -14,7 +12,7 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * RegionServer entrypoint backed by MySQL storage.
+ * RegionServer entrypoint.
  */
 public class RegionServerMain {
 
@@ -49,13 +47,6 @@ public class RegionServerMain {
         long heartbeatInterval = Long.parseLong(
             config.getProperty("heartbeat.interval.ms", String.valueOf(DEFAULT_HEARTBEAT_INTERVAL)));
 
-        String mysqlHost = config.getProperty("mysql.host", "localhost");
-        int mysqlPort = Integer.parseInt(config.getProperty("mysql.port", "3306"));
-        String mysqlDatabase = config.getProperty("mysql.database", "minisql");
-        String mysqlUsername = config.getProperty("mysql.username", "root");
-        String mysqlPassword = config.getProperty("mysql.password", "");
-        int mysqlMaxConnections = Integer.parseInt(config.getProperty("mysql.max.connections", "10"));
-
         long diskCapacityMb = Long.parseLong(config.getProperty("regionserver.disk.capacity.mb", "1024"));
         long splitThresholdMb = Long.parseLong(config.getProperty("regionserver.region.split.threshold.mb", "256"));
         long splitMinMb = Long.parseLong(config.getProperty("regionserver.region.split.min.mb", "64"));
@@ -68,39 +59,22 @@ public class RegionServerMain {
         logger.info("Port: {}", port);
         logger.info("ZooKeeper: {}", zkConnect);
         logger.info("Master fallback: {}", masterAddress);
-        logger.info("MySQL: {}:{}/{}", mysqlHost, mysqlPort, mysqlDatabase);
         logger.info("Heartbeat interval: {}ms", heartbeatInterval);
         logger.info("----------------------------------------");
 
-        MySQLConfig mysqlConfig = MySQLConfig.builder(
-            "jdbc:mysql://" + mysqlHost + ":" + mysqlPort + "/" + mysqlDatabase,
-            mysqlUsername,
-            mysqlPassword
-        ).maxPoolSize(mysqlMaxConnections).build();
+        // Storage engine (currently RocksDB only)
+        String rocksdbDir = config.getProperty("rocksdb.data.dir", "./data/rocksdb");
+        long writeBufferMb = Long.parseLong(config.getProperty("rocksdb.write.buffer.size.mb", "64"));
+        String compression = config.getProperty("rocksdb.compression", "snappy");
+        RocksDBConfig rocksDBConfig = RocksDBConfig.builder(rocksdbDir)
+            .writeBufferSizeBytes(writeBufferMb * 1024 * 1024)
+            .compressionType(compression)
+            .build();
+        StorageEngineFactory engineFactory = new RocksDBEngineFactory(rocksDBConfig);
+        logger.info("Using RocksDB storage engine at {}", rocksdbDir);
 
-        // Storage engine selection
-        String storageType = config.getProperty("storage.type", "mysql").toLowerCase();
-        StorageEngineFactory engineFactory;
-        switch (storageType) {
-            case "rocksdb":
-                String rocksdbDir = config.getProperty("rocksdb.data.dir", "./data/rocksdb");
-                long writeBufferMb = Long.parseLong(config.getProperty("rocksdb.write.buffer.size.mb", "64"));
-                String compression = config.getProperty("rocksdb.compression", "snappy");
-                RocksDBConfig rocksDBConfig = RocksDBConfig.builder(rocksdbDir)
-                    .writeBufferSizeBytes(writeBufferMb * 1024 * 1024)
-                    .compressionType(compression)
-                    .build();
-                engineFactory = new RocksDBEngineFactory(rocksDBConfig);
-                logger.info("Using RocksDB storage engine at {}", rocksdbDir);
-                break;
-            default:
-                engineFactory = new MySQLEngineFactory(mysqlConfig.createDataSource());
-                logger.info("Using MySQL storage engine at {}:{}/{}", mysqlHost, mysqlPort, mysqlDatabase);
-                break;
-        }
-
-        initRegionServer(host, port, mysqlConfig, engineFactory, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
-        initHeartbeatSender(zkConnect, masterAddress, heartbeatInterval, mysqlConfig, diskCapacityMb);
+        initRegionServer(host, port, engineFactory, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
+        initHeartbeatSender(zkConnect, masterAddress, heartbeatInterval, diskCapacityMb);
 
         logger.info("----------------------------------------");
         logger.info("RegionServer started successfully");
@@ -142,14 +116,6 @@ public class RegionServerMain {
         if (rsPort != null) {
             config.setProperty("regionserver.port", rsPort);
         }
-        String mysqlHost = System.getenv("MINISQL_MYSQL_HOST");
-        if (mysqlHost != null) {
-            config.setProperty("mysql.host", mysqlHost);
-        }
-        String mysqlPassword = System.getenv("MINISQL_MYSQL_PASSWORD");
-        if (mysqlPassword != null) {
-            config.setProperty("mysql.password", mysqlPassword);
-        }
 
         return config;
     }
@@ -168,13 +134,12 @@ public class RegionServerMain {
 
     private void initRegionServer(String host,
                                   int port,
-                                  MySQLConfig mysqlConfig,
                                   StorageEngineFactory engineFactory,
                                   String masterAddress,
                                   long splitThresholdMb,
                                   long splitMinMb,
                                   int replicationFactor) throws IOException {
-        regionServer = new RegionServer(host, port, mysqlConfig, engineFactory, masterAddress, replicationFactor);
+        regionServer = new RegionServer(host, port, engineFactory, masterAddress, replicationFactor);
         regionServer.getSplitService().setConfig(splitThresholdMb, splitMinMb);
         regionServer.start();
     }
@@ -182,7 +147,6 @@ public class RegionServerMain {
     private void initHeartbeatSender(String zkConnect,
                                      String masterAddress,
                                      long heartbeatInterval,
-                                     MySQLConfig mysqlConfig,
                                      long diskCapacityMb) {
         heartbeatSender = new HeartbeatSender(
             regionServer.getServerId(),
@@ -191,7 +155,6 @@ public class RegionServerMain {
         );
         heartbeatSender.setZkConnectString(zkConnect);
         heartbeatSender.setMasterAddress(masterAddress);
-        heartbeatSender.setMySQLConfig(mysqlConfig);
         heartbeatSender.setDiskCapacityMb(diskCapacityMb);
         heartbeatSender.start();
     }

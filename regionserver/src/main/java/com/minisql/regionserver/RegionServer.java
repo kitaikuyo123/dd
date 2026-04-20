@@ -11,10 +11,8 @@ import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.replication.ReplicationConfig;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationWAL;
-import com.minisql.storage.MySQLConfig;
 import com.minisql.storage.StorageEngineFactory;
 import com.minisql.storage.StorageScanFilter;
-import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
@@ -37,9 +35,7 @@ public class RegionServer {
     private final RegionManager regionManager;
     private final RegionSplitService splitService;
     private final RegionMergeService mergeService;
-    private final MySQLConfig mysqlConfig;
     private final StorageEngineFactory engineFactory;
-    private volatile HikariDataSource sharedDataSource;
     private final String masterAddress;
 
     private final ReplicationCoordinator replicationCoordinator;
@@ -50,10 +46,9 @@ public class RegionServer {
 
     private Server grpcServer;
 
-    public RegionServer(String host, int port, MySQLConfig mysqlConfig, StorageEngineFactory engineFactory,
+    public RegionServer(String host, int port, StorageEngineFactory engineFactory,
                         String masterAddress, int replicationFactor) {
         this.serverId = new ServerId(host, port);
-        this.mysqlConfig = mysqlConfig;
         this.engineFactory = engineFactory;
         this.masterAddress = masterAddress;
 
@@ -62,14 +57,8 @@ public class RegionServer {
         this.mergeService = new RegionMergeService(regionManager);
 
         this.replicationCoordinator = new ReplicationCoordinator(
-            ReplicationConfig.builder(replicationFactor).build(),
-            this.mysqlConfig
+            ReplicationConfig.builder(replicationFactor).build()
         );
-    }
-
-    public RegionServer(String host, int port, MySQLConfig mysqlConfig, String masterAddress,
-                        int replicationFactor) {
-        this(host, port, mysqlConfig, null, masterAddress, replicationFactor);
     }
 
     public void start() throws IOException {
@@ -193,11 +182,6 @@ public class RegionServer {
             regionManager.closeRegion(region.getRegionId(), false);
         }
 
-        if (sharedDataSource != null && !sharedDataSource.isClosed()) {
-            sharedDataSource.close();
-            logger.info("Shared MySQL DataSource closed");
-        }
-
         logger.info("RegionServer stopped");
     }
 
@@ -305,25 +289,8 @@ public class RegionServer {
         return running;
     }
 
-    /**
-     * Gets or creates the shared RegionServer-level datasource (for MySQL mode).
-     */
-    public synchronized HikariDataSource getOrCreateSharedDataSource() {
-        if (sharedDataSource == null || sharedDataSource.isClosed()) {
-            if (mysqlConfig != null) {
-                sharedDataSource = mysqlConfig.createDataSource();
-                logger.info("Shared MySQL DataSource created: {}", mysqlConfig.getJdbcUrl());
-            }
-        }
-        return sharedDataSource;
-    }
-
     public StorageEngineFactory getEngineFactory() {
-        if (engineFactory != null) {
-            return engineFactory;
-        }
-        // Legacy path: no factory provided, create MySQL on-the-fly
-        return new com.minisql.storage.MySQLEngineFactory(getOrCreateSharedDataSource());
+        return engineFactory;
     }
 
     public ReplicationCoordinator getReplicationCoordinator() {

@@ -45,7 +45,6 @@ public class HeartbeatSender {
     private volatile long lastCpuSampleWallClockNs = -1L;
     private volatile long lastCpuSampleProcessCpuNs = -1L;
 
-    private com.minisql.storage.MySQLConfig mysqlConfig;
     private long diskCapacityMb = 1024L;
 
     public HeartbeatSender(ServerId serverId, RegionManager regionManager) {
@@ -65,10 +64,6 @@ public class HeartbeatSender {
             t.setDaemon(true);
             return t;
         });
-    }
-
-    public void setMySQLConfig(com.minisql.storage.MySQLConfig mysqlConfig) {
-        this.mysqlConfig = mysqlConfig;
     }
 
     public void setDiskCapacityMb(long diskCapacityMb) {
@@ -170,8 +165,8 @@ public class HeartbeatSender {
             zkManager.registerRegionServer(ZkPayloads.encodeRegionServerNode(
                 serverId,
                 serverId.getServerName(),
-                mysqlConfig == null ? "" : mysqlConfig.getJdbcUrl(),
-                mysqlConfig == null ? "" : mysqlConfig.getUsername(),
+                "",
+                "",
                 serverId.getStartTime(),
                 0L
             ));
@@ -224,15 +219,6 @@ public class HeartbeatSender {
                     .setPort(serverId.getPort())
                     .build())
                 .setTimestamp(System.currentTimeMillis());
-
-            if (mysqlConfig != null) {
-                requestBuilder.setMysqlConfig(CommonProto.MySQLConfig.newBuilder()
-                    .setUrl(mysqlConfig.getJdbcUrl())
-                    .setUser(mysqlConfig.getUsername())
-                    .setPassword(mysqlConfig.getPassword())
-                    .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                    .build());
-            }
 
             MasterProto.RegisterResponse response = masterStub.registerRegionServer(requestBuilder.build());
             if (response.getStatus().getSuccess()) {
