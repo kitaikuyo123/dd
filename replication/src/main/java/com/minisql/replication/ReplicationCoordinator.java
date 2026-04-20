@@ -3,7 +3,6 @@ package com.minisql.replication;
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
-import com.minisql.storage.MySQLConfig;
 import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,10 +41,6 @@ public class ReplicationCoordinator {
 
     public ReplicationCoordinator(ReplicationConfig config) {
         this(config, null, new GrpcReplicationTransportClient());
-    }
-
-    public ReplicationCoordinator(ReplicationConfig config, MySQLConfig walConfig) {
-        this(config, walConfig == null ? null : new ReplicationWAL(walConfig), new GrpcReplicationTransportClient());
     }
 
     public ReplicationCoordinator(ReplicationConfig config,

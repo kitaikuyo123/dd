@@ -12,7 +12,7 @@
 
     <artifactId>storage</artifactId>
     <name>MiniSQL - Storage</name>
-    <description>Pluggable storage engine (MySQL, RocksDB)</description>
+    <description>RocksDB storage engine</description>
 
     <dependencies>
         <dependency>
@@ -20,22 +20,15 @@
             <artifactId>common</artifactId>
             <version>${project.version}</version>
         </dependency>
-        <!-- MySQL Connector -->
-        <dependency>
-            <groupId>com.mysql</groupId>
-            <artifactId>mysql-connector-j</artifactId>
-            <version>8.2.0</version>
-        </dependency>
-        <!-- HikariCP 连接池 -->
-        <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
-            <version>5.1.0</version>
-        </dependency>
         <!-- RocksDB -->
         <dependency>
             <groupId>org.rocksdb</groupId>
             <artifactId>rocksdbjni</artifactId>
+        </dependency>
+        <!-- SLF4J API -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
         </dependency>
 
         <dependency>

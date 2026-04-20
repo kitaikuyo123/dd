@@ -2,7 +2,6 @@ package com.minisql.storage;
 
 /**
  * Factory for creating StorageEngine instances per region.
- * Implementations correspond to different storage backends (MySQL, RocksDB, etc.).
  */
 public interface StorageEngineFactory {
 
