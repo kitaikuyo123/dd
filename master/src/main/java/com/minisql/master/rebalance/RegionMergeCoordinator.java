@@ -1,5 +1,6 @@
 package com.minisql.master.rebalance;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.RegionServerProto;
@@ -29,14 +30,11 @@ public class RegionMergeCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionMergeCoordinator.class);
 
-    private static final long DEFAULT_MERGE_THRESHOLD_SIZE = 100L * 1024 * 1024;
-    private static final long DEFAULT_MAX_MERGE_SIZE = 8L * 1024 * 1024 * 1024;
-    private static final long DEFAULT_MIN_MERGE_SIZE = 10L * 1024 * 1024;
     private static final long DEFAULT_MERGE_COOLDOWN_MS = 60 * 60 * 1000;
 
-    private volatile long mergeThresholdSize = DEFAULT_MERGE_THRESHOLD_SIZE;
-    private volatile long maxMergeSize = DEFAULT_MAX_MERGE_SIZE;
-    private volatile long minMergeSize = DEFAULT_MIN_MERGE_SIZE;
+    private volatile long mergeThresholdSize = Constants.DEFAULT_MERGE_THRESHOLD;
+    private volatile long maxMergeSize = Constants.DEFAULT_MERGE_MAX_SIZE;
+    private volatile long minMergeSize = Constants.DEFAULT_MERGE_MIN_SIZE;
     private volatile long mergeCooldownMs = DEFAULT_MERGE_COOLDOWN_MS;
 
     private final BlockingQueue<MergeTask> mergeQueue = new LinkedBlockingQueue<>();

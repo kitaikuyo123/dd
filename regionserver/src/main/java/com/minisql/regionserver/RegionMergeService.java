@@ -1,5 +1,6 @@
 package com.minisql.regionserver;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
 import org.slf4j.Logger;
@@ -20,14 +21,14 @@ public class RegionMergeService {
 
     private final RegionManager regionManager;
 
-    // 合并阈值：两个 Region 都小于此值时可以合并（100MB）
-    public static final long MERGE_THRESHOLD = 100L * 1024 * 1024;
+    // 合并阈值：两个 Region 都小于此值时可以合并
+    public static final long MERGE_THRESHOLD = Constants.DEFAULT_MERGE_THRESHOLD;
 
-    // 最大合并大小：合并后超过此值则不合并（8GB）
-    public static final long MAX_MERGE_SIZE = 8L * 1024 * 1024 * 1024;
+    // 最大合并大小：合并后超过此值则不合并
+    public static final long MAX_MERGE_SIZE = Constants.DEFAULT_MERGE_MAX_SIZE;
 
-    // 最小合并大小：单个 Region 小于此值时强制合并（10MB）
-    public static final long MIN_MERGE_SIZE = 10L * 1024 * 1024;
+    // 最小合并大小：单个 Region 小于此值时强制合并
+    public static final long MIN_MERGE_SIZE = Constants.DEFAULT_MERGE_MIN_SIZE;
 
     public RegionMergeService(RegionManager regionManager) {
         this.regionManager = regionManager;

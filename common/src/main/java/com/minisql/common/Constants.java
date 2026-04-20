@@ -32,6 +32,17 @@ public final class Constants {
 
     public static final String DEFAULT_TMP_DIR = "./tmp";
 
+    // Region split/merge 阈值 — 字段初始化的兜底默认值。
+    // 运行时由配置文件覆盖：
+    //   Master:        region.split.threshold.mb / region.merge.threshold.mb
+    //   RegionServer:  regionserver.region.split.threshold.mb / regionserver.region.split.min.mb
+    public static final long DEFAULT_SPLIT_THRESHOLD = 10L * 1024 * 1024 * 1024;  // 10 GB
+    public static final long DEFAULT_SPLIT_MIN_SIZE = 1L * 1024 * 1024 * 1024;    // 1 GB
+
+    public static final long DEFAULT_MERGE_THRESHOLD = 100L * 1024 * 1024;         // 100 MB
+    public static final long DEFAULT_MERGE_MAX_SIZE = 8L * 1024 * 1024 * 1024;    // 8 GB
+    public static final long DEFAULT_MERGE_MIN_SIZE = 10L * 1024 * 1024;           // 10 MB
+
     private Constants() {
     }
 }

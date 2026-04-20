@@ -1031,7 +1031,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         }
 
         for (Column column : schema.getColumns()) {
-            if (column.getName().equals(columnName)) {
+            if (column.getName().equalsIgnoreCase(columnName)) {
                 return column;
             }
         }

@@ -1,5 +1,6 @@
 package com.minisql.regionserver;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
 import com.minisql.common.utils.BytesUtil;
@@ -25,9 +26,9 @@ public class RegionSplitService {
     private final RegionManager regionManager;
 
     // 分裂阈值
-    private long splitThreshold = 10L * 1024 * 1024 * 1024; // Default 10GB
+    private long splitThreshold = Constants.DEFAULT_SPLIT_THRESHOLD;
     // 最小分裂大小（防止过度分裂）
-    private long minSplitSize = 1L * 1024 * 1024 * 1024; // Default 1GB
+    private long minSplitSize = Constants.DEFAULT_SPLIT_MIN_SIZE;
 
     public RegionSplitService(RegionManager regionManager) {
         this.regionManager = regionManager;

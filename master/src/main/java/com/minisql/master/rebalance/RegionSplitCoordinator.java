@@ -1,5 +1,6 @@
 package com.minisql.master.rebalance;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.*;
@@ -30,10 +31,9 @@ public class RegionSplitCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionSplitCoordinator.class);
 
-    private static final long DEFAULT_SPLIT_THRESHOLD_SIZE = 10L * 1024 * 1024 * 1024;
     private static final long DEFAULT_TABLE_SPLIT_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(2);
 
-    private volatile long splitThresholdSize = DEFAULT_SPLIT_THRESHOLD_SIZE;
+    private volatile long splitThresholdSize = Constants.DEFAULT_SPLIT_THRESHOLD;
     private volatile long tableSplitCooldownMs = DEFAULT_TABLE_SPLIT_COOLDOWN_MS;
 
     private final BlockingQueue<SplitTask> splitQueue = new LinkedBlockingQueue<>();
