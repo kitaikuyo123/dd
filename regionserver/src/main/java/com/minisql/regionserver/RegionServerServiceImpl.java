@@ -150,12 +150,12 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 throw new IOException("Region storage not found: " + regionId);
             }
 
-            List<KeyValue> results = storage.getStorageEngine().get(rowKey);
+            KeyValue result = storage.get(rowKey);
 
             RegionServerProto.GetResponse.Builder builder = RegionServerProto.GetResponse.newBuilder()
                 .setStatus(createSuccessStatus());
 
-            for (KeyValue result : results) {
+            if (result != null) {
                 builder.addKeyValues(convertToProto(result));
             }
 

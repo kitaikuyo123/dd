@@ -71,9 +71,7 @@ public class RegionStorage {
     }
 
     public synchronized void compact(boolean major) throws IOException {
-        if (major) {
-            storageEngine.compact(true);
-        }
+        storageEngine.compact(major);
     }
 
     public void close() throws IOException {
@@ -96,10 +94,6 @@ public class RegionStorage {
 
     public String getRegionId() {
         return regionId;
-    }
-
-    public StorageEngine getStorageEngine() {
-        return storageEngine;
     }
 
     public long getStoreFileSize() {
