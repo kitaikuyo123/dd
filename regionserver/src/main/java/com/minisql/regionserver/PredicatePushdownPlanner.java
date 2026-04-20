@@ -15,7 +15,7 @@ import java.util.List;
 
 /**
  * Builds storage-level row_key bounds for predicates that can be translated
- * safely to indexed MySQL range scans.
+ * safely to indexed storage range scans.
  */
 final class PredicatePushdownPlanner {
 

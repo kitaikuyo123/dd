@@ -171,7 +171,7 @@ public class RocksDBStorageEngine implements StorageEngine {
 
     @Override
     public void delete(byte[] key) {
-        // Write a tombstone marker (same as MySQL approach for MVCC consistency)
+        // Write a tombstone marker for MVCC consistency
         long timestamp = System.currentTimeMillis();
         byte[] compositeKey = buildCompositeKey(key, "", "", timestamp);
         try {

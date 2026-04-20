@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Resolves MVCC visibility and delete markers from MySQL result sets.
+ * Resolves MVCC visibility and delete markers from storage result sets.
  */
 public class KeyValueVisibilityResolver {
 

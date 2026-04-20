@@ -4,7 +4,6 @@ import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.replication.ReplicationCoordinator;
-import com.minisql.storage.MySQLConfig;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -22,7 +21,7 @@ class RegionServerServiceImplTest {
         RegionServer regionServer = new RegionServer(
             "localhost",
             16020,
-            MySQLConfig.builder("jdbc:mysql://localhost:3306/test", "root", "root").build(),
+            null,
             null,
             3
         );

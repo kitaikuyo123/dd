@@ -13,7 +13,6 @@ import java.util.UUID;
 
 /**
  * Region 合并服务
- * 基于 MySQL 存储引擎
  */
 public class RegionMergeService {
 

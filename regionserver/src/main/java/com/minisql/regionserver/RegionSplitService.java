@@ -159,7 +159,7 @@ public class RegionSplitService {
         rightRegion.setStartKey(splitKey);
         rightRegion.setEndKey(oldRegion.getEndKey());
 
-        // 2. 创建新的 MySQL 存储
+        // 2. 创建新的存储
         RegionStorage leftStorage = regionManager.createRegionStorage(leftRegionId);
         RegionStorage rightStorage = regionManager.createRegionStorage(rightRegionId);
         leftStorage.start();

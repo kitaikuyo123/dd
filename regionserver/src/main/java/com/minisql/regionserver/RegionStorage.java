@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Region storage backed by a pluggable StorageEngine (MySQL, RocksDB, etc.).
+ * Region storage backed by a pluggable StorageEngine.
  */
 public class RegionStorage {
 
