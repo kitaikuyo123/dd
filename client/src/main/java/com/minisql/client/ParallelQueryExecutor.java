@@ -16,7 +16,6 @@ import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.ast.SimpleCondition;
 import com.minisql.sql.execution.QueryPlan.JoinType;
 import com.minisql.sql.execution.Row;
-import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -48,14 +47,11 @@ public class ParallelQueryExecutor {
 
     private final ExecutorService executor;
     private final MasterServiceGrpc.MasterServiceBlockingStub masterStub;
-    private final Map<String, HikariDataSource> connectionPools;
     private final long queryTimeoutSeconds;
 
     public ParallelQueryExecutor(MasterServiceGrpc.MasterServiceBlockingStub masterStub,
-                                 Map<String, HikariDataSource> connectionPools,
                                  long queryTimeoutSeconds) {
         this.masterStub = masterStub;
-        this.connectionPools = connectionPools;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
         this.executor = Executors.newFixedThreadPool(10);
     }
@@ -880,9 +876,6 @@ public class ParallelQueryExecutor {
 
     public void shutdown() {
         executor.shutdown();
-        for (HikariDataSource ds : connectionPools.values()) {
-            ds.close();
-        }
     }
 
     public static class RegionLocation {

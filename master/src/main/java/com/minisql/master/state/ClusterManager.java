@@ -3,7 +3,6 @@ package com.minisql.master.state;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.rebalance.LoadBalancer;
-import com.minisql.storage.MySQLConfig;
 import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,9 +47,6 @@ public class ClusterManager {
 
     // Fencing Token 管理：regionId -> fencingToken（用于防止脑裂）
     private final Map<String, Long> regionFencingTokens = new ConcurrentHashMap<>();
-
-    // RegionServer 的 MySQL 配置：serverId -> MySQL 配置
-    private final Map<String, MySQLConfig> serverMySQLConfigs = new ConcurrentHashMap<>();
 
     public ClusterManager(LoadBalancer loadBalancer) {
         this.loadBalancer = loadBalancer;
@@ -408,30 +404,6 @@ public class ClusterManager {
     public boolean validateFencingToken(String regionId, long token) {
         long currentToken = regionFencingTokens.getOrDefault(regionId, 0L);
         return token >= currentToken;
-    }
-
-    // ==================== MySQL 配置管理 ====================
-
-    /**
-     * 注册 RegionServer 的 MySQL 配置
-     */
-    public void registerMySQLConfig(ServerId serverId, MySQLConfig config) {
-        serverMySQLConfigs.put(serverKey(serverId), config);
-        logger.info("MySQL config registered for server: {}", serverId);
-    }
-
-    /**
-     * 获取 RegionServer 的 MySQL 配置
-     */
-    public MySQLConfig getMySQLConfig(ServerId serverId) {
-        return serverMySQLConfigs.get(serverKey(serverId));
-    }
-
-    /**
-     * 移除 RegionServer 的 MySQL 配置
-     */
-    public void removeMySQLConfig(ServerId serverId) {
-        serverMySQLConfigs.remove(serverKey(serverId));
     }
 
     /**

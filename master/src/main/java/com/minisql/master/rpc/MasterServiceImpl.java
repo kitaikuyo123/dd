@@ -587,18 +587,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     .map(info -> info.getServerId().toString())
                     .collect(Collectors.toList()));
 
-            // 注册 MySQL 配置
-            if (request.hasMysqlConfig()) {
-                CommonProto.MySQLConfig mysqlConfigProto = request.getMysqlConfig();
-                com.minisql.storage.MySQLConfig mysqlConfig = com.minisql.storage.MySQLConfig.builder(
-                        mysqlConfigProto.getUrl(),
-                        mysqlConfigProto.getUser(),
-                        mysqlConfigProto.getPassword()
-                ).maxPoolSize(mysqlConfigProto.getMaxPoolSize()).build();
-                clusterManager.registerMySQLConfig(serverId, mysqlConfig);
-                logger.info("MySQL config registered for server: {}", serverId);
-            }
-
             MasterProto.RegisterResponse response = MasterProto.RegisterResponse.newBuilder()
                 .setStatus(createSuccessStatus())
                 .setClusterId(clusterId)
@@ -761,28 +749,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             ServerId primaryServer = clusterManager.getPrimaryServerForRegion(region.getRegionId());
 
-            // 获取 MySQL 配置
-            CommonProto.MySQLConfig mysqlConfigProto = null;
-            if (primaryServer != null) {
-                com.minisql.storage.MySQLConfig mysqlConfig = clusterManager.getMySQLConfig(primaryServer);
-                if (mysqlConfig != null) {
-                    mysqlConfigProto = CommonProto.MySQLConfig.newBuilder()
-                        .setUrl(mysqlConfig.getJdbcUrl())
-                        .setUser(mysqlConfig.getUsername())
-                        .setPassword(mysqlConfig.getPassword())
-                        .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                        .build();
-                }
-            }
-
             MasterProto.GetLocationResponse.Builder responseBuilder = MasterProto.GetLocationResponse.newBuilder()
                 .setStatus(createSuccessStatus())
-                .setRegion(convertRegionInfo(region, mysqlConfigProto))
+                .setRegion(convertRegionInfo(region))
                 .setServerId(convertToProtoServerId(primaryServer));
-
-            if (mysqlConfigProto != null) {
-                responseBuilder.setMysqlConfig(mysqlConfigProto);
-            }
 
             responseObserver.onNext(responseBuilder.build());
             responseObserver.onCompleted();
@@ -948,18 +918,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                             region.getRegionId());
                     }
 
-                    // 获取 MySQL 配置
-                    com.minisql.storage.MySQLConfig mysqlConfig = clusterManager.getMySQLConfig(primaryServer);
-                    CommonProto.MySQLConfig mysqlConfigProto = null;
-                    if (mysqlConfig != null) {
-                        mysqlConfigProto = CommonProto.MySQLConfig.newBuilder()
-                            .setUrl(mysqlConfig.getJdbcUrl())
-                            .setUser(mysqlConfig.getUsername())
-                            .setPassword(mysqlConfig.getPassword())
-                            .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                            .build();
-                    }
-                    regionInfos.add(convertRegionInfo(region, mysqlConfigProto));
+                    regionInfos.add(convertRegionInfo(region));
                 } else {
                     // 如果没有可用服务器，仍然注册 Region 但不写主副本信息
                     throw new IllegalStateException("No server available for region " + region.getRegionId());
@@ -1221,17 +1180,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                             .setServerType("REGIONSERVER");
                     regionBuilder.setPrimary(primaryBuilder.build());
 
-                    // 获取 MySQL 配置
-                    com.minisql.storage.MySQLConfig mysqlConfig = clusterManager.getMySQLConfig(region.getPrimary());
-                    if (mysqlConfig != null) {
-                        CommonProto.MySQLConfig mysqlConfigProto = CommonProto.MySQLConfig.newBuilder()
-                                .setUrl(mysqlConfig.getJdbcUrl())
-                                .setUser(mysqlConfig.getUsername())
-                                .setPassword(mysqlConfig.getPassword())
-                                .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                                .build();
-                        regionBuilder.setMysqlConfig(mysqlConfigProto);
-                    }
                 }
 
                 protoRegions.add(regionBuilder.build());
@@ -1547,17 +1495,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         }
     }
 
-    private CommonProto.RegionInfo convertRegionInfo(Region region, CommonProto.MySQLConfig mysqlConfig) {
+    private CommonProto.RegionInfo convertRegionInfo(Region region) {
         CommonProto.RegionInfo.Builder builder = CommonProto.RegionInfo.newBuilder()
             .setRegionId(region.getRegionId())
             .setTableName(region.getTableName())
             .setStartKey(com.google.protobuf.ByteString.copyFrom(region.getStartKey()))
             .setEndKey(com.google.protobuf.ByteString.copyFrom(region.getEndKey()))
             .setState(CommonProto.RegionState.OPEN);
-
-        if (mysqlConfig != null) {
-            builder.setMysqlConfig(mysqlConfig);
-        }
 
         return builder.build();
     }

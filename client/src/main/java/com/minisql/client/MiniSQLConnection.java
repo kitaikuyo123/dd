@@ -7,7 +7,6 @@ import com.minisql.common.utils.BytesUtil;
 import com.minisql.sql.SQLParser;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
-import com.zaxxer.hikari.HikariDataSource;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
@@ -57,9 +56,6 @@ public class MiniSQLConnection implements Connection {
     // 并行查询执行器
     private final ParallelQueryExecutor parallelQueryExecutor;
 
-    // MySQL 连接池缓存
-    private final Map<String, HikariDataSource> mysqlPools = new ConcurrentHashMap<>();
-
     // 表结构缓存
     private final Map<String, com.minisql.common.model.Table> tableSchemaCache = new ConcurrentHashMap<>();
 
@@ -80,7 +76,7 @@ public class MiniSQLConnection implements Connection {
         initialize();
 
         // 初始化并行查询执行器
-        this.parallelQueryExecutor = new ParallelQueryExecutor(masterStub, mysqlPools, 30);
+        this.parallelQueryExecutor = new ParallelQueryExecutor(masterStub, 30);
     }
 
     private void parseUrl(String url) throws SQLException {
@@ -811,12 +807,6 @@ public class MiniSQLConnection implements Connection {
 
             // 清理事务状态
             transactionOperations.clear();
-
-            // 关闭 MySQL 连接池
-            for (HikariDataSource ds : mysqlPools.values()) {
-                ds.close();
-            }
-            mysqlPools.clear();
 
             // 关闭并行查询执行器
             if (parallelQueryExecutor != null) {

@@ -189,15 +189,6 @@ public class GrpcRegionServerCommandClient implements RegionServerCommandClient 
             }
         }
 
-        com.minisql.storage.MySQLConfig mysqlConfig = clusterManager.getMySQLConfig(targetServer);
-        if (mysqlConfig != null) {
-            builder.setMysqlConfig(CommonProto.MySQLConfig.newBuilder()
-                .setUrl(mysqlConfig.getJdbcUrl())
-                .setUser(mysqlConfig.getUsername())
-                .setPassword(mysqlConfig.getPassword())
-                .setMaxPoolSize(mysqlConfig.getMaxPoolSize())
-                .build());
-        }
         return builder.build();
     }
 

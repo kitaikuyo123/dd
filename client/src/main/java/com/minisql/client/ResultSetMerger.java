@@ -13,7 +13,7 @@ import java.util.PriorityQueue;
 
 /**
  * 结果集合并器
- * 用于合并来自多个 MySQL 实例的查询结果
+ * 用于合并来自多个 RegionServer 的查询结果
  *
  * 支持功能：
  * 1. 简单的结果合并（无排序）
