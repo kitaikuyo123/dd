@@ -49,4 +49,10 @@ public interface StorageEngine {
      * Returns 0 by default.
      */
     default long estimateSizeBytes() { return 0L; }
+
+    /**
+     * Estimate the in-memory write buffer (MemTable) size in bytes.
+     * Returns 0 by default.
+     */
+    default long estimateMemTableSize() { return 0L; }
 }

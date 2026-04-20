@@ -284,7 +284,7 @@ public class HeartbeatSender {
                     .setReadRequests(storage.getReadRequestCount())
                     .setWriteRequests(storage.getWriteRequestCount())
                     .setStoreFileSize(storage.getStoreFileSize())
-                    .setMemStoreSize(0)
+                    .setMemStoreSize(storage.getMemStoreSize())
                     .build());
             }
         } catch (Exception e) {

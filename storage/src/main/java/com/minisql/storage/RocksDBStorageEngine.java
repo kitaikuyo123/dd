@@ -195,9 +195,14 @@ public class RocksDBStorageEngine implements StorageEngine {
     @Override
     public void compact(boolean major) {
         try {
-            db.compactRange();
-            logger.info("RocksDB compaction completed for region {}", regionId);
-        } catch (RocksDBException e) {
+            if (major) {
+                db.compactRange();
+                logger.info("RocksDB major compaction completed for region {}", regionId);
+            } else {
+                flush();
+                logger.info("RocksDB minor compaction (flush) completed for region {}", regionId);
+            }
+        } catch (Exception e) {
             logger.warn("RocksDB compaction failed for region {}: {}", regionId, e.getMessage());
         }
     }
@@ -230,6 +235,15 @@ public class RocksDBStorageEngine implements StorageEngine {
             // Fallback: sum file sizes in directory
             File dir = new File(dbPath);
             return dir.exists() ? dirSize(dir) : 0L;
+        }
+    }
+
+    @Override
+    public long estimateMemTableSize() {
+        try {
+            return db.getLongProperty("rocksdb.cur-size-all-mem-tables");
+        } catch (Exception e) {
+            return 0L;
         }
     }
 

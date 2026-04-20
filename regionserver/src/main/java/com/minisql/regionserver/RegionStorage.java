@@ -115,6 +115,6 @@ public class RegionStorage {
     }
 
     public long getMemStoreSize() {
-        return 0;
+        return storageEngine.estimateMemTableSize();
     }
 }
