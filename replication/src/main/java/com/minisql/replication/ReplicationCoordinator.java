@@ -334,7 +334,22 @@ public class ReplicationCoordinator {
             }, replicationExecutor));
         }
 
-        int requiredAcks = Math.max(0, config.getRequiredAcks(group.getReplicas().size()) - 1);
+        int totalReplicas = group.getReplicas().size();
+        int secondaryCount = totalReplicas - 1;
+        int requiredAcks;
+        if (secondaryCount == 0) {
+            // 只有 primary，无需确认
+            requiredAcks = 0;
+        } else if (config.isQuorumAckEnabled()) {
+            // quorum 确认：primary 自身算 1 票，只需 (majority - 1) 个 secondary ACK
+            // 即 totalReplicas=3 时 majority=2，需要 1 个 secondary ACK
+            int majority = totalReplicas / 2 + 1;
+            requiredAcks = majority - 1;
+        } else {
+            // 全部确认：所有 secondary 都必须 ACK
+            requiredAcks = secondaryCount;
+        }
+
         int successCount = 0;
         for (CompletableFuture<AckResult> future : futures) {
             try {
@@ -356,7 +371,20 @@ public class ReplicationCoordinator {
             }
         }
 
-        task.future.complete(successCount >= requiredAcks);
+        boolean acked = successCount >= requiredAcks;
+        if (!acked) {
+            // 降级：所有 secondary 都不可达时，允许 primary 独自完成写入
+            // 避免因 secondary 不可用导致整个集群无法写入
+            if (successCount == 0 && secondaryCount > 0) {
+                logger.warn("All secondaries unreachable for region {}, degrading to primary-only write (total replicas={})",
+                    regionId, totalReplicas);
+                acked = true;
+            } else if (secondaryCount > 0) {
+                logger.warn("Replication ack shortfall for region {}: got {}/{} required secondary acks (total replicas={})",
+                    regionId, successCount, requiredAcks, totalReplicas);
+            }
+        }
+        task.future.complete(acked);
 
         // WAL 清理：复制成功后保留最近 walRetentionCount 条，删除更早的
         if (successCount >= requiredAcks && wal != null) {

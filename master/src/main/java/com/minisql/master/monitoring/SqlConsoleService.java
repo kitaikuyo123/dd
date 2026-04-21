@@ -34,31 +34,92 @@ public class SqlConsoleService {
         this.jdbcUrl = "jdbc:minisql://" + zkConnectString;
     }
 
-    public Map<String, Object> execute(String sql) {
-        String trimmedSql = sql == null ? "" : sql.trim();
-        if (trimmedSql.isEmpty()) {
+    public List<Map<String, Object>> execute(String sql) {
+        if (sql == null || sql.trim().isEmpty()) {
             throw new IllegalArgumentException("SQL must not be empty");
         }
 
+        // Split by semicolons, respecting that ';' inside single-quoted strings is not a delimiter
+        List<String> statements = splitStatements(sql);
+        if (statements.isEmpty()) {
+            throw new IllegalArgumentException("SQL must not be empty");
+        }
+
+        List<Map<String, Object>> results = new ArrayList<>();
         try (Connection connection = DriverManager.getConnection(jdbcUrl);
              Statement statement = connection.createStatement()) {
-            boolean hasResultSet = statement.execute(trimmedSql);
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("sql", trimmedSql);
-            payload.put("hasResultSet", hasResultSet);
+            for (String stmt : statements) {
+                String trimmed = stmt.trim();
+                if (trimmed.isEmpty()) continue;
 
-            if (hasResultSet) {
-                try (ResultSet resultSet = statement.getResultSet()) {
-                    payload.put("columns", extractColumns(resultSet));
-                    payload.put("rows", extractRows(resultSet));
+                try {
+                    boolean hasResultSet = statement.execute(trimmed);
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("sql", trimmed);
+                    payload.put("success", true);
+
+                    if (hasResultSet) {
+                        try (ResultSet resultSet = statement.getResultSet()) {
+                            payload.put("columns", extractColumns(resultSet));
+                            payload.put("rows", extractRows(resultSet));
+                        }
+                    } else {
+                        payload.put("updateCount", statement.getUpdateCount());
+                    }
+                    results.add(payload);
+                } catch (SQLException e) {
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("sql", trimmed);
+                    payload.put("success", false);
+                    payload.put("error", e.getMessage());
+                    results.add(payload);
                 }
-            } else {
-                payload.put("updateCount", statement.getUpdateCount());
             }
-            return payload;
         } catch (SQLException e) {
-            throw new IllegalStateException("SQL execution failed: " + e.getMessage(), e);
+            throw new IllegalStateException("Connection failed: " + e.getMessage(), e);
         }
+        return results;
+    }
+
+    /**
+     * Split SQL text into individual statements by semicolons,
+     * ignoring semicolons inside single-quoted string literals.
+     */
+    private List<String> splitStatements(String sql) {
+        List<String> statements = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inSingleQuote = false;
+
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '\'' && !inSingleQuote) {
+                inSingleQuote = true;
+                current.append(c);
+            } else if (c == '\'' && inSingleQuote) {
+                // Check for escaped quote ''
+                if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
+                    current.append("''");
+                    i++;
+                } else {
+                    inSingleQuote = false;
+                    current.append(c);
+                }
+            } else if (c == ';' && !inSingleQuote) {
+                String trimmed = current.toString().trim();
+                if (!trimmed.isEmpty()) {
+                    statements.add(trimmed);
+                }
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+
+        String last = current.toString().trim();
+        if (!last.isEmpty()) {
+            statements.add(last);
+        }
+        return statements;
     }
 
     private List<String> extractColumns(ResultSet resultSet) throws SQLException {
@@ -79,7 +140,7 @@ public class SqlConsoleService {
             for (int i = 1; i <= columnCount; i++) {
                 Object value = resultSet.getObject(i);
                 if (value instanceof byte[]) {
-                    row.add(new String((byte[]) value));
+                    row.add(bytesToHexString((byte[]) value));
                 } else {
                     row.add(value);
                 }
@@ -87,5 +148,13 @@ public class SqlConsoleService {
             rows.add(row);
         }
         return rows;
+    }
+
+    private static String bytesToHexString(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 3);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x ", b & 0xFF));
+        }
+        return sb.toString().trim();
     }
 }

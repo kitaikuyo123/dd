@@ -80,7 +80,7 @@ class RegionManagerTest {
         final ServerId serverId;
 
         FakeRegionServer(String host, int port, FakeEngineFactory factory) {
-            super(host, port, null, factory, null, 1);
+            super(host, port, factory, null, 1, "./data/test-wal-mgr");
             this.factory = factory;
             this.serverId = new ServerId(host, port);
         }

@@ -11,6 +11,7 @@ import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.replication.ReplicationConfig;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationWAL;
+import com.minisql.replication.GrpcReplicationTransportClient;
 import com.minisql.storage.StorageEngineFactory;
 import com.minisql.storage.StorageScanFilter;
 import io.grpc.ManagedChannel;
@@ -39,6 +40,7 @@ public class RegionServer {
     private final String masterAddress;
 
     private final ReplicationCoordinator replicationCoordinator;
+    private final ReplicationWAL wal;
 
     private volatile boolean running = false;
     private ManagedChannel masterChannel;
@@ -47,7 +49,7 @@ public class RegionServer {
     private Server grpcServer;
 
     public RegionServer(String host, int port, StorageEngineFactory engineFactory,
-                        String masterAddress, int replicationFactor) {
+                        String masterAddress, int replicationFactor, String walPath) {
         this.serverId = new ServerId(host, port);
         this.engineFactory = engineFactory;
         this.masterAddress = masterAddress;
@@ -56,8 +58,11 @@ public class RegionServer {
         this.splitService = new RegionSplitService(regionManager);
         this.mergeService = new RegionMergeService(regionManager);
 
+        this.wal = new ReplicationWAL(walPath);
         this.replicationCoordinator = new ReplicationCoordinator(
-            ReplicationConfig.builder(replicationFactor).build()
+            ReplicationConfig.builder(replicationFactor).build(),
+            wal,
+            new GrpcReplicationTransportClient()
         );
     }
 
@@ -161,6 +166,7 @@ public class RegionServer {
         running = false;
 
         replicationCoordinator.stop();
+        wal.close();
 
         if (masterChannel != null && !masterChannel.isShutdown()) {
             masterChannel.shutdown();

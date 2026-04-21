@@ -62,7 +62,6 @@ echo Cluster start commands issued.
 echo.
 echo Prerequisites:
 echo   1. ZooKeeper must already be running on localhost:2181
-echo   2. MySQL databases in regionserver-1/2/3.properties must exist
 echo.
 echo Endpoints:
 echo   Master:        localhost:16000

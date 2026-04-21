@@ -3,11 +3,8 @@ package com.minisql.replication;
 import com.minisql.common.model.KeyValue;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
-import com.minisql.storage.MySQLConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
-import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -219,7 +216,7 @@ class ReplicationCoordinatorTest {
         private final AtomicLong sequence = new AtomicLong();
 
         private FakeWal() {
-            super(MySQLConfig.builder("jdbc:mysql://localhost:3306/test", "root", "root").build());
+            super();
         }
 
         @Override
@@ -232,7 +229,7 @@ class ReplicationCoordinatorTest {
         }
 
         @Override
-        public ReplicationLogEntry append(String regionId, List<KeyValue> mutations) throws SQLException {
+        public ReplicationLogEntry append(String regionId, List<KeyValue> mutations) {
             return new ReplicationLogEntry(sequence.incrementAndGet(), System.currentTimeMillis(), mutations);
         }
 

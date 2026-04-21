@@ -1,6 +1,6 @@
 # MiniSQL 分布式系统
 
-MiniSQL 是一个基于 `Master + RegionServer + ZooKeeper + MySQL` 的分布式数据库原型系统。当前仓库已经完成了控制面、数据面、副本管理、故障恢复、客户端路由和监控页面的一体化实现。
+MiniSQL 是一个基于 `Master + RegionServer + ZooKeeper + RocksDB` 的分布式数据库原型系统。当前仓库已经完成了控制面、数据面、副本管理、故障恢复、客户端路由和监控页面的一体化实现。
 
 目前已经验证通过的主链路包括：
 
@@ -13,6 +13,20 @@ MiniSQL 是一个基于 `Master + RegionServer + ZooKeeper + MySQL` 的分布式
 - `JOIN` 查询支持按左右两侧做投影裁剪
 
 ## 最近更新
+
+### 2026/04/20
+
+**存储引擎从 MySQL 迁移到 RocksDB**
+
+将底层 KV 存储引擎从 MySQL 替换为 RocksDB（LSM-Tree），提升写入吞吐和本地存储效率。
+
+- **StorageEngine 全部实现替换**：删除 `MySQLStorageEngine`、`MySQLEngineFactory`、`MySQLConfig`、`MySqlSchemaManager`、`MySqlScanQueryBuilder`、`KeyValueVisibilityResolver`，统一使用 `RocksDBStorageEngine` + `RocksDBEngineFactory`
+- **RegionServer 启动流程简化**：去除 MySQL 连接配置（JDBC URL、用户名、密码），直接创建 RocksDB 引擎工厂
+- **RegionStorage 封装修复**：`getMemStoreSize()` 改为查询 RocksDB MemTable 实际大小；`compact(boolean major)` 区分 major（compactRange）与 minor（flush）；删除 `getStorageEngine()` 公共方法防止绕过读写计数
+- **ReplicationWAL 重写**：从 MySQL JDBC 实现重写为 RocksDB 持久化 WAL，使用 `{regionId}{0x00}{seqId-big-endian}` 键布局和二进制编码值
+- **Master / Client 清理**：删除 Master 侧 `MySQLConfig` 注册和传递；删除 Client 侧 HikariCP 连接池死代码
+- **配置文件精简**：`regionserver-{1,2,3}.properties` 移除 `mysql.*` 配置段；`storage/pom.xml` 和 `regionserver/pom.xml` 移除 `mysql-connector-java` 和 `HikariCP` 依赖
+- **死代码删除**：`DataVerifier`、`DataImporter`、`DataExporter`（MySQL 数据迁移工具类）
 
 ### 2026/04/11
 
@@ -118,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File tests/e2e/Run-DropCleanup.ps1
 - `minisql-regionserver`
   数据面，负责 Region 打开/关闭、读写请求、复制接收链路和下推执行。
 - `minisql-storage`
-  基于 MySQL 的 KV 存储引擎，包含 MVCC 和 SQL 级扫描优化。
+  基于 RocksDB 的 KV 存储引擎，包含 MVCC 和 LSM-Tree 级读写优化。
 - `minisql-replication`
   副本组、WAL、仲裁确认、主副本提升和 fencing 逻辑。
 - `minisql-client`
@@ -151,7 +165,7 @@ powershell -ExecutionPolicy Bypass -File tests/e2e/Run-DropCleanup.ps1
 - 面向副本的读路由
 - 单表谓词下推
 - 单表投影下推
-- 针对主键范围和简单列条件的 MySQL SQL 级下推
+- 针对主键范围和简单列条件的存储引擎级下推
 - `JOIN` 两侧的投影裁剪
 
 当前限制：
@@ -170,11 +184,7 @@ cd path\to\zookeeper
 zkServer.cmd
 ```
 
-### 2. 准备 MySQL
-
-请确认 `regionserver-1/2/3.properties` 中的 MySQL 连接参数有效。
-
-### 3. 启动集群
+### 2. 启动集群
 
 ```powershell
 cmd /c scripts\start-all.bat
@@ -188,7 +198,7 @@ cmd /c scripts\start-all.bat
 - RegionServer3：`16022`
 - Monitor：`16010`
 
-### 4. 访问监控页
+### 3. 访问监控页
 
 在浏览器中打开：
 
@@ -196,7 +206,7 @@ cmd /c scripts\start-all.bat
 http://localhost:16010/monitor
 ```
 
-### 5. 运行最小 SQL 示例
+### 4. 运行最小 SQL 示例
 
 ```sql
 SHOW TABLES;

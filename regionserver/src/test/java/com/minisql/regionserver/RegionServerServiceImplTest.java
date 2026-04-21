@@ -23,7 +23,8 @@ class RegionServerServiceImplTest {
             16020,
             null,
             null,
-            3
+            3,
+            "./data/test-wal-serviceimpl"
         );
 
         Region region = new Region("region-1", "products", "a".getBytes(), "z".getBytes());

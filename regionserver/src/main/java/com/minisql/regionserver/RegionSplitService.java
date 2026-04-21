@@ -82,21 +82,18 @@ public class RegionSplitService {
         if (sampleLimit > 0) {
             List<byte[]> rowKeySamples = sampleDistinctRowKeys(
                 storage, region.getStartKey(), region.getEndKey(), sampleLimit);
-            if (rowKeySamples.size() < 2) {
-                logger.warn("Split key unavailable for region {}: distinctRowKeys={}", regionId, rowKeySamples.size());
-                return null;
+            if (rowKeySamples.size() >= 2) {
+                rowKeySamples.sort(BytesUtil::compareTo);
+                byte[] splitKey = selectMedianValidSplitKey(rowKeySamples, region);
+                if (splitKey != null) {
+                    return Arrays.copyOf(splitKey, splitKey.length);
+                }
             }
-
-            rowKeySamples.sort(BytesUtil::compareTo);
-            byte[] splitKey = selectMedianValidSplitKey(rowKeySamples, region);
-            if (splitKey == null) {
-                logger.warn("Split key unavailable for region {}: no valid candidate in range", regionId);
-                return null;
-            }
-            return Arrays.copyOf(splitKey, splitKey.length);
+            logger.info("Sample-based split key unavailable for region {} (distinctRowKeys={}), falling back to midpoint",
+                regionId, rowKeySamples.size());
         }
 
-        // 策略：中点分裂（简单均匀）
+        // 策略：中点分裂（采样不足时的 fallback）
         byte[] start = region.getStartKey();
         byte[] end = region.getEndKey();
 

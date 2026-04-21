@@ -52,7 +52,7 @@ class RegionSplitServiceTest {
         private final StorageEngineFactory factory;
 
         FakeRegionServer() {
-            super("localhost", 16020, null, new FakeEngineFactory(), null, 1);
+            super("localhost", 16020, new FakeEngineFactory(), null, 1, "./data/test-wal-split");
             this.serverId = new ServerId("localhost", 16020);
             this.factory = super.getEngineFactory();
         }

@@ -8,7 +8,6 @@ import com.minisql.common.proto.RegionServerProto;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.rpc.GrpcRegionServerCommandClient;
 import com.minisql.master.state.ClusterManager;
-import com.minisql.storage.MySQLConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -21,8 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GrpcRegionServerCommandClientTest {
 
     @Test
-    @DisplayName("open region request carries topology and MySQL config")
-    void buildOpenRegionRequestCarriesTopologyAndMySqlConfig() {
+    @DisplayName("open region request carries topology info")
+    void buildOpenRegionRequestCarriesTopology() {
         LoadBalancer loadBalancer = new LoadBalancer();
         ClusterManager clusterManager = new ClusterManager(loadBalancer);
         GrpcRegionServerCommandClient commandClient = new GrpcRegionServerCommandClient(clusterManager);
@@ -31,10 +30,6 @@ class GrpcRegionServerCommandClientTest {
         ServerId replica = new ServerId("replica-host", 16021, 2L);
         clusterManager.registerServer(primary);
         clusterManager.registerServer(replica);
-        clusterManager.registerMySQLConfig(primary,
-            MySQLConfig.builder("jdbc:mysql://primary/db", "root", "secret")
-                .maxPoolSize(8)
-                .build());
 
         Region region = new Region("orders_r1", "orders", new byte[]{0x01}, new byte[]{0x7F});
         region.setPrimary(primary);
@@ -54,11 +49,6 @@ class GrpcRegionServerCommandClientTest {
         assertEquals(2, regionInfo.getReplicasCount());
         assertEquals(primary.getHost(), regionInfo.getReplicas(0).getHost());
         assertEquals(replica.getHost(), regionInfo.getReplicas(1).getHost());
-        assertTrue(regionInfo.hasMysqlConfig());
-        assertEquals("jdbc:mysql://primary/db", regionInfo.getMysqlConfig().getUrl());
-        assertEquals("root", regionInfo.getMysqlConfig().getUser());
-        assertEquals("secret", regionInfo.getMysqlConfig().getPassword());
-        assertEquals(8, regionInfo.getMysqlConfig().getMaxPoolSize());
     }
 
     @Test

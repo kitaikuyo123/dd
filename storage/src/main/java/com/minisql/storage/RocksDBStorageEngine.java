@@ -250,16 +250,21 @@ public class RocksDBStorageEngine implements StorageEngine {
     // ---- Key Encoding ----
 
     /**
-     * Composite key: [rowKey][0x00][family][0x00][qualifier][0x00][reversedTimestamp]
-     * Timestamp reversed (Long.MAX_VALUE - ts) so latest version sorts first.
+     * Composite key format:
+     *   [rowKeyLength:4][rowKey][0x00][family][0x00][qualifier][0x00][reversedTimestamp:8]
+     *
+     * The 4-byte rowKey length prefix avoids ambiguity when the rowKey itself
+     * contains 0x00 bytes (e.g. sign-XOR encoded INT/BIGINT values).
+     * Timestamp is reversed (Long.MAX_VALUE - ts) so latest version sorts first.
      */
     private byte[] buildCompositeKey(byte[] rowKey, String family, String qualifier, long timestamp) {
         byte[] familyBytes = family != null ? family.getBytes() : EMPTY_BYTES;
         byte[] qualifierBytes = qualifier != null ? qualifier.getBytes() : EMPTY_BYTES;
         long reversedTs = Long.MAX_VALUE - timestamp;
 
-        int len = rowKey.length + 1 + familyBytes.length + 1 + qualifierBytes.length + 1 + 8;
+        int len = 4 + rowKey.length + 1 + familyBytes.length + 1 + qualifierBytes.length + 1 + 8;
         ByteBuffer buf = ByteBuffer.allocate(len);
+        buf.putInt(rowKey.length);
         buf.put(rowKey);
         buf.put(FAMILY_SEP);
         buf.put(familyBytes);
@@ -271,32 +276,44 @@ public class RocksDBStorageEngine implements StorageEngine {
     }
 
     private byte[] buildRowKeyPrefix(byte[] rowKey) {
-        ByteBuffer buf = ByteBuffer.allocate(rowKey.length + 1);
+        ByteBuffer buf = ByteBuffer.allocate(4 + rowKey.length + 1);
+        buf.putInt(rowKey.length);
         buf.put(rowKey);
         buf.put(FAMILY_SEP);
         return buf.array();
     }
 
     private byte[] extractRowKey(byte[] compositeKey) {
-        int sep = findSeparator(compositeKey, 0);
-        byte[] rowKey = new byte[sep];
-        System.arraycopy(compositeKey, 0, rowKey, 0, sep);
+        ByteBuffer buf = ByteBuffer.wrap(compositeKey);
+        int rowKeyLen = buf.getInt();
+        byte[] rowKey = new byte[rowKeyLen];
+        buf.get(rowKey);
         return rowKey;
     }
 
     private KeyValue decodeFromCompositeKey(byte[] compositeKey, byte[] value) {
-        int sep1 = findSeparator(compositeKey, 0);
-        int sep2 = findSeparator(compositeKey, sep1 + 1);
-        int sep3 = findSeparator(compositeKey, sep2 + 1);
+        ByteBuffer buf = ByteBuffer.wrap(compositeKey);
 
-        byte[] rowKey = new byte[sep1];
-        System.arraycopy(compositeKey, 0, rowKey, 0, sep1);
+        // Read rowKey using length prefix
+        int rowKeyLen = buf.getInt();
+        byte[] rowKey = new byte[rowKeyLen];
+        buf.get(rowKey);
 
-        String family = new String(compositeKey, sep1 + 1, sep2 - sep1 - 1);
-        String qualifier = new String(compositeKey, sep2 + 1, sep3 - sep2 - 1);
+        // Skip separator
+        buf.get(); // 0x00
 
-        ByteBuffer tsBuf = ByteBuffer.wrap(compositeKey, sep3 + 1, 8);
-        long reversedTs = tsBuf.getLong();
+        // Read family (terminated by 0x00)
+        int familyStart = buf.position();
+        while (buf.hasRemaining() && buf.get() != 0x00) {}
+        String family = new String(compositeKey, familyStart, buf.position() - 1 - familyStart);
+
+        // Read qualifier (terminated by 0x00)
+        int qualifierStart = buf.position();
+        while (buf.hasRemaining() && buf.get() != 0x00) {}
+        String qualifier = new String(compositeKey, qualifierStart, buf.position() - 1 - qualifierStart);
+
+        // Read reversed timestamp
+        long reversedTs = buf.getLong();
         long timestamp = Long.MAX_VALUE - reversedTs;
 
         KeyValue kv = new KeyValue();

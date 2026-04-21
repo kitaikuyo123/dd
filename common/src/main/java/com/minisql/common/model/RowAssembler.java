@@ -64,35 +64,39 @@ public class RowAssembler {
             return;
         }
 
-        String pkName = schema.getPrimaryKey();
-        if (pkName == null || pkName.isEmpty()) {
+        List<String> pkNames = schema.getAllPrimaryKeys();
+        if (pkNames == null || pkNames.isEmpty()) {
             return;
         }
 
-        // 如果 Row 中已经有主键值，跳过
-        if (row.getColumn(pkName) != null) {
-            return;
-        }
+        // 单列主键：从 rowKey 反序列化
+        if (pkNames.size() == 1) {
+            String pkName = pkNames.get(0);
 
-        // 查找主键列类型
-        Column pkColumn = null;
-        for (Column col : schema.getColumns()) {
-            if (col.getName().equals(pkName)) {
-                pkColumn = col;
-                break;
+            // 如果 Row 中已经有主键值，跳过
+            if (row.getColumn(pkName) != null) {
+                return;
             }
-        }
 
-        if (pkColumn == null) {
-            return;
-        }
+            Column pkColumn = null;
+            for (Column col : schema.getColumns()) {
+                if (col.getName().equals(pkName)) {
+                    pkColumn = col;
+                    break;
+                }
+            }
 
-        // 从 rowKey 反序列化主键值
-        try {
-            Object pkValue = RowKeySerializer.deserialize(row.getRowKey(), pkColumn.getType());
-            row.setColumn(pkName, pkValue);
-        } catch (Exception e) {
-            // 反序列化失败，打印日志但不中断
+            if (pkColumn == null) {
+                return;
+            }
+
+            try {
+                Object pkValue = RowKeySerializer.deserialize(row.getRowKey(), pkColumn.getType());
+                row.setColumn(pkName, pkValue);
+            } catch (Exception e) {
+                // 反序列化失败，将 rowKey 的十六进制表示作为 fallback
+                row.setColumn(pkName, BytesUtil.bytesToHex(row.getRowKey()));
+            }
         }
     }
 

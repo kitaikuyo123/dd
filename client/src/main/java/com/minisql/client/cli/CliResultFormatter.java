@@ -35,7 +35,13 @@ public class CliResultFormatter {
             String[] row = new String[columnCount];
             for (int i = 0; i < columnCount; i++) {
                 Object value = rs.getObject(i + 1);
-                row[i] = value != null ? value.toString() : "NULL";
+                if (value == null) {
+                    row[i] = "NULL";
+                } else if (value instanceof byte[]) {
+                    row[i] = bytesToHex((byte[]) value);
+                } else {
+                    row[i] = value.toString();
+                }
                 columnWidths[i] = Math.max(columnWidths[i], row[i].length());
             }
             rows.add(row);
@@ -112,5 +118,13 @@ public class CliResultFormatter {
             sb.append(' ');
         }
         return sb.toString();
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 3);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x ", b & 0xFF));
+        }
+        return sb.toString().trim();
     }
 }

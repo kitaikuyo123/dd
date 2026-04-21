@@ -37,6 +37,9 @@ public class ReplicationWAL implements AutoCloseable {
     }
 
     public void initialize() {
+        if (db != null) {
+            return;
+        }
         RocksDB.loadLibrary();
         try {
             File dir = new File(dbPath);

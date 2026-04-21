@@ -175,24 +175,31 @@ const SqlConsole = {
       </textarea>
       <div class="muted" v-if="message">{{ message }}</div>
       <div class="sql-error" v-if="error">{{ error }}</div>
-      <div v-if="result">
-        <div class="sql-meta" v-if="result.hasResultSet">
-          返回 {{ (result.rows || []).length }} 行，{{ (result.columns || []).length }} 列
-        </div>
-        <div class="sql-meta" v-else>
-          执行完成，影响 {{ result.updateCount ?? 0 }} 行
-        </div>
-        <div class="sql-result-wrap" v-if="result.hasResultSet">
-          <table class="sql-result-table">
-            <thead>
-              <tr><th v-for="column in result.columns" :key="column">{{ column }}</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, rowIndex) in result.rows" :key="rowIndex">
-                <td v-for="(value, columnIndex) in row" :key="columnIndex">{{ value == null ? 'NULL' : value }}</td>
-              </tr>
-            </tbody>
-          </table>
+      <div v-if="results.length">
+        <div v-for="(r, idx) in results" :key="idx" style="margin-bottom:12px">
+          <div class="sql-meta" v-if="r.success === false" style="color:#dc2626">
+            <code>{{ r.sql }}</code> — {{ r.error }}
+          </div>
+          <template v-else>
+            <div class="sql-meta" v-if="r.columns">
+              返回 {{ (r.rows || []).length }} 行，{{ (r.columns || []).length }} 列
+            </div>
+            <div class="sql-meta" v-else>
+              执行完成，影响 {{ r.updateCount ?? 0 }} 行
+            </div>
+            <div class="sql-result-wrap" v-if="r.columns">
+              <table class="sql-result-table">
+                <thead>
+                  <tr><th v-for="column in r.columns" :key="column">{{ column }}</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, rowIndex) in r.rows" :key="rowIndex">
+                    <td v-for="(value, columnIndex) in row" :key="columnIndex">{{ value == null ? 'NULL' : value }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
         </div>
       </div>
     </section>
@@ -200,25 +207,26 @@ const SqlConsole = {
   setup() {
     const sql = ref("SHOW TABLES;");
     const running = ref(false);
-    const result = ref(null);
+    const results = ref([]);
     const error = ref("");
-    const message = ref("浏览器内直接执行 MiniSQL，复用现有 JDBC 客户端链路。");
+    const message = ref("浏览器内直接执行 MiniSQL，支持多条 SQL 以分号分隔。");
 
     async function runSql() {
       if (!sql.value.trim() || running.value) return;
       running.value = true;
       error.value = "";
+      results.value = [];
       try {
-        result.value = await executeSql(sql.value);
+        results.value = await executeSql(sql.value);
       } catch (err) {
-        result.value = null;
+        results.value = [];
         error.value = err.message;
       } finally {
         running.value = false;
       }
     }
 
-    return { sql, running, result, error, message, runSql };
+    return { sql, running, results, error, message, runSql };
   },
 };
 

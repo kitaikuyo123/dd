@@ -60,7 +60,7 @@ class ParallelQueryExecutorTest {
     @Test
     @DisplayName("join projection pushdown keeps only columns needed by each side")
     void testDetermineJoinProjectedQualifiers() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, Collections.emptyMap(), 5);
+        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
         SelectStatement ast = parseSelect(
             "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id WHERE o.amount > 100 ORDER BY u.name"
         );
@@ -84,7 +84,7 @@ class ParallelQueryExecutorTest {
     @Test
     @DisplayName("join projection pushdown keeps group by having and aggregate source columns")
     void testDetermineJoinProjectedQualifiersForGroupByAndHaving() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, Collections.emptyMap(), 5);
+        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
         // Note: HAVING with aggregate function calls (e.g. SUM(o.amount)) is not yet
         // supported by the formal SQLParser. Use alias-based HAVING instead.
         SelectStatement ast = parseSelect(
@@ -113,7 +113,7 @@ class ParallelQueryExecutorTest {
     @Test
     @DisplayName("join projection pushdown keeps columns referenced by where clauses")
     void testDetermineJoinProjectedQualifiersForWhereClauses() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, Collections.emptyMap(), 5);
+        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
         SelectStatement ast = parseSelect(
             "SELECT u.name " +
                 "FROM users u JOIN orders o ON u.id = o.user_id " +

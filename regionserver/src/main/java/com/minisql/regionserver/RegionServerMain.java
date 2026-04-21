@@ -73,7 +73,8 @@ public class RegionServerMain {
         StorageEngineFactory engineFactory = new RocksDBEngineFactory(rocksDBConfig);
         logger.info("Using RocksDB storage engine at {}", rocksdbDir);
 
-        initRegionServer(host, port, engineFactory, masterAddress, splitThresholdMb, splitMinMb, replicationFactor);
+        String walPath = rocksdbDir + "-wal";
+        initRegionServer(host, port, engineFactory, masterAddress, splitThresholdMb, splitMinMb, replicationFactor, walPath);
         initHeartbeatSender(zkConnect, masterAddress, heartbeatInterval, diskCapacityMb);
 
         logger.info("----------------------------------------");
@@ -138,8 +139,9 @@ public class RegionServerMain {
                                   String masterAddress,
                                   long splitThresholdMb,
                                   long splitMinMb,
-                                  int replicationFactor) throws IOException {
-        regionServer = new RegionServer(host, port, engineFactory, masterAddress, replicationFactor);
+                                  int replicationFactor,
+                                  String walPath) throws IOException {
+        regionServer = new RegionServer(host, port, engineFactory, masterAddress, replicationFactor, walPath);
         regionServer.getSplitService().setConfig(splitThresholdMb, splitMinMb);
         regionServer.start();
     }
