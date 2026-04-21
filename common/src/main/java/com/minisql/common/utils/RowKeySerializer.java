@@ -204,9 +204,9 @@ public class RowKeySerializer {
         int bits = BytesUtil.toInt(bytes);
         int adjusted = bits;
         if ((bits & FLOAT_SIGN_BIT_MASK) == 0) {
-            adjusted = bits ^ FLOAT_SIGN_BIT_MASK;
-        } else {
             adjusted = bits ^ FLOAT_NEGATIVE_MASK;
+        } else {
+            adjusted = bits ^ FLOAT_SIGN_BIT_MASK;
         }
         return Float.intBitsToFloat(adjusted);
     }
@@ -230,9 +230,9 @@ public class RowKeySerializer {
         long bits = BytesUtil.toLong(bytes);
         long adjusted = bits;
         if ((bits & DOUBLE_SIGN_BIT_MASK) == 0) {
-            adjusted = bits ^ DOUBLE_SIGN_BIT_MASK;
-        } else {
             adjusted = bits ^ DOUBLE_NEGATIVE_MASK;
+        } else {
+            adjusted = bits ^ DOUBLE_SIGN_BIT_MASK;
         }
         return Double.longBitsToDouble(adjusted);
     }
