@@ -145,7 +145,7 @@ final class PredicatePushdownPlanner {
         if (next == null) {
             return PushdownPlan.none();
         }
-        return new PushdownPlan(rowKey, next, Collections.emptyList(), true);
+        return new PushdownPlan(rowKey, next, Collections.emptyList(), true, true);
     }
 
     private static PushdownPlan greaterThan(byte[] rowKey) {
@@ -153,15 +153,15 @@ final class PredicatePushdownPlanner {
         if (next == null) {
             return PushdownPlan.none();
         }
-        return new PushdownPlan(next, null, Collections.emptyList(), true);
+        return new PushdownPlan(next, null, Collections.emptyList(), true, true);
     }
 
     private static PushdownPlan atLeast(byte[] rowKey) {
-        return new PushdownPlan(rowKey, null, Collections.emptyList(), true);
+        return new PushdownPlan(rowKey, null, Collections.emptyList(), true, true);
     }
 
     private static PushdownPlan lessThan(byte[] rowKey) {
-        return new PushdownPlan(null, rowKey, Collections.emptyList(), true);
+        return new PushdownPlan(null, rowKey, Collections.emptyList(), true, true);
     }
 
     private static PushdownPlan atMost(byte[] rowKey) {
@@ -169,7 +169,7 @@ final class PredicatePushdownPlanner {
         if (next == null) {
             return PushdownPlan.none();
         }
-        return new PushdownPlan(null, next, Collections.emptyList(), true);
+        return new PushdownPlan(null, next, Collections.emptyList(), true, true);
     }
 
     static byte[] nextLexicographicKey(byte[] value) {
@@ -224,28 +224,34 @@ final class PredicatePushdownPlanner {
         private final byte[] endKey;
         private final List<StorageColumnPredicate> columnPredicates;
         private final boolean pushdown;
+        private final boolean fullyPushedDown;
 
-        private PushdownPlan(byte[] startKey, byte[] endKey, List<StorageColumnPredicate> columnPredicates, boolean pushdown) {
+        private PushdownPlan(byte[] startKey, byte[] endKey, List<StorageColumnPredicate> columnPredicates, boolean pushdown, boolean fullyPushedDown) {
             this.startKey = startKey;
             this.endKey = endKey;
             this.columnPredicates = columnPredicates == null
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(columnPredicates));
             this.pushdown = pushdown;
+            this.fullyPushedDown = fullyPushedDown;
         }
 
         static PushdownPlan none() {
-            return new PushdownPlan(null, null, Collections.emptyList(), false);
+            return new PushdownPlan(null, null, Collections.emptyList(), false, false);
         }
 
         static PushdownPlan forColumnPredicate(StorageColumnPredicate predicate) {
             List<StorageColumnPredicate> predicates = new ArrayList<>();
             predicates.add(predicate);
-            return new PushdownPlan(null, null, predicates, true);
+            return new PushdownPlan(null, null, predicates, true, true);
         }
 
         boolean canPushDown() {
             return pushdown;
+        }
+
+        boolean isFullyPushedDown() {
+            return fullyPushedDown;
         }
 
         byte[] getStartKey() {
@@ -278,7 +284,8 @@ final class PredicatePushdownPlanner {
             }
             List<StorageColumnPredicate> mergedPredicates = new ArrayList<>(this.columnPredicates);
             mergedPredicates.addAll(other.columnPredicates);
-            return new PushdownPlan(mergedStart, mergedEnd, mergedPredicates, true);
+            boolean mergedFully = this.fullyPushedDown && other.fullyPushedDown;
+            return new PushdownPlan(mergedStart, mergedEnd, mergedPredicates, true, mergedFully);
         }
 
         private static byte[] maxStart(byte[] left, byte[] right) {

@@ -8,6 +8,7 @@ import com.minisql.common.model.RowAssembler;
 import com.minisql.common.model.Table;
 import com.minisql.common.model.Column;
 import com.minisql.common.proto.*;
+import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationLogEntry;
@@ -225,11 +226,9 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 keyValues.add(it.next());
             }
 
-            if (!projectedQualifiers.isEmpty()) {
-                keyValues.removeIf(kv -> !projectedQualifiers.contains(kv.getQualifier()));
-            }
-
-            if (whereClause != null && !whereClause.isBlank()) {
+            // Storage engine already handles column predicates and projected qualifiers.
+            // Only apply row-level filtering when pushdown was partial (complex conditions).
+            if (whereClause != null && !whereClause.isBlank() && !pushdownPlan.isFullyPushedDown()) {
                 List<Row> rows = RowAssembler.assemble(keyValues, tableSchema);
                 List<Row> filteredRows = filterRows(rows, condition);
                 Set<BytesKey> matchedRowKeys = new HashSet<>();
@@ -248,11 +247,55 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 keyValues = filteredKeyValues;
             }
 
+            // ORDER BY + LIMIT pushdown: sort and truncate at region server
+            boolean hasOrderBy = request.getOrderByCount() > 0;
+            int limit = request.getLimit();
+            int offset = request.getOffset();
+            if (hasOrderBy || limit > 0) {
+                tableSchema = resolveTableSchema(tableSchema, regionId);
+                if (tableSchema != null) {
+                    List<Row> rows = RowAssembler.assemble(keyValues, tableSchema);
+
+                    // Sort
+                    if (hasOrderBy) {
+                        List<String> sortCols = new ArrayList<>();
+                        List<Boolean> sortAsc = new ArrayList<>();
+                        for (RegionServerProto.OrderByElement elem : request.getOrderByList()) {
+                            sortCols.add(elem.getColumn());
+                            sortAsc.add(elem.getAscending());
+                        }
+                        rows.sort(createSortComparator(sortCols, sortAsc));
+                    }
+
+                    // Apply limit + offset
+                    if (offset > 0 || limit > 0) {
+                        int from = Math.min(offset > 0 ? offset : 0, rows.size());
+                        int to = limit > 0 ? Math.min(from + limit, rows.size()) : rows.size();
+                        rows = new ArrayList<>(rows.subList(from, to));
+                    }
+
+                    // Convert back to KeyValues
+                    keyValues = disassembleRows(rows, tableSchema);
+                }
+            }
+
             RegionServerProto.ScanResponse.Builder builder = RegionServerProto.ScanResponse.newBuilder()
                 .setStatus(createSuccessStatus());
 
-            for (KeyValue kv : keyValues) {
-                builder.addKeyValues(convertToProto(kv));
+            // Aggregate pushdown: compute local aggregation at region server
+            if (request.getAggregatesCount() > 0) {
+                tableSchema = resolveTableSchema(tableSchema, regionId);
+                if (tableSchema != null) {
+                    List<Row> rows = RowAssembler.assemble(keyValues, tableSchema);
+                    List<String> groupByCols = request.getGroupByColumnsList();
+                    List<RegionServerProto.AggregateSpec> specs = request.getAggregatesList();
+                    List<RegionServerProto.AggregateGroup> groups = computeLocalAggregation(rows, groupByCols, specs);
+                    builder.addAllAggregateGroups(groups);
+                }
+            } else {
+                for (KeyValue kv : keyValues) {
+                    builder.addKeyValues(convertToProto(kv));
+                }
             }
 
             responseObserver.onNext(builder.build());
@@ -1225,6 +1268,161 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         if (!response.getStatus().getSuccess()) {
             throw new RuntimeException("Failed to send snapshot batch: " + response.getStatus().getMessage());
         }
+    }
+
+    private Table resolveTableSchema(Table tableSchema, String regionId) {
+        if (tableSchema != null) return tableSchema;
+        Region region = regionServer.getRegionManager().getRegion(regionId);
+        return region != null ? regionServer.getTableSchema(region.getTableName()) : null;
+    }
+
+    /**
+     * Create a comparator for sorting rows by specified columns.
+     */
+    private Comparator<Row> createSortComparator(List<String> columns, List<Boolean> ascending) {
+        return (left, right) -> {
+            for (int i = 0; i < columns.size(); i++) {
+                Object leftVal = left.getColumn(columns.get(i));
+                Object rightVal = right.getColumn(columns.get(i));
+                int cmp = compareValues(leftVal, rightVal);
+                if (cmp != 0) {
+                    boolean asc = ascending.size() > i ? ascending.get(i) : true;
+                    return asc ? cmp : -cmp;
+                }
+            }
+            return 0;
+        };
+    }
+
+    /**
+     * Convert Row objects back to KeyValue list for proto serialization.
+     */
+    private List<KeyValue> disassembleRows(List<Row> rows, Table schema) {
+        List<KeyValue> result = new ArrayList<>();
+        for (Row row : rows) {
+            byte[] rowKey = row.getRowKey();
+            long timestamp = row.getTimestamp() > 0 ? row.getTimestamp() : System.currentTimeMillis();
+            for (Column col : schema.getColumns()) {
+                // Skip primary key column (encoded in rowKey)
+                if (col.getName().equals(schema.getPrimaryKey())) continue;
+                Object value = row.getColumn(col.getName());
+                if (value == null) continue;
+                byte[] valueBytes = com.minisql.common.utils.RowKeySerializer.serialize(value, col.getType());
+                KeyValue kv = KeyValue.builder(rowKey)
+                    .family("")
+                    .qualifier(col.getName())
+                    .timestamp(timestamp)
+                    .value(valueBytes)
+                    .type(KeyValue.Type.PUT)
+                    .build();
+                result.add(kv);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Compute local aggregation for a set of rows, producing AggregateGroup protos.
+     */
+    private List<RegionServerProto.AggregateGroup> computeLocalAggregation(
+            List<Row> rows,
+            List<String> groupByCols,
+            List<RegionServerProto.AggregateSpec> specs) {
+
+        // Group rows by groupBy columns
+        Map<List<Object>, List<Row>> buckets = new LinkedHashMap<>();
+        for (Row row : rows) {
+            List<Object> key = new ArrayList<>();
+            if (groupByCols != null) {
+                for (String col : groupByCols) {
+                    key.add(row.getColumn(col));
+                }
+            }
+            buckets.computeIfAbsent(key, k -> new ArrayList<>()).add(row);
+        }
+
+        // If no rows and no GROUP BY, produce one group with zero counts
+        if (buckets.isEmpty() && (groupByCols == null || groupByCols.isEmpty())) {
+            buckets.put(Collections.emptyList(), Collections.emptyList());
+        }
+
+        List<RegionServerProto.AggregateGroup> result = new ArrayList<>();
+        for (Map.Entry<List<Object>, List<Row>> entry : buckets.entrySet()) {
+            RegionServerProto.AggregateGroup.Builder groupBuilder =
+                RegionServerProto.AggregateGroup.newBuilder();
+
+            // Encode group key values as bytes
+            for (Object keyVal : entry.getKey()) {
+                if (keyVal == null) {
+                    groupBuilder.addGroupByKey(com.google.protobuf.ByteString.EMPTY);
+                } else {
+                    groupBuilder.addGroupByKey(com.google.protobuf.ByteString.copyFromUtf8(
+                        String.valueOf(keyVal)));
+                }
+            }
+
+            List<Row> groupRows = entry.getValue();
+
+            // Compute each aggregate
+            for (RegionServerProto.AggregateSpec spec : specs) {
+                String func = spec.getFunction().toUpperCase();
+                double sumVal = 0;
+                long countVal = 0;
+                Object maxVal = null;
+                Object minVal = null;
+
+                for (Row row : groupRows) {
+                    Object val = "COUNT".equals(func) ? null : row.getColumn(spec.getColumn());
+                    switch (func) {
+                        case "COUNT":
+                            countVal++;
+                            break;
+                        case "SUM":
+                            if (val instanceof Number) {
+                                sumVal += ((Number) val).doubleValue();
+                            }
+                            break;
+                        case "AVG":
+                            if (val instanceof Number) {
+                                sumVal += ((Number) val).doubleValue();
+                                countVal++;
+                            }
+                            break;
+                        case "MAX":
+                            if (val != null && (maxVal == null || compareValues(val, maxVal) > 0)) {
+                                maxVal = val;
+                            }
+                            break;
+                        case "MIN":
+                            if (val != null && (minVal == null || compareValues(val, minVal) < 0)) {
+                                minVal = val;
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+                }
+
+                RegionServerProto.AggregateResult.Builder resBuilder =
+                    RegionServerProto.AggregateResult.newBuilder()
+                        .setOutputName(spec.getOutputName())
+                        .setFunction(func)
+                        .setSumValue(sumVal)
+                        .setCountValue(countVal);
+                if (maxVal != null) {
+                    resBuilder.setMaxValue(com.google.protobuf.ByteString.copyFromUtf8(
+                        String.valueOf(maxVal)));
+                }
+                if (minVal != null) {
+                    resBuilder.setMinValue(com.google.protobuf.ByteString.copyFromUtf8(
+                        String.valueOf(minVal)));
+                }
+                groupBuilder.addResults(resBuilder);
+            }
+
+            result.add(groupBuilder.build());
+        }
+        return result;
     }
 
     private CommonProto.Status createSuccessStatus() {

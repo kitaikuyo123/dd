@@ -369,10 +369,73 @@ public class RocksDBStorageEngine implements StorageEngine {
     }
 
     private void flushRow(List<KeyValue> results, Map<String, KeyValue> currentRow, StorageScanFilter filter) {
-        for (KeyValue kv : currentRow.values()) {
-            if (!kv.isDelete()) {
-                results.add(kv);
+        // Check if this row passes all column predicates
+        if (filter != null && filter.hasColumnPredicates()) {
+            for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
+                boolean matched = false;
+                for (KeyValue kv : currentRow.values()) {
+                    if (kv.isDelete()) continue;
+                    if (pred.matchesQualifier(kv.getQualifier())) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    // Column not present in row; skip entire row
+                    return;
+                }
             }
+        }
+
+        for (KeyValue kv : currentRow.values()) {
+            if (kv.isDelete()) continue;
+
+            // Apply projected qualifiers filter at storage level
+            if (filter != null && filter.hasProjectedQualifiers()) {
+                if (!filter.getProjectedQualifiers().contains(kv.getQualifier())) {
+                    continue;
+                }
+            }
+
+            // Apply column predicate value check
+            if (filter != null && filter.hasColumnPredicates()) {
+                boolean passes = true;
+                for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
+                    if (pred.matchesQualifier(kv.getQualifier())) {
+                        byte[] kvValue = kv.getValue();
+                        byte[] predValue = pred.getValue();
+                        if (kvValue == null || predValue == null) {
+                            passes = false;
+                            break;
+                        }
+                        int cmp = compareBytes(kvValue, predValue);
+                        switch (pred.getOperator()) {
+                            case "=":
+                            case "==":
+                                passes = (cmp == 0);
+                                break;
+                            case ">":
+                                passes = (cmp > 0);
+                                break;
+                            case ">=":
+                                passes = (cmp >= 0);
+                                break;
+                            case "<":
+                                passes = (cmp < 0);
+                                break;
+                            case "<=":
+                                passes = (cmp <= 0);
+                                break;
+                            default:
+                                break;
+                        }
+                        if (!passes) break;
+                    }
+                }
+                if (!passes) continue;
+            }
+
+            results.add(kv);
         }
     }
 

@@ -28,4 +28,11 @@ public class StorageColumnPredicate {
     public byte[] getValue() {
         return value == null ? null : Arrays.copyOf(value, value.length);
     }
+
+    /**
+     * Test whether a KeyValue's qualifier matches this predicate's column.
+     */
+    public boolean matchesQualifier(String kvQualifier) {
+        return qualifier != null && qualifier.equals(kvQualifier);
+    }
 }

@@ -12,6 +12,7 @@ import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
 import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.CompoundCondition;
+import com.minisql.sql.ast.ConditionSplitter;
 import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.ast.SimpleCondition;
 import com.minisql.sql.execution.QueryPlan.JoinType;
@@ -97,28 +98,92 @@ public class ParallelQueryExecutor {
             projectedQualifiers = determineProjectedQualifiersFromAst(ast, hasAggregation);
         }
 
-        // Fetch base rows
-        List<com.minisql.common.model.Row> rows = fetchSourceRows(
-            tableName, null, ast.getWhere(), whereClause, projectedQualifiers);
-
-        // JOIN
-        if (hasJoin) {
-            rows = executeJoinFromAst(ast, rows);
-        } else if (ast.getWhere() != null && whereClause == null) {
-            // Client-side filter for conditions that couldn't be pushed down
-            rows = filterRows(rows, ast.getWhere());
+        // ORDER BY + LIMIT pushdown: only when no JOIN or aggregation
+        boolean canPushDownOrderBy = !hasJoin && !hasAggregation
+            && ast.getOrderBy() != null && !ast.getOrderBy().isEmpty();
+        int userLimit = ast.getLimit() != null ? ast.getLimit() : -1;
+        int userOffset = ast.getOffset() != null ? ast.getOffset() : 0;
+        List<SelectStatement.OrderByElement> pushDownOrderBy = null;
+        int pushDownLimit = 0;
+        int pushDownOffset = 0;
+        if (canPushDownOrderBy) {
+            pushDownOrderBy = ast.getOrderBy();
+            // Tell each RS to return top (limit+offset) rows so client can merge globally
+            if (userLimit >= 0) {
+                pushDownLimit = userLimit + userOffset;
+            }
         }
 
-        // Aggregation
-        if (hasAggregation) {
-            List<String> groupByColumns = ast.getGroupByColumns() != null ? ast.getGroupByColumns() : Collections.emptyList();
+        // Aggregate pushdown: only when no JOIN and no HAVING
+        boolean canPushDownAggregation = hasAggregation && !hasJoin && ast.getHaving() == null;
+
+        // JOIN WHERE split: push left-only/right-only conditions to respective table scans
+        Condition leftWhereCondition = ast.getWhere();
+        String leftWhereClause = whereClause;
+        Condition crossTableCondition = null;
+
+        List<com.minisql.common.model.Row> rows;
+        if (canPushDownAggregation) {
+            // Two-phase aggregation: RS computes local partials, client merges
+            List<String> groupByColumns = ast.getGroupByColumns() != null
+                ? ast.getGroupByColumns() : Collections.emptyList();
+            rows = fetchAggregatedRows(tableName, ast.getWhere(), whereClause,
+                projectedQualifiers, aggregateExpressions, groupByColumns);
+        } else if (hasJoin && ast.getWhere() != null) {
+            // Split WHERE for JOIN: leftOnly → left table, rightOnly → right table, crossTable → post-JOIN
+            ConditionSplitter splitter = new ConditionSplitter(
+                tableName, tableAlias,
+                ast.getJoinTable(), ast.getJoinTableAlias());
+            ConditionSplitter.SplitResult split = splitter.split(ast.getWhere());
+
+            // Build pushdown WHERE for left table
+            leftWhereCondition = split.leftOnly;
+            leftWhereClause = (split.leftOnly != null && canPushDownCondition(split.leftOnly))
+                ? conditionToSql(split.leftOnly) : null;
+
+            // Cross-table condition to apply after JOIN
+            crossTableCondition = split.crossTable;
+
+            // Fetch left rows with split condition
+            rows = fetchSourceRows(
+                tableName, null, leftWhereCondition, leftWhereClause, projectedQualifiers,
+                null, 0, 0);
+
+            // Execute JOIN with right-only condition pushed to right table scan
+            rows = executeJoinFromAst(ast, rows, split.rightOnly);
+
+            // Apply cross-table condition after JOIN
+            if (crossTableCondition != null) {
+                rows = filterRows(rows, crossTableCondition);
+            }
+        } else {
+            // Fetch base rows
+            rows = fetchSourceRows(
+                tableName, null, ast.getWhere(), whereClause, projectedQualifiers,
+                pushDownOrderBy, pushDownLimit, pushDownOffset);
+
+            // JOIN
+            if (hasJoin) {
+                rows = executeJoinFromAst(ast, rows, null);
+            } else if (ast.getWhere() != null && whereClause == null) {
+                // Client-side filter for conditions that couldn't be pushed down
+                rows = filterRows(rows, ast.getWhere());
+            }
+        }
+
+        // Aggregation (client-side, when not pushed down)
+        if (hasAggregation && !canPushDownAggregation) {
+            List<String> groupByColumns = ast.getGroupByColumns() != null
+                ? ast.getGroupByColumns() : Collections.emptyList();
             rows = aggregateRowsFromAst(groupByColumns, aggregateExpressions, rows);
             if (ast.getHaving() != null) {
                 rows = filterRows(rows, ast.getHaving());
             }
         }
 
-        // ORDER BY
+        // ORDER BY + LIMIT/OFFSET: always apply client-side for global correctness.
+        // When pushed down, each RS already sorted and truncated locally,
+        // so this operates on a much smaller merged dataset.
         if (ast.getOrderBy() != null && !ast.getOrderBy().isEmpty()) {
             List<String> orderByColumns = new ArrayList<>();
             List<Boolean> orderAscending = new ArrayList<>();
@@ -129,10 +194,7 @@ public class ParallelQueryExecutor {
             rows.sort(createSortComparator(orderByColumns, orderAscending));
         }
 
-        // LIMIT / OFFSET
-        int limit = ast.getLimit() != null ? ast.getLimit() : -1;
-        int offset = ast.getOffset() != null ? ast.getOffset() : 0;
-        rows = applyLimitOffset(rows, limit, offset);
+        rows = applyLimitOffset(rows, userLimit, userOffset);
 
         // Project
         return projectRowsFromAst(ast, rows, hasAggregation);
@@ -178,11 +240,199 @@ public class ParallelQueryExecutor {
         return new ArrayList<>(rows.subList(fromIndex, toIndex));
     }
 
+    /**
+     * Two-phase aggregation: push aggregate specs to each RS, then merge partial results.
+     */
+    private List<com.minisql.common.model.Row> fetchAggregatedRows(
+            String tableName,
+            Condition whereCondition,
+            String whereClause,
+            List<String> projectedQualifiers,
+            List<AggregateExpression> aggregateExpressions,
+            List<String> groupByColumns) throws SQLException {
+
+        List<RegionLocation> targets = getAllRegionsForTable(tableName);
+        if (targets.isEmpty()) {
+            throw new SQLException("No regions found for table: " + tableName);
+        }
+
+        // Collect partial aggregate groups from all regions
+        List<Future<List<RegionServerProto.AggregateGroup>>> futures = new ArrayList<>();
+        for (RegionLocation location : targets) {
+            futures.add(executor.submit(() -> fetchAggregateGroupsFromRegion(
+                location, whereCondition, whereClause, projectedQualifiers,
+                aggregateExpressions, groupByColumns)));
+        }
+
+        // Merge partial results
+        Map<List<String>, double[]> merged = new LinkedHashMap<>();  // key -> [sum, count]
+        Map<List<String>, String[]> minMax = new LinkedHashMap<>();  // key -> [min, max]
+
+        try {
+            for (int fi = 0; fi < futures.size(); fi++) {
+                List<RegionServerProto.AggregateGroup> groups = futures.get(fi)
+                    .get(queryTimeoutSeconds, TimeUnit.SECONDS);
+                for (RegionServerProto.AggregateGroup group : groups) {
+                    List<String> key = new ArrayList<>();
+                    for (com.google.protobuf.ByteString bs : group.getGroupByKeyList()) {
+                        key.add(bs.isEmpty() ? null : bs.toStringUtf8());
+                    }
+
+                    for (RegionServerProto.AggregateResult res : group.getResultsList()) {
+                        List<String> compositeKey = new ArrayList<>(key);
+                        compositeKey.add(res.getOutputName());
+
+                        double[] acc = merged.computeIfAbsent(compositeKey, k -> new double[2]);
+                        acc[0] += res.getSumValue();
+                        acc[1] += res.getCountValue();
+
+                        String[] mm = minMax.computeIfAbsent(compositeKey, k -> new String[]{null, null});
+                        if (!res.getMaxValue().isEmpty()) {
+                            String maxStr = res.getMaxValue().toStringUtf8();
+                            if (mm[1] == null || maxStr.compareTo(mm[1]) > 0) mm[1] = maxStr;
+                        }
+                        if (!res.getMinValue().isEmpty()) {
+                            String minStr = res.getMinValue().toStringUtf8();
+                            if (mm[0] == null || minStr.compareTo(mm[0]) < 0) mm[0] = minStr;
+                        }
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("Query execution interrupted", e);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new SQLException("Query execution failed: " + e.getMessage(), e);
+        }
+
+        // Build output rows from merged results
+        Map<List<String>, com.minisql.common.model.Row> outputRows = new LinkedHashMap<>();
+        for (Map.Entry<List<String>, double[]> entry : merged.entrySet()) {
+            List<String> compositeKey = entry.getKey();
+            String outputName = compositeKey.get(compositeKey.size() - 1);
+            List<String> groupKey = compositeKey.subList(0, compositeKey.size() - 1);
+
+            com.minisql.common.model.Row row = outputRows.computeIfAbsent(groupKey, k -> {
+                com.minisql.common.model.Row r = new com.minisql.common.model.Row();
+                for (int i = 0; i < groupByColumns.size() && i < k.size(); i++) {
+                    String val = k.get(i);
+                    r.setColumn(groupByColumns.get(i), val != null ? parseValue(val) : null);
+                }
+                return r;
+            });
+
+            String func = null;
+            for (AggregateExpression expr : aggregateExpressions) {
+                if (expr.outputName.equals(outputName)) {
+                    func = expr.function;
+                    break;
+                }
+            }
+
+            double[] acc = entry.getValue();
+            String[] mm = minMax.get(compositeKey);
+            Object result;
+            if ("COUNT".equalsIgnoreCase(func)) {
+                result = (long) acc[1];
+            } else if ("SUM".equalsIgnoreCase(func)) {
+                result = acc[0];
+            } else if ("AVG".equalsIgnoreCase(func)) {
+                result = acc[1] == 0 ? null : acc[0] / acc[1];
+            } else if ("MAX".equalsIgnoreCase(func)) {
+                result = mm != null && mm[1] != null ? parseValue(mm[1]) : null;
+            } else if ("MIN".equalsIgnoreCase(func)) {
+                result = mm != null && mm[0] != null ? parseValue(mm[0]) : null;
+            } else {
+                result = acc[0];
+            }
+            row.setColumn(outputName, result);
+        }
+
+        return new ArrayList<>(outputRows.values());
+    }
+
+    private Object parseValue(String val) {
+        if (val == null) return null;
+        try { return Long.parseLong(val); } catch (NumberFormatException ignored) {}
+        try { return Double.parseDouble(val); } catch (NumberFormatException ignored) {}
+        return val;
+    }
+
+    private List<RegionServerProto.AggregateGroup> fetchAggregateGroupsFromRegion(
+            RegionLocation location,
+            Condition whereCondition,
+            String whereClause,
+            List<String> projectedQualifiers,
+            List<AggregateExpression> aggregateExpressions,
+            List<String> groupByColumns) throws SQLException {
+
+        ManagedChannel channel = ManagedChannelBuilder
+            .forAddress(location.serverHost, location.serverPort)
+            .usePlaintext()
+            .build();
+
+        try {
+            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
+                RegionServerServiceGrpc.newBlockingStub(channel);
+
+            RegionServerProto.ScanRequest.Builder reqBuilder = RegionServerProto.ScanRequest.newBuilder()
+                .setRegionId(location.regionId)
+                .setStartKey(ByteString.EMPTY)
+                .setEndKey(ByteString.copyFrom(new byte[]{(byte) 0xFF}))
+                .setTableName(location.tableName == null ? "" : location.tableName);
+
+            if (projectedQualifiers != null && !projectedQualifiers.isEmpty()) {
+                reqBuilder.addAllQualifiers(projectedQualifiers);
+            }
+            if (whereClause != null && !whereClause.isBlank()) {
+                reqBuilder.setWhereClause(whereClause);
+            }
+            for (AggregateExpression expr : aggregateExpressions) {
+                reqBuilder.addAggregates(RegionServerProto.AggregateSpec.newBuilder()
+                    .setFunction(expr.function)
+                    .setColumn(expr.column == null ? "" : expr.column)
+                    .setOutputName(expr.outputName)
+                    .build());
+            }
+            if (groupByColumns != null) {
+                reqBuilder.addAllGroupByColumns(groupByColumns);
+            }
+
+            RegionServerProto.ScanRequest request = reqBuilder.build();
+            List<RegionServerProto.AggregateGroup> allGroups = new ArrayList<>();
+
+            java.util.Iterator<RegionServerProto.ScanResponse> responses = stub.scan(request);
+            while (responses.hasNext()) {
+                RegionServerProto.ScanResponse response = responses.next();
+                if (!response.getStatus().getSuccess()) {
+                    throw new SQLException("Scan failed: " + response.getStatus().getMessage());
+                }
+                allGroups.addAll(response.getAggregateGroupsList());
+            }
+            return allGroups;
+        } catch (RuntimeException e) {
+            throw new SQLException("Failed to scan region " + location.regionId, e);
+        } finally {
+            channel.shutdown();
+        }
+    }
+
     private List<com.minisql.common.model.Row> fetchSourceRows(String tableName,
                                                                byte[] rowKey,
                                                                Condition whereCondition,
                                                                String whereClause,
                                                                List<String> projectedQualifiers) throws SQLException {
+        return fetchSourceRows(tableName, rowKey, whereCondition, whereClause, projectedQualifiers, null, 0, 0);
+    }
+
+    private List<com.minisql.common.model.Row> fetchSourceRows(String tableName,
+                                                               byte[] rowKey,
+                                                               Condition whereCondition,
+                                                               String whereClause,
+                                                               List<String> projectedQualifiers,
+                                                               List<SelectStatement.OrderByElement> orderBy,
+                                                               int limit,
+                                                               int offset) throws SQLException {
         List<RegionLocation> targets = rowKey != null
             ? getTargetRegion(tableName, rowKey)
             : getAllRegionsForTable(tableName);
@@ -193,7 +443,8 @@ public class ParallelQueryExecutor {
 
         List<Future<List<com.minisql.common.model.Row>>> futures = new ArrayList<>();
         for (RegionLocation location : targets) {
-            futures.add(executor.submit(() -> fetchRowsFromRegion(location, whereCondition, whereClause, projectedQualifiers)));
+            futures.add(executor.submit(() -> fetchRowsFromRegion(
+                location, whereCondition, whereClause, projectedQualifiers, orderBy, limit, offset)));
         }
 
         List<com.minisql.common.model.Row> rows = new ArrayList<>();
@@ -213,7 +464,10 @@ public class ParallelQueryExecutor {
     private List<com.minisql.common.model.Row> fetchRowsFromRegion(RegionLocation location,
                                                                    Condition whereCondition,
                                                                    String whereClause,
-                                                                   List<String> projectedQualifiers) throws SQLException {
+                                                                   List<String> projectedQualifiers,
+                                                                   List<SelectStatement.OrderByElement> orderBy,
+                                                                   int limit,
+                                                                   int offset) throws SQLException {
         ManagedChannel channel = ManagedChannelBuilder
             .forAddress(location.serverHost, location.serverPort)
             .usePlaintext()
@@ -223,9 +477,12 @@ public class ParallelQueryExecutor {
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
                 RegionServerServiceGrpc.newBlockingStub(channel);
             Table schema = getTableSchema(location.tableName);
-            List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName, whereClause, projectedQualifiers);
+            List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName,
+                whereClause, projectedQualifiers, orderBy, limit, offset);
             List<com.minisql.common.model.Row> rows = RowAssembler.assemble(keyValues, schema);
-            return whereCondition != null ? filterRows(rows, whereCondition) : rows;
+            // Only re-filter client-side when condition was NOT pushed down to server
+            // (whereClause == null means pushdown failed or condition was complex)
+            return (whereCondition != null && whereClause == null) ? filterRows(rows, whereCondition) : rows;
         } finally {
             channel.shutdown();
         }
@@ -236,6 +493,17 @@ public class ParallelQueryExecutor {
                                          String tableName,
                                          String whereClause,
                                          List<String> projectedQualifiers) throws SQLException {
+        return scanKeyValues(stub, regionId, tableName, whereClause, projectedQualifiers, null, 0, 0);
+    }
+
+    private List<KeyValue> scanKeyValues(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
+                                         String regionId,
+                                         String tableName,
+                                         String whereClause,
+                                         List<String> projectedQualifiers,
+                                         List<SelectStatement.OrderByElement> orderBy,
+                                         int limit,
+                                         int offset) throws SQLException {
         RegionServerProto.ScanRequest.Builder requestBuilder = RegionServerProto.ScanRequest.newBuilder()
             .setRegionId(regionId)
             .setStartKey(ByteString.EMPTY)
@@ -246,6 +514,20 @@ public class ParallelQueryExecutor {
         }
         if (whereClause != null && !whereClause.isBlank()) {
             requestBuilder.setWhereClause(whereClause);
+        }
+        if (orderBy != null && !orderBy.isEmpty()) {
+            for (SelectStatement.OrderByElement elem : orderBy) {
+                requestBuilder.addOrderBy(RegionServerProto.OrderByElement.newBuilder()
+                    .setColumn(elem.getColumn())
+                    .setAscending(elem.isAscending())
+                    .build());
+            }
+        }
+        if (limit > 0) {
+            requestBuilder.setLimit(limit);
+        }
+        if (offset > 0) {
+            requestBuilder.setOffset(offset);
         }
         RegionServerProto.ScanRequest request = requestBuilder.build();
 
@@ -435,7 +717,8 @@ public class ParallelQueryExecutor {
      * Execute JOIN using AST fields.
      */
     private List<com.minisql.common.model.Row> executeJoinFromAst(
-            SelectStatement ast, List<com.minisql.common.model.Row> leftRows) throws SQLException {
+            SelectStatement ast, List<com.minisql.common.model.Row> leftRows,
+            Condition rightWhereCondition) throws SQLException {
 
         String leftTable = ast.getTable();
         String leftAlias = ast.getTableAlias();
@@ -455,8 +738,12 @@ public class ParallelQueryExecutor {
             ast, rightTable, rightAlias, rightJoinCols,
             ast.getAggregates() != null ? buildAggregateExpressions(ast) : Collections.emptyList());
 
+        // Push right-only WHERE condition to right table scan
+        String rightWhereClause = (rightWhereCondition != null && canPushDownCondition(rightWhereCondition))
+            ? conditionToSql(rightWhereCondition) : null;
+
         List<com.minisql.common.model.Row> rightRows = fetchSourceRows(
-            rightTable, null, null, null, rightProjectedQualifiers);
+            rightTable, null, rightWhereCondition, rightWhereClause, rightProjectedQualifiers);
         Table rightSchema = getTableSchema(rightTable);
 
         // Hash join
@@ -789,28 +1076,6 @@ public class ParallelQueryExecutor {
             }
         }
         return merged;
-    }
-
-    private List<Row> mergeAndSort(List<List<Row>> allResults,
-                                   List<String> orderByColumns,
-                                   List<Boolean> ascending,
-                                   int limit,
-                                   int offset) {
-        List<Row> allRows = new ArrayList<>();
-        for (List<Row> rows : allResults) {
-            allRows.addAll(rows);
-        }
-
-        if (orderByColumns != null && !orderByColumns.isEmpty()) {
-            allRows.sort(ResultSetMerger.createComparator(orderByColumns, ascending));
-        }
-
-        int fromIndex = Math.max(0, offset);
-        int toIndex = limit < 0 ? allRows.size() : Math.min(allRows.size(), fromIndex + limit);
-        if (fromIndex >= allRows.size()) {
-            return new ArrayList<>();
-        }
-        return new ArrayList<>(allRows.subList(fromIndex, toIndex));
     }
 
     private List<RegionLocation> getTargetRegion(String tableName, byte[] rowKey) {
