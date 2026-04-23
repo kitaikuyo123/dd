@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,6 +38,7 @@ public class ReplicationCoordinator {
     private final Map<String, BlockingQueue<ReplicationTask>> replicationQueues = new ConcurrentHashMap<>();
     private final ExecutorService replicationExecutor;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final Set<String> catchUpInProgress = ConcurrentHashMap.newKeySet();
     private ScheduledExecutorService healthCheckScheduler;
 
     public ReplicationCoordinator(ReplicationConfig config) {
@@ -119,6 +121,20 @@ public class ReplicationCoordinator {
         replicationQueues.put(region.getRegionId(), new LinkedBlockingQueue<>());
         startReplicationWorker(region.getRegionId());
         registry.recordPrimaryProgress(region.getRegionId(), currentSequenceId(region.getRegionId()));
+
+        // Restore persisted replication progress for each replica
+        if (wal != null) {
+            for (ServerId replica : group.getReplicas()) {
+                String addr = replica.getHost() + ":" + replica.getPort();
+                long progress = wal.getAppliedProgress(region.getRegionId(), addr);
+                if (progress > 0) {
+                    registry.updateReplicaProgress(region.getRegionId(), replica, progress, 0L);
+                    logger.info("Restored replication progress for region={} replica={}: seqId={}",
+                        region.getRegionId(), addr, progress);
+                }
+            }
+        }
+
         logger.info("Replica group created for region: {} with {} replicas",
             region.getRegionId(), group.getReplicas().size());
     }
@@ -290,10 +306,18 @@ public class ReplicationCoordinator {
 
             while (running.get()) {
                 try {
-                    ReplicationTask task = queue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task != null) {
-                        processReplicationTask(regionId, task);
+                    ReplicationTask firstTask = queue.poll(100, TimeUnit.MILLISECONDS);
+                    if (firstTask == null) {
+                        continue;
                     }
+
+                    // Drain up to maxBatchSize tasks that are immediately available
+                    int maxBatch = config.getMaxReplicationBatchSize();
+                    List<ReplicationTask> batch = new ArrayList<>(maxBatch);
+                    batch.add(firstTask);
+                    queue.drainTo(batch, maxBatch - 1);
+
+                    processBatchReplicationTask(regionId, batch);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -302,12 +326,20 @@ public class ReplicationCoordinator {
         });
     }
 
-    private void processReplicationTask(String regionId, ReplicationTask task) {
+    private void processBatchReplicationTask(String regionId, List<ReplicationTask> batch) {
         ReplicaGroup group = requireGroup(regionId);
         ServerId primary = group.getPrimary();
         if (primary == null) {
-            task.future.complete(false);
+            for (ReplicationTask task : batch) {
+                task.future.complete(false);
+            }
             return;
+        }
+
+        // Collect all entries from the batch
+        List<ReplicationLogEntry> entries = new ArrayList<>(batch.size());
+        for (ReplicationTask task : batch) {
+            entries.add(task.entry);
         }
 
         List<CompletableFuture<AckResult>> futures = new ArrayList<>();
@@ -319,7 +351,7 @@ public class ReplicationCoordinator {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 boolean success = false;
                 for (int attempt = 0; attempt < config.getMaxRetryCount(); attempt++) {
-                    success = transportClient.replicate(replica, regionId, task.entry, config.getReplicationTimeoutMs());
+                    success = transportClient.replicateBatch(replica, regionId, entries, config.getReplicationTimeoutMs());
                     if (success) {
                         break;
                     }
@@ -338,31 +370,30 @@ public class ReplicationCoordinator {
         int secondaryCount = totalReplicas - 1;
         int requiredAcks;
         if (secondaryCount == 0) {
-            // 只有 primary，无需确认
             requiredAcks = 0;
         } else if (config.isQuorumAckEnabled()) {
-            // quorum 确认：primary 自身算 1 票，只需 (majority - 1) 个 secondary ACK
-            // 即 totalReplicas=3 时 majority=2，需要 1 个 secondary ACK
             int majority = totalReplicas / 2 + 1;
             requiredAcks = majority - 1;
         } else {
-            // 全部确认：所有 secondary 都必须 ACK
             requiredAcks = secondaryCount;
         }
 
         int successCount = 0;
+        long lastSequenceId = entries.get(entries.size() - 1).getSequenceId();
         for (CompletableFuture<AckResult> future : futures) {
             try {
                 AckResult result = future.get(config.getAckTimeoutMs(), TimeUnit.MILLISECONDS);
                 if (result.success) {
                     successCount++;
-                    registry.updateReplicaProgress(regionId, result.replica, task.entry.getSequenceId(), 0L);
+                    registry.updateReplicaProgress(regionId, result.replica, lastSequenceId, 0L);
                     if (wal != null) {
-                        try {
-                            wal.markAsApplied(regionId, task.entry.getSequenceId(),
-                                result.replica.getHost() + ":" + result.replica.getPort());
-                        } catch (Exception e) {
-                            logger.warn("Failed to mark WAL as applied: {}", e.getMessage());
+                        for (ReplicationLogEntry entry : entries) {
+                            try {
+                                wal.markAsApplied(regionId, entry.getSequenceId(),
+                                    result.replica.getHost() + ":" + result.replica.getPort());
+                            } catch (Exception e) {
+                                logger.warn("Failed to mark WAL as applied: {}", e.getMessage());
+                            }
                         }
                     }
                 }
@@ -373,8 +404,6 @@ public class ReplicationCoordinator {
 
         boolean acked = successCount >= requiredAcks;
         if (!acked) {
-            // 降级：所有 secondary 都不可达时，允许 primary 独自完成写入
-            // 避免因 secondary 不可用导致整个集群无法写入
             if (successCount == 0 && secondaryCount > 0) {
                 logger.warn("All secondaries unreachable for region {}, degrading to primary-only write (total replicas={})",
                     regionId, totalReplicas);
@@ -384,12 +413,15 @@ public class ReplicationCoordinator {
                     regionId, successCount, requiredAcks, totalReplicas);
             }
         }
-        task.future.complete(acked);
 
-        // WAL 清理：复制成功后保留最近 walRetentionCount 条，删除更早的
+        for (ReplicationTask task : batch) {
+            task.future.complete(acked);
+        }
+
         if (successCount >= requiredAcks && wal != null) {
             try {
-                wal.cleanup(regionId, config.getWalRetentionCount());
+                long minConfirmed = computeMinConfirmedSequence(group, primary);
+                wal.cleanup(regionId, config.getWalRetentionCount(), minConfirmed);
             } catch (Exception e) {
                 logger.warn("WAL cleanup failed for region {}: {}", regionId, e.getMessage());
             }
@@ -406,12 +438,73 @@ public class ReplicationCoordinator {
             }
 
             // Refresh the primary's lastUpdateTime as a heartbeat.
-            // If this health check can run, the primary process is alive.
             ReplicaGroup.ReplicaState primaryState = group.getReplicaState(primary);
             if (primaryState != null) {
                 primaryState.setLastUpdateTime(System.currentTimeMillis());
             }
+
+            // Auto-recovery: detect stale secondaries and attempt catch-up
+            if (wal == null) continue;
+            long primarySeqId = currentSequenceId(regionId);
+            for (ServerId replica : group.getReplicas()) {
+                if (replica.equals(primary)) continue;
+
+                ReplicaGroup.ReplicaState state = group.getReplicaState(replica);
+                if (state == null) continue;
+
+                long lag = primarySeqId - state.getLastAppliedSequenceId();
+                if (lag < config.getCatchUpLagThreshold()) continue;
+
+                String catchUpKey = regionId + ":" + replica.getHost() + ":" + replica.getPort();
+                if (!catchUpInProgress.add(catchUpKey)) continue;
+
+                final long fromSeqId = state.getLastAppliedSequenceId();
+                replicationExecutor.submit(() -> {
+                    try {
+                        attemptCatchUp(regionId, replica, fromSeqId);
+                    } finally {
+                        catchUpInProgress.remove(catchUpKey);
+                    }
+                });
+            }
         }
+    }
+
+    private void attemptCatchUp(String regionId, ServerId replica, long fromSeqId) {
+        List<ReplicationLogEntry> entries = wal.getEntries(regionId, fromSeqId + 1);
+        if (entries.isEmpty()) return;
+
+        // Check for WAL gap: if the first available entry is not the expected one
+        if (entries.get(0).getSequenceId() > fromSeqId + 1) {
+            logger.warn("WAL gap detected for region={} replica={}: expected seqId {} but found {}. " +
+                "Falling back to full snapshot sync.",
+                regionId, replica, fromSeqId + 1, entries.get(0).getSequenceId());
+            syncCoordinator.synchronizeReplica(regionId, replica, false, () -> currentSequenceId(regionId));
+            return;
+        }
+
+        boolean success = transportClient.replicateBatch(
+            replica, regionId, entries, config.getReplicationTimeoutMs());
+        if (success) {
+            long lastSeqId = entries.get(entries.size() - 1).getSequenceId();
+            registry.updateReplicaProgress(regionId, replica, lastSeqId, 0L);
+            wal.markAsApplied(regionId, lastSeqId, replica.getHost() + ":" + replica.getPort());
+            logger.info("Auto catch-up succeeded for region={} replica={}: advanced from {} to {}",
+                regionId, replica, fromSeqId, lastSeqId);
+        } else {
+            logger.debug("Auto catch-up failed for region={} replica={}: replica still unreachable",
+                regionId, replica);
+        }
+    }
+
+    private long computeMinConfirmedSequence(ReplicaGroup group, ServerId primary) {
+        long min = Long.MAX_VALUE;
+        for (ServerId replica : group.getReplicas()) {
+            ReplicaGroup.ReplicaState state = group.getReplicaState(replica);
+            long seqId = (state != null) ? state.getLastAppliedSequenceId() : 0;
+            if (seqId < min) min = seqId;
+        }
+        return min == Long.MAX_VALUE ? 0 : min;
     }
 
     private long currentSequenceId(String regionId) {

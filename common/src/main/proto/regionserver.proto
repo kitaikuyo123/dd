@@ -17,7 +17,6 @@ service RegionServerService {
     rpc BatchPut(BatchPutRequest) returns (BatchPutResponse);
 
     // SQL 查询
-    rpc ExecuteQuery(ExecuteQueryRequest) returns (ExecuteQueryResponse);
     rpc ExecuteUpdate(ExecuteUpdateRequest) returns (ExecuteUpdateResponse);
 
     // Region 管理
@@ -33,6 +32,7 @@ service RegionServerService {
     // 副本同步
     rpc Replicate(ReplicateRequest) returns (ReplicateResponse);
     rpc GetReplicationLag(GetReplicationLagRequest) returns (GetReplicationLagResponse);
+    rpc StreamSnapshot(stream StreamSnapshotRequest) returns (StreamSnapshotResponse);
 
     // Region migration
     rpc StartMigration(MigrateRequest) returns (MigrateResponse);
@@ -282,6 +282,7 @@ message LogEntry {
     int64 sequenceId = 1;
     int64 timestamp = 2;
     repeated KeyValue mutations = 3;
+    uint64 checksum = 4;  // CRC32 of serialized mutations for data integrity
 }
 
 message ReplicateResponse {
@@ -299,6 +300,20 @@ message GetReplicationLagResponse {
     int64 lagInBytes = 3;
     int64 currentSequenceId = 4;
     int64 lastAppliedSequenceId = 5;
+}
+
+// 流式快照推送
+message StreamSnapshotRequest {
+    string regionId = 1;
+    repeated KeyValue batch = 2;
+    bool isFinal = 3;
+    int64 finalSequenceId = 4;
+}
+
+message StreamSnapshotResponse {
+    Status status = 1;
+    int64 lastAppliedSeqId = 2;
+    int64 totalApplied = 3;
 }
 
 // ==================== Region 合并消息 ====================
@@ -331,32 +346,6 @@ message CheckMergeCandidatesResponse {
 }
 
 // ==================== SQL interfaces ====================
-
-// ExecuteQuery request
-message ExecuteQueryRequest {
-    string regionId = 1;
-    string sql = 2;
-    int32 limit = 3;
-}
-
-// ExecuteQuery response
-message ExecuteQueryResponse {
-    Status status = 1;
-    repeated QueryRow rows = 2;
-    repeated QueryColumn columns = 3;
-}
-
-// Query row payload
-message QueryRow {
-    repeated bytes values = 1;
-}
-
-// Query column metadata
-message QueryColumn {
-    string name = 1;
-    string type = 2;
-    bool nullable = 3;
-}
 
 // ExecuteUpdate request
 message ExecuteUpdateRequest {

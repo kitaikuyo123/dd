@@ -19,6 +19,7 @@ import com.minisql.sql.ast.SelectStatement;
 import com.minisql.storage.StorageScanFilter;
 import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
+import java.util.zip.CRC32;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
@@ -221,6 +222,19 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             java.util.Iterator<KeyValue> it = storageFilter == null
                 ? regionServer.scan(regionId, startKey, endKey)
                 : regionServer.scan(regionId, storageFilter);
+
+            // Decide streaming vs materialized path
+            boolean hasOrderBy = request.getOrderByCount() > 0;
+            boolean canStream = !hasOrderBy
+                && request.getAggregatesCount() == 0
+                && (whereClause == null || whereClause.isBlank() || pushdownPlan.isFullyPushedDown());
+
+            if (canStream) {
+                streamScanResults(responseObserver, it, request.getLimit(), request.getOffset());
+                return;
+            }
+
+            // Materialized path for ORDER BY, aggregation, or complex WHERE
             List<KeyValue> keyValues = new ArrayList<>();
             while (it.hasNext()) {
                 keyValues.add(it.next());
@@ -248,7 +262,6 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             }
 
             // ORDER BY + LIMIT pushdown: sort and truncate at region server
-            boolean hasOrderBy = request.getOrderByCount() > 0;
             int limit = request.getLimit();
             int offset = request.getOffset();
             if (hasOrderBy || limit > 0) {
@@ -308,6 +321,57 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         }
+    }
+
+    /**
+     * Stream scan results in batches to reduce memory pressure.
+     * Used for simple scans without ORDER BY, aggregation, or complex WHERE.
+     */
+    private void streamScanResults(StreamObserver<RegionServerProto.ScanResponse> responseObserver,
+                                    java.util.Iterator<KeyValue> it,
+                                    int limit, int offset) throws IOException {
+        int batchSize = 1000;
+        List<CommonProto.KeyValue> batch = new ArrayList<>(batchSize);
+        int totalSent = 0;
+        int skipped = 0;
+
+        while (it.hasNext()) {
+            KeyValue kv = it.next();
+
+            // Skip offset rows
+            if (offset > 0 && skipped < offset) {
+                skipped++;
+                continue;
+            }
+
+            batch.add(convertToProto(kv));
+
+            if (batch.size() >= batchSize) {
+                boolean hasMore = it.hasNext();
+                if (limit > 0) {
+                    totalSent += batch.size();
+                    hasMore = totalSent < limit;
+                }
+                responseObserver.onNext(RegionServerProto.ScanResponse.newBuilder()
+                    .setStatus(createSuccessStatus())
+                    .addAllKeyValues(batch)
+                    .setHasMore(hasMore)
+                    .build());
+                batch.clear();
+                if (limit > 0 && totalSent >= limit) {
+                    responseObserver.onCompleted();
+                    return;
+                }
+            }
+        }
+
+        // Send remaining or empty response
+        responseObserver.onNext(RegionServerProto.ScanResponse.newBuilder()
+            .setStatus(createSuccessStatus())
+            .addAllKeyValues(batch)
+            .setHasMore(false)
+            .build());
+        responseObserver.onCompleted();
     }
 
     /**
@@ -396,6 +460,24 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                     continue;
                 }
 
+                // Verify checksum if present
+                if (entry.getChecksum() != 0) {
+                    CRC32 crc32 = new CRC32();
+                    for (CommonProto.KeyValue kvProto : entry.getMutationsList()) {
+                        crc32.update(kvProto.toByteArray());
+                    }
+                    if (crc32.getValue() != entry.getChecksum()) {
+                        logger.error("Checksum mismatch for seqId={} in region {}: expected {}, actual {}",
+                            entry.getSequenceId(), regionId, entry.getChecksum(), crc32.getValue());
+                        RegionServerProto.ReplicateResponse response = RegionServerProto.ReplicateResponse.newBuilder()
+                            .setStatus(createErrorStatus("Checksum mismatch for seqId=" + entry.getSequenceId()))
+                            .build();
+                        responseObserver.onNext(response);
+                        responseObserver.onCompleted();
+                        return;
+                    }
+                }
+
                 List<KeyValue> mutations = new ArrayList<>();
                 for (CommonProto.KeyValue kvProto : entry.getMutationsList()) {
                     KeyValue kv = new KeyValue();
@@ -436,6 +518,59 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         }
+    }
+
+    @Override
+    public StreamObserver<RegionServerProto.StreamSnapshotRequest> streamSnapshot(
+            StreamObserver<RegionServerProto.StreamSnapshotResponse> responseObserver) {
+        return new StreamObserver<>() {
+            private String regionId;
+            private long totalApplied = 0;
+            private long maxSeqId = 0;
+
+            @Override
+            public void onNext(RegionServerProto.StreamSnapshotRequest request) {
+                if (regionId == null) {
+                    regionId = request.getRegionId();
+                }
+
+                List<KeyValue> mutations = new ArrayList<>();
+                for (CommonProto.KeyValue kvProto : request.getBatchList()) {
+                    mutations.add(convertFromProto(kvProto));
+                }
+                if (!mutations.isEmpty()) {
+                    try {
+                        regionServer.put(regionId, mutations, true);
+                    } catch (Exception e) {
+                        logger.error("Failed to apply snapshot batch: {}", e.getMessage());
+                    }
+                }
+                totalApplied += mutations.size();
+
+                if (request.getIsFinal() && request.getFinalSequenceId() > 0) {
+                    regionServer.getRegionManager()
+                        .updateLastAppliedReplicationSequenceId(regionId, request.getFinalSequenceId());
+                    maxSeqId = request.getFinalSequenceId();
+                }
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                logger.error("StreamSnapshot error", t);
+            }
+
+            @Override
+            public void onCompleted() {
+                RegionServerProto.StreamSnapshotResponse response =
+                    RegionServerProto.StreamSnapshotResponse.newBuilder()
+                        .setStatus(createSuccessStatus())
+                        .setLastAppliedSeqId(maxSeqId)
+                        .setTotalApplied(totalApplied)
+                        .build();
+                responseObserver.onNext(response);
+                responseObserver.onCompleted();
+            }
+        };
     }
 
     @Override
@@ -859,107 +994,6 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         }
     }
 
-    /**
-     * 处理 SQL 查询请求
-     */
-    @Override
-    public void executeQuery(RegionServerProto.ExecuteQueryRequest request,
-                             StreamObserver<RegionServerProto.ExecuteQueryResponse> responseObserver) {
-        try {
-            String regionId = request.getRegionId();
-            String sql = request.getSql();
-
-            logger.info("Received executeQuery request for region: {}, sql: {}", regionId, sql);
-
-            Region region = regionServer.getRegionManager().getRegion(regionId);
-            if (region == null) {
-                throw new IOException("Region not found: " + regionId);
-            }
-
-            SelectStatement select = parseSelect(sql);
-            if (select.getJoinTable() != null) {
-                throw new UnsupportedOperationException("JOIN is not supported by RegionServer executeQuery");
-            }
-            if (select.getTable() != null && !region.getTableName().equalsIgnoreCase(select.getTable())) {
-                throw new IOException("SQL table does not match region table: " + select.getTable());
-            }
-
-            Table tableSchema = regionServer.getTableSchema(region.getTableName());
-
-            RegionStorage storage = regionServer.getRegionManager().getRegionStorage(regionId);
-            if (storage == null) {
-                throw new IOException("Region storage not found: " + regionId);
-            }
-
-            List<KeyValue> keyValues = new ArrayList<>();
-            Iterator<com.minisql.common.model.KeyValue> iter = storage.scan(null, null);
-            while (iter.hasNext()) {
-                keyValues.add(iter.next());
-            }
-
-            List<Row> rows = RowAssembler.assemble(keyValues, tableSchema);
-            rows = filterRows(rows, select.getWhere());
-            if (select.getOrderBy() != null && !select.getOrderBy().isEmpty()) {
-                rows.sort(createComparator(select.getOrderBy()));
-            }
-
-            int offset = select.getOffset() != null ? Math.max(0, select.getOffset()) : 0;
-            int limit = request.getLimit() > 0
-                ? request.getLimit()
-                : (select.getLimit() != null ? select.getLimit() : -1);
-            List<String> resultColumns = determineResultColumns(select, tableSchema);
-
-            RegionServerProto.ExecuteQueryResponse.Builder responseBuilder =
-                RegionServerProto.ExecuteQueryResponse.newBuilder()
-                    .setStatus(createSuccessStatus());
-
-            for (String columnName : resultColumns) {
-                Column col = findColumn(tableSchema, columnName);
-                responseBuilder.addColumns(RegionServerProto.QueryColumn.newBuilder()
-                    .setName(col.getName())
-                    .setType(col.getType().name())
-                    .setNullable(col.isNullable())
-                    .build());
-            }
-
-            int rowCount = 0;
-            for (int i = offset; i < rows.size(); i++) {
-                if (limit >= 0 && rowCount >= limit) {
-                    break;
-                }
-
-                Row row = rows.get(i);
-                RegionServerProto.QueryRow.Builder rowBuilder = RegionServerProto.QueryRow.newBuilder();
-                for (String columnName : resultColumns) {
-                    Object value = row.getColumn(columnName);
-                    if (value instanceof byte[]) {
-                        rowBuilder.addValues(com.google.protobuf.ByteString.copyFrom((byte[]) value));
-                    } else if (value != null) {
-                        rowBuilder.addValues(com.google.protobuf.ByteString.copyFromUtf8(String.valueOf(value)));
-                    } else {
-                        rowBuilder.addValues(com.google.protobuf.ByteString.EMPTY);
-                    }
-                }
-                responseBuilder.addRows(rowBuilder.build());
-                rowCount++;
-            }
-
-            RegionServerProto.ExecuteQueryResponse response = responseBuilder.build();
-            logger.info("Query executed successfully, returned {} rows", rowCount);
-
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            logger.error("Error processing executeQuery request", e);
-            RegionServerProto.ExecuteQueryResponse response = RegionServerProto.ExecuteQueryResponse.newBuilder()
-                .setStatus(createErrorStatus("Query failed: " + e.getMessage()))
-                .build();
-
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        }
-    }
-
     private SelectStatement parseSelect(String sql) throws IOException {
         try {
             return (SelectStatement) new SQLParser(sql).parse();
@@ -1015,20 +1049,6 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         return filtered;
     }
 
-    private Comparator<Row> createComparator(List<SelectStatement.OrderByElement> orderBy) {
-        return (left, right) -> {
-            for (SelectStatement.OrderByElement element : orderBy) {
-                Object leftValue = left.getColumn(element.getColumn());
-                Object rightValue = right.getColumn(element.getColumn());
-                int cmp = compareValues(leftValue, rightValue);
-                if (cmp != 0) {
-                    return element.isAscending() ? cmp : -cmp;
-                }
-            }
-            return 0;
-        };
-    }
-
     @SuppressWarnings("unchecked")
     private int compareValues(Object left, Object right) {
         if (left == null && right == null) {
@@ -1044,41 +1064,6 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             return ((Comparable<Object>) left).compareTo(right);
         }
         return left.toString().compareTo(right.toString());
-    }
-
-    private List<String> determineResultColumns(SelectStatement select, Table schema) {
-        if (select.isSelectAll() || select.getColumns() == null || select.getColumns().isEmpty()) {
-            if (schema == null || schema.getColumns() == null) {
-                return Collections.emptyList();
-            }
-
-            List<String> columns = new ArrayList<>();
-            for (Column column : schema.getColumns()) {
-                columns.add(column.getName());
-            }
-            return columns;
-        }
-
-        List<String> columns = new ArrayList<>();
-        for (String column : select.getColumns()) {
-            if (!"*".equals(column)) {
-                columns.add(column);
-            }
-        }
-        return columns;
-    }
-
-    private Column findColumn(Table schema, String columnName) throws IOException {
-        if (schema == null || schema.getColumns() == null) {
-            throw new IOException("Table schema unavailable");
-        }
-
-        for (Column column : schema.getColumns()) {
-            if (column.getName().equalsIgnoreCase(columnName)) {
-                return column;
-            }
-        }
-        throw new IOException("Column not found in schema: " + columnName);
     }
 
     private static final class BytesKey {
@@ -1456,5 +1441,16 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             .setValue(com.google.protobuf.ByteString.copyFrom(kv.getValue() != null ? kv.getValue() : new byte[0]))
             .setType(kv.getType() == KeyValue.Type.PUT ? CommonProto.KeyValueType.PUT : CommonProto.KeyValueType.DELETE)
             .build();
+    }
+
+    private KeyValue convertFromProto(CommonProto.KeyValue kvProto) {
+        KeyValue kv = new KeyValue();
+        kv.setRowKey(kvProto.getRowKey().toByteArray());
+        kv.setFamily(kvProto.getColumnFamily());
+        kv.setQualifier(kvProto.getQualifier());
+        kv.setTimestamp(kvProto.getTimestamp());
+        kv.setValue(kvProto.getValue().toByteArray());
+        kv.setType(kvProto.getType() == CommonProto.KeyValueType.PUT ? KeyValue.Type.PUT : KeyValue.Type.DELETE);
+        return kv;
     }
 }

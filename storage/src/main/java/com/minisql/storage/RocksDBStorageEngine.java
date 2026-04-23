@@ -369,19 +369,50 @@ public class RocksDBStorageEngine implements StorageEngine {
     }
 
     private void flushRow(List<KeyValue> results, Map<String, KeyValue> currentRow, StorageScanFilter filter) {
-        // Check if this row passes all column predicates
+        // Check if this row passes all column predicates (row-level filtering)
         if (filter != null && filter.hasColumnPredicates()) {
             for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
-                boolean matched = false;
+                KeyValue targetKv = null;
                 for (KeyValue kv : currentRow.values()) {
                     if (kv.isDelete()) continue;
                     if (pred.matchesQualifier(kv.getQualifier())) {
-                        matched = true;
+                        targetKv = kv;
                         break;
                     }
                 }
-                if (!matched) {
+                if (targetKv == null) {
                     // Column not present in row; skip entire row
+                    return;
+                }
+                byte[] kvValue = targetKv.getValue();
+                byte[] predValue = pred.getValue();
+                if (kvValue == null || predValue == null) {
+                    return;
+                }
+                int cmp = compareBytes(kvValue, predValue);
+                boolean passes = true;
+                switch (pred.getOperator()) {
+                    case "=":
+                    case "==":
+                        passes = (cmp == 0);
+                        break;
+                    case ">":
+                        passes = (cmp > 0);
+                        break;
+                    case ">=":
+                        passes = (cmp >= 0);
+                        break;
+                    case "<":
+                        passes = (cmp < 0);
+                        break;
+                    case "<=":
+                        passes = (cmp <= 0);
+                        break;
+                    default:
+                        break;
+                }
+                if (!passes) {
+                    // Predicate not satisfied; skip entire row
                     return;
                 }
             }
@@ -395,44 +426,6 @@ public class RocksDBStorageEngine implements StorageEngine {
                 if (!filter.getProjectedQualifiers().contains(kv.getQualifier())) {
                     continue;
                 }
-            }
-
-            // Apply column predicate value check
-            if (filter != null && filter.hasColumnPredicates()) {
-                boolean passes = true;
-                for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
-                    if (pred.matchesQualifier(kv.getQualifier())) {
-                        byte[] kvValue = kv.getValue();
-                        byte[] predValue = pred.getValue();
-                        if (kvValue == null || predValue == null) {
-                            passes = false;
-                            break;
-                        }
-                        int cmp = compareBytes(kvValue, predValue);
-                        switch (pred.getOperator()) {
-                            case "=":
-                            case "==":
-                                passes = (cmp == 0);
-                                break;
-                            case ">":
-                                passes = (cmp > 0);
-                                break;
-                            case ">=":
-                                passes = (cmp >= 0);
-                                break;
-                            case "<":
-                                passes = (cmp < 0);
-                                break;
-                            case "<=":
-                                passes = (cmp <= 0);
-                                break;
-                            default:
-                                break;
-                        }
-                        if (!passes) break;
-                    }
-                }
-                if (!passes) continue;
             }
 
             results.add(kv);

@@ -16,13 +16,17 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Persistent write-ahead log for replication, backed by a dedicated RocksDB instance.
  *
- * <p>Key layout: {@code <regionId-UTF8><0x00><sequenceId-big-endian-8bytes>}
- * <p>Value: binary-encoded ReplicationLogEntry (sequenceId + timestamp + mutations).
+ * <p>WAL entry key layout: {@code <regionId-UTF8><0x00><sequenceId-big-endian-8bytes>}
+ * <p>WAL entry value: binary-encoded ReplicationLogEntry (sequenceId + timestamp + mutations).
+ *
+ * <p>Applied progress key layout: {@code <regionId-UTF8><0x01><replicaAddress-UTF8>}
+ * <p>Applied progress value: 8-byte big-endian lastAppliedSequenceId.
  */
 public class ReplicationWAL implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(ReplicationWAL.class);
     private static final byte[] SEP = new byte[]{0x00};
+    private static final byte[] PROGRESS_SEP = new byte[]{0x01};
 
     private RocksDB db;
     private final String dbPath;
@@ -154,12 +158,46 @@ public class ReplicationWAL implements AutoCloseable {
     }
 
     public void markAsApplied(String regionId, long sequenceId, String replicaAddress) {
-        // Applied status is tracked in-memory by ReplicaGroup; no persistent tracking needed.
+        if (db == null) return;
+        try {
+            byte[] key = buildProgressKey(regionId, replicaAddress);
+            byte[] value = ByteBuffer.allocate(8).putLong(sequenceId).array();
+            db.put(key, value);
+        } catch (RocksDBException e) {
+            logger.warn("Failed to persist applied progress for region={} replica={}: {}",
+                regionId, replicaAddress, e.getMessage());
+        }
+    }
+
+    public long getAppliedProgress(String regionId, String replicaAddress) {
+        if (db == null) return 0;
+        try {
+            byte[] key = buildProgressKey(regionId, replicaAddress);
+            byte[] value = db.get(key);
+            if (value == null) return 0;
+            return ByteBuffer.wrap(value).getLong();
+        } catch (RocksDBException e) {
+            logger.warn("Failed to read applied progress for region={} replica={}: {}",
+                regionId, replicaAddress, e.getMessage());
+            return 0;
+        }
     }
 
     public void cleanup(String regionId, int maxRetention) {
+        doCleanup(regionId, maxRetention, 0);
+    }
+
+    public void cleanup(String regionId, int maxRetention, long minConfirmedSeqId) {
+        doCleanup(regionId, maxRetention, minConfirmedSeqId);
+    }
+
+    private void doCleanup(String regionId, int maxRetention, long minConfirmedSeqId) {
         long currentMax = getCurrentSequenceId(regionId);
         long cutoffSeq = currentMax - maxRetention;
+        // Don't delete entries that haven't been confirmed by all replicas
+        if (minConfirmedSeqId > 0) {
+            cutoffSeq = Math.min(cutoffSeq, minConfirmedSeqId);
+        }
         if (cutoffSeq <= 0) {
             return;
         }
@@ -217,6 +255,27 @@ public class ReplicationWAL implements AutoCloseable {
         } catch (RocksDBException e) {
             logger.warn("WAL deleteRegion failed for region {}: {}", regionId, e.getMessage());
         }
+
+        // Also delete progress keys for this region
+        byte[] progressPrefix = progressRegionPrefix(regionId);
+        try (RocksIterator it = db.newIterator()) {
+            it.seek(progressPrefix);
+            List<byte[]> toDelete = new ArrayList<>();
+            while (it.isValid()) {
+                byte[] key = it.key();
+                if (!startsWith(key, progressPrefix)) {
+                    break;
+                }
+                toDelete.add(key);
+                it.next();
+            }
+            for (byte[] key : toDelete) {
+                db.delete(key);
+            }
+        } catch (RocksDBException e) {
+            logger.warn("WAL deleteRegion progress cleanup failed for {}: {}", regionId, e.getMessage());
+        }
+
         sequenceIdCache.remove(regionId);
     }
 
@@ -237,6 +296,24 @@ public class ReplicationWAL implements AutoCloseable {
         System.arraycopy(idBytes, 0, prefix, 0, idBytes.length);
         prefix[idBytes.length] = SEP[0];
         return prefix;
+    }
+
+    private byte[] progressRegionPrefix(String regionId) {
+        byte[] idBytes = regionId.getBytes();
+        byte[] prefix = new byte[idBytes.length + 1];
+        System.arraycopy(idBytes, 0, prefix, 0, idBytes.length);
+        prefix[idBytes.length] = PROGRESS_SEP[0];
+        return prefix;
+    }
+
+    private byte[] buildProgressKey(String regionId, String replicaAddress) {
+        byte[] idBytes = regionId.getBytes();
+        byte[] addrBytes = replicaAddress.getBytes();
+        byte[] key = new byte[idBytes.length + 1 + addrBytes.length];
+        System.arraycopy(idBytes, 0, key, 0, idBytes.length);
+        key[idBytes.length] = PROGRESS_SEP[0];
+        System.arraycopy(addrBytes, 0, key, idBytes.length + 1, addrBytes.length);
+        return key;
     }
 
     private byte[] regionUpperBound(String regionId) {

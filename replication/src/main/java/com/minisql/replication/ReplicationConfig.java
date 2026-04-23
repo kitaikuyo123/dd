@@ -29,6 +29,12 @@ public class ReplicationConfig {
     // 大多数副本确认即可（quorum）
     private final boolean quorumAckEnabled;
 
+    // 批量复制最大条目数
+    private final int maxReplicationBatchSize;
+
+    // 自动追赶滞后阈值（条目数）
+    private final int catchUpLagThreshold;
+
     private ReplicationConfig(Builder builder) {
         this.replicationFactor = builder.replicationFactor;
         this.replicationTimeoutMs = builder.replicationTimeoutMs;
@@ -38,6 +44,8 @@ public class ReplicationConfig {
         this.walRetentionCount = builder.walRetentionCount;
         this.syncReplicationEnabled = builder.syncReplicationEnabled;
         this.quorumAckEnabled = builder.quorumAckEnabled;
+        this.maxReplicationBatchSize = builder.maxReplicationBatchSize;
+        this.catchUpLagThreshold = builder.catchUpLagThreshold;
     }
 
     public int getReplicationFactor() { return replicationFactor; }
@@ -48,6 +56,8 @@ public class ReplicationConfig {
     public int getWalRetentionCount() { return walRetentionCount; }
     public boolean isSyncReplicationEnabled() { return syncReplicationEnabled; }
     public boolean isQuorumAckEnabled() { return quorumAckEnabled; }
+    public int getMaxReplicationBatchSize() { return maxReplicationBatchSize; }
+    public int getCatchUpLagThreshold() { return catchUpLagThreshold; }
 
     /**
      * 计算需要的确认数
@@ -75,6 +85,8 @@ public class ReplicationConfig {
         private int walRetentionCount = 10000;
         private boolean syncReplicationEnabled = false;
         private boolean quorumAckEnabled = true;
+        private int maxReplicationBatchSize = 64;
+        private int catchUpLagThreshold = 100;
 
         public Builder(int replicationFactor) {
             this.replicationFactor = replicationFactor;
@@ -112,6 +124,16 @@ public class ReplicationConfig {
 
         public Builder quorumAckEnabled(boolean enabled) {
             this.quorumAckEnabled = enabled;
+            return this;
+        }
+
+        public Builder maxReplicationBatchSize(int size) {
+            this.maxReplicationBatchSize = size;
+            return this;
+        }
+
+        public Builder catchUpLagThreshold(int threshold) {
+            this.catchUpLagThreshold = threshold;
             return this;
         }
 

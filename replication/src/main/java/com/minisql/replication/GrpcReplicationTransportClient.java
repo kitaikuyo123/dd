@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
 
 /**
  * gRPC implementation of the replication transport abstraction.
@@ -29,25 +30,37 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
 
     @Override
     public boolean replicate(ServerId replica, String regionId, ReplicationLogEntry entry, long timeoutMs) {
+        return replicateBatch(replica, regionId, java.util.Collections.singletonList(entry), timeoutMs);
+    }
+
+    @Override
+    public boolean replicateBatch(ServerId replica, String regionId, List<ReplicationLogEntry> entries, long timeoutMs) {
         try {
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = newStub(replica, timeoutMs);
-            RegionServerProto.LogEntry.Builder logEntryBuilder = RegionServerProto.LogEntry.newBuilder()
-                .setSequenceId(entry.getSequenceId())
-                .setTimestamp(entry.getTimestamp());
+            RegionServerProto.ReplicateRequest.Builder requestBuilder =
+                RegionServerProto.ReplicateRequest.newBuilder()
+                    .setRegionId(regionId);
 
-            for (KeyValue kv : entry.getMutations()) {
-                logEntryBuilder.addMutations(toProto(kv));
+            for (ReplicationLogEntry entry : entries) {
+                RegionServerProto.LogEntry.Builder logEntryBuilder = RegionServerProto.LogEntry.newBuilder()
+                    .setSequenceId(entry.getSequenceId())
+                    .setTimestamp(entry.getTimestamp());
+
+                CRC32 crc32 = new CRC32();
+                for (KeyValue kv : entry.getMutations()) {
+                    CommonProto.KeyValue protoKv = toProto(kv);
+                    logEntryBuilder.addMutations(protoKv);
+                    crc32.update(protoKv.toByteArray());
+                }
+                logEntryBuilder.setChecksum(crc32.getValue());
+
+                requestBuilder.addEntries(logEntryBuilder.build());
             }
 
-            RegionServerProto.ReplicateResponse response = stub.replicate(
-                RegionServerProto.ReplicateRequest.newBuilder()
-                    .setRegionId(regionId)
-                    .addEntries(logEntryBuilder.build())
-                    .build()
-            );
+            RegionServerProto.ReplicateResponse response = stub.replicate(requestBuilder.build());
             return response.getStatus().getSuccess();
         } catch (Exception e) {
-            logger.warn("Replication RPC failed to {}: {}", replica, e.getMessage());
+            logger.warn("Batch replication RPC failed to {}: {}", replica, e.getMessage());
             return false;
         }
     }
@@ -128,6 +141,60 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
     }
 
     @Override
+    public boolean sendSnapshotStreaming(ServerId replica, String regionId, List<KeyValue> snapshot,
+                                          int batchSize, long timeoutMs, long finalSequenceId) {
+        try {
+            RegionServerServiceGrpc.RegionServerServiceStub asyncStub =
+                RegionServerServiceGrpc.newStub(channelFor(replica))
+                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+
+            java.util.concurrent.CompletableFuture<RegionServerProto.StreamSnapshotResponse> future =
+                new java.util.concurrent.CompletableFuture<>();
+
+            io.grpc.stub.StreamObserver<RegionServerProto.StreamSnapshotRequest> requestObserver =
+                asyncStub.streamSnapshot(new io.grpc.stub.StreamObserver<>() {
+                    @Override
+                    public void onNext(RegionServerProto.StreamSnapshotResponse response) {
+                        future.complete(response);
+                    }
+                    @Override
+                    public void onError(Throwable t) {
+                        future.completeExceptionally(t);
+                    }
+                    @Override
+                    public void onCompleted() {
+                        // handled in onNext
+                    }
+                });
+
+            int effectiveBatchSize = Math.max(1, batchSize);
+            for (int i = 0; i < snapshot.size(); i += effectiveBatchSize) {
+                List<KeyValue> batch = snapshot.subList(i, Math.min(i + effectiveBatchSize, snapshot.size()));
+                boolean isFinal = (i + effectiveBatchSize >= snapshot.size());
+
+                RegionServerProto.StreamSnapshotRequest.Builder reqBuilder =
+                    RegionServerProto.StreamSnapshotRequest.newBuilder()
+                        .setRegionId(regionId)
+                        .setIsFinal(isFinal);
+                if (isFinal) {
+                    reqBuilder.setFinalSequenceId(finalSequenceId);
+                }
+                for (KeyValue kv : batch) {
+                    reqBuilder.addBatch(toProto(kv));
+                }
+                requestObserver.onNext(reqBuilder.build());
+            }
+            requestObserver.onCompleted();
+
+            RegionServerProto.StreamSnapshotResponse response = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            return response.getStatus().getSuccess();
+        } catch (Exception e) {
+            logger.warn("Streaming snapshot failed to {}: {}", replica, e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         for (ManagedChannel channel : channels.values()) {
             channel.shutdown();
@@ -145,6 +212,7 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
         return channels.computeIfAbsent(key, ignored -> ManagedChannelBuilder
             .forAddress(serverId.getHost(), serverId.getPort())
             .usePlaintext()
+            .maxInboundMessageSize(64 * 1024 * 1024)
             .build());
     }
 
