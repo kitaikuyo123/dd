@@ -86,7 +86,7 @@ public class ReplicaSyncCoordinator {
         List<com.minisql.common.model.KeyValue> snapshot =
             transportClient.fetchSnapshot(primary, regionId, config.getReplicationTimeoutMs());
         long currentSequence = currentSequenceSupplier == null ? 0L : currentSequenceSupplier.getAsLong();
-        boolean success = transportClient.sendSnapshot(
+        boolean success = transportClient.sendSnapshotStreaming(
             replica,
             regionId,
             snapshot,

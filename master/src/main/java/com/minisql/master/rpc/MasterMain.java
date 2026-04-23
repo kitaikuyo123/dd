@@ -341,6 +341,7 @@ public class MasterMain {
 
         grpcServer = ServerBuilder.forPort(port)
             .addService(serviceImpl)
+            .maxInboundMessageSize(32 * 1024 * 1024)
             .build()
             .start();
 

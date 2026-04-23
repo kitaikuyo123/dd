@@ -156,6 +156,7 @@ public class RegionServer {
 
         grpcServer = ServerBuilder.forPort(serverId.getPort())
             .addService(service)
+            .maxInboundMessageSize(64 * 1024 * 1024)
             .build()
             .start();
 

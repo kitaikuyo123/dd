@@ -26,6 +26,7 @@ class ReplicationConfigTest {
             assertEquals(10000, config.getWalRetentionCount());
             assertFalse(config.isSyncReplicationEnabled());
             assertTrue(config.isQuorumAckEnabled());
+            assertEquals(64, config.getMaxReplicationBatchSize());
         }
     }
 
@@ -67,6 +68,7 @@ class ReplicationConfigTest {
             assertSame(builder, builder.walRetentionCount(1));
             assertSame(builder, builder.syncReplicationEnabled(true));
             assertSame(builder, builder.quorumAckEnabled(true));
+            assertSame(builder, builder.maxReplicationBatchSize(32));
         }
     }
 
