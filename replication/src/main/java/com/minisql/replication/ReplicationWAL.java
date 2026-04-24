@@ -76,29 +76,7 @@ public class ReplicationWAL implements AutoCloseable {
         if (cached != null) {
             return cached.get();
         }
-
-        // Seek to last key with this region prefix
-        long maxSeq = 0;
-        try (RocksIterator it = db.newIterator()) {
-            byte[] prefix = regionPrefix(regionId);
-            byte[] upperBound = regionUpperBound(regionId);
-            it.seek(prefix);
-            while (it.isValid()) {
-                byte[] key = it.key();
-                if (upperBound != null && compareBytes(key, upperBound) >= 0) {
-                    break;
-                }
-                if (!startsWith(key, prefix)) {
-                    break;
-                }
-                long seqId = extractSequenceId(key, prefix.length);
-                if (seqId > maxSeq) {
-                    maxSeq = seqId;
-                }
-                it.next();
-            }
-        }
-
+        long maxSeq = scanMaxSequenceId(regionId);
         sequenceIdCache.put(regionId, new AtomicLong(maxSeq));
         return maxSeq;
     }
@@ -195,8 +173,9 @@ public class ReplicationWAL implements AutoCloseable {
         long currentMax = getCurrentSequenceId(regionId);
         long cutoffSeq = currentMax - maxRetention;
         // Don't delete entries that haven't been confirmed by all replicas
+        // (keep minConfirmedSeqId itself and everything after it)
         if (minConfirmedSeqId > 0) {
-            cutoffSeq = Math.min(cutoffSeq, minConfirmedSeqId);
+            cutoffSeq = Math.min(cutoffSeq, minConfirmedSeqId - 1);
         }
         if (cutoffSeq <= 0) {
             return;
@@ -434,9 +413,44 @@ public class ReplicationWAL implements AutoCloseable {
     // --- Helpers ---
 
     private synchronized long getNextSequenceId(String regionId) {
-        AtomicLong counter = sequenceIdCache.computeIfAbsent(regionId,
-            k -> new AtomicLong(getCurrentSequenceId(regionId)));
+        AtomicLong counter = sequenceIdCache.get(regionId);
+        if (counter == null) {
+            // Scan RocksDB for the current max sequenceId — do NOT call
+            // getCurrentSequenceId() here because it also writes to sequenceIdCache,
+            // which would cause a ConcurrentHashMap recursive update.
+            long maxSeq = scanMaxSequenceId(regionId);
+            counter = new AtomicLong(maxSeq);
+            sequenceIdCache.put(regionId, counter);
+        }
         return counter.incrementAndGet();
+    }
+
+    /**
+     * Scan RocksDB for the highest sequenceId in the given region.
+     * Does NOT touch sequenceIdCache — safe to call from getNextSequenceId.
+     */
+    private long scanMaxSequenceId(String regionId) {
+        long maxSeq = 0;
+        try (RocksIterator it = db.newIterator()) {
+            byte[] prefix = regionPrefix(regionId);
+            byte[] upperBound = regionUpperBound(regionId);
+            it.seek(prefix);
+            while (it.isValid()) {
+                byte[] key = it.key();
+                if (upperBound != null && compareBytes(key, upperBound) >= 0) {
+                    break;
+                }
+                if (!startsWith(key, prefix)) {
+                    break;
+                }
+                long seqId = extractSequenceId(key, prefix.length);
+                if (seqId > maxSeq) {
+                    maxSeq = seqId;
+                }
+                it.next();
+            }
+        }
+        return maxSeq;
     }
 
     private boolean startsWith(byte[] data, byte[] prefix) {
