@@ -1,5 +1,6 @@
 package com.minisql.client;
 
+import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Row;
 
 import java.sql.ResultSet;
@@ -226,24 +227,8 @@ public class ResultSetMerger {
     /**
      * 比较两个值
      */
-    @SuppressWarnings("unchecked")
     private static int compareValues(Object val1, Object val2) {
-        if (val1 == null && val2 == null) {
-            return 0;
-        }
-        if (val1 == null) {
-            return -1;
-        }
-        if (val2 == null) {
-            return 1;
-        }
-
-        if (val1 instanceof Comparable) {
-            return ((Comparable<Object>) val1).compareTo(val2);
-        }
-
-        //  fallback 到字符串比较
-        return val1.toString().compareTo(val2.toString());
+        return ValueComparator.compare(val1, val2);
     }
 
     /**

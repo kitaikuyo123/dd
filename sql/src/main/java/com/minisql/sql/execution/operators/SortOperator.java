@@ -1,5 +1,6 @@
 package com.minisql.sql.execution.operators;
 
+import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.Row;
 
@@ -48,20 +49,10 @@ public class SortOperator extends Operator {
         sortedRows.sort((r1, r2) -> {
             for (int i = 0; i < keyIndices.length; i++) {
                 int idx = keyIndices[i];
-                @SuppressWarnings("unchecked")
-                Comparable<Object> v1 = (Comparable<Object>) r1.getValue(idx);
+                Object v1 = r1.getValue(idx);
                 Object v2 = r2.getValue(idx);
 
-                int cmp;
-                if (v1 == null && v2 == null) {
-                    cmp = 0;
-                } else if (v1 == null) {
-                    cmp = -1;
-                } else if (v2 == null) {
-                    cmp = 1;
-                } else {
-                    cmp = v1.compareTo(v2);
-                }
+                int cmp = ValueComparator.compare(v1, v2);
 
                 if (!ascending[i]) {
                     cmp = -cmp;

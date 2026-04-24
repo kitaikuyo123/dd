@@ -85,7 +85,7 @@ class SortOperatorTest {
     }
 
     @Test
-    @DisplayName("null 值排在最前")
+    @DisplayName("null 值排在最后")
     void sortWithNulls() throws IOException {
         SortOperator op = new SortOperator(
             mockRows(
@@ -97,9 +97,9 @@ class SortOperatorTest {
         );
 
         op.open();
-        assertNull(op.nextRow().getValue("val"));
         assertEquals(1, op.nextRow().getValue("val"));
         assertEquals(3, op.nextRow().getValue("val"));
+        assertNull(op.nextRow().getValue("val"));
         op.close();
     }
 

@@ -198,6 +198,17 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
     public void close() {
         for (ManagedChannel channel : channels.values()) {
             channel.shutdown();
+            try {
+                if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
+                    channel.shutdownNow();
+                    if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
+                        logger.warn("gRPC channel did not terminate in time");
+                    }
+                }
+            } catch (InterruptedException e) {
+                channel.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
         channels.clear();
     }

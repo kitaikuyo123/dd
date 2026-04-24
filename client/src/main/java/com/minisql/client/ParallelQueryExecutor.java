@@ -1028,21 +1028,8 @@ public class ParallelQueryExecutor {
         return null;
     }
 
-    @SuppressWarnings("unchecked")
     private int compareValues(Object left, Object right) {
-        if (left == null && right == null) {
-            return 0;
-        }
-        if (left == null) {
-            return -1;
-        }
-        if (right == null) {
-            return 1;
-        }
-        if (left instanceof Comparable && left.getClass().isInstance(right)) {
-            return ((Comparable<Object>) left).compareTo(right);
-        }
-        return left.toString().compareTo(right.toString());
+        return com.minisql.common.utils.ValueComparator.compare(left, right);
     }
 
     private com.minisql.common.model.Row mergeLogicalRows(com.minisql.common.model.Row leftRow,
@@ -1273,21 +1260,8 @@ public class ParallelQueryExecutor {
             }
         }
 
-        @SuppressWarnings("unchecked")
         private static int compareStatic(Object left, Object right) {
-            if (left == null && right == null) {
-                return 0;
-            }
-            if (left == null) {
-                return -1;
-            }
-            if (right == null) {
-                return 1;
-            }
-            if (left instanceof Comparable && left.getClass().isInstance(right)) {
-                return ((Comparable<Object>) left).compareTo(right);
-            }
-            return left.toString().compareTo(right.toString());
+            return com.minisql.common.utils.ValueComparator.compare(left, right);
         }
     }
 }

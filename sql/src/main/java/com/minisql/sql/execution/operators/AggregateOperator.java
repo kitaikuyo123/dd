@@ -1,5 +1,6 @@
 package com.minisql.sql.execution.operators;
 
+import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.Row;
 import com.minisql.sql.execution.QueryPlan;
@@ -280,15 +281,13 @@ public class AggregateOperator extends Operator {
      * MAX 聚合
      */
     private static class MaxState extends AggregateState {
-        private Comparable<?> max;
+        private Object max;
 
         @Override
-        @SuppressWarnings({"rawtypes", "unchecked"})
         void accumulate(Object value) {
             if (value instanceof Comparable) {
-                Comparable comp = (Comparable) value;
-                if (max == null || comp.compareTo(max) > 0) {
-                    max = comp;
+                if (max == null || ValueComparator.compare(value, max) > 0) {
+                    max = value;
                 }
             }
         }
@@ -303,15 +302,13 @@ public class AggregateOperator extends Operator {
      * MIN 聚合
      */
     private static class MinState extends AggregateState {
-        private Comparable<?> min;
+        private Object min;
 
         @Override
-        @SuppressWarnings({"rawtypes", "unchecked"})
         void accumulate(Object value) {
             if (value instanceof Comparable) {
-                Comparable comp = (Comparable) value;
-                if (min == null || comp.compareTo(min) < 0) {
-                    min = comp;
+                if (min == null || ValueComparator.compare(value, min) < 0) {
+                    min = value;
                 }
             }
         }
