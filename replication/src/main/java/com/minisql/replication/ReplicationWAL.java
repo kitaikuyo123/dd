@@ -412,16 +412,11 @@ public class ReplicationWAL implements AutoCloseable {
 
     // --- Helpers ---
 
-    private synchronized long getNextSequenceId(String regionId) {
-        AtomicLong counter = sequenceIdCache.get(regionId);
-        if (counter == null) {
-            // Scan RocksDB for the current max sequenceId — do NOT call
-            // getCurrentSequenceId() here because it also writes to sequenceIdCache,
-            // which would cause a ConcurrentHashMap recursive update.
-            long maxSeq = scanMaxSequenceId(regionId);
-            counter = new AtomicLong(maxSeq);
-            sequenceIdCache.put(regionId, counter);
-        }
+    private long getNextSequenceId(String regionId) {
+        AtomicLong counter = sequenceIdCache.computeIfAbsent(regionId, k -> {
+            long maxSeq = scanMaxSequenceId(k);
+            return new AtomicLong(maxSeq);
+        });
         return counter.incrementAndGet();
     }
 
