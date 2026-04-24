@@ -6,8 +6,6 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
-import com.minisql.common.proto.RegionServerProto;
-import com.minisql.common.proto.RegionServerServiceGrpc;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
@@ -21,18 +19,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 请求路由器
- * 负责根据rowKey路由到正确的RegionServer
- * 负责模块: 开发者C
+ * 请求路由器，负责根据 rowKey 路由到正确的 RegionServer。
+ *
+ * <p>所有读写请求均路由到 Primary。副本仅用于故障转移，不参与读请求分发。
  */
 public class Router {
 
     private static final Logger logger = LoggerFactory.getLogger(Router.class);
-
-    private static final long DEFAULT_LAG_CACHE_TTL_MS = 2000L;
-    private static final long DEFAULT_CIRCUIT_BREAKER_MS = 5000L;
-    private static final long DEFAULT_WRITE_PRIMARY_PIN_MS = 5000L;
-    private static final long DEFAULT_FRESH_REPLICA_MAX_LAG = 10L;
 
     // 本地路由缓存: tableName -> List<RegionRouteInfo>
     private final Map<String, List<RegionRouteInfo>> routeCache = new ConcurrentHashMap<>();
@@ -42,15 +35,6 @@ public class Router {
 
     // ZooKeeper 客户端（用于获取最新路由信息）
     private volatile ZkClient zkClient;
-    private volatile ReadConsistency defaultReadConsistency = ReadConsistency.SECONDARY_IF_FRESH;
-    private volatile long freshReplicaMaxLag = DEFAULT_FRESH_REPLICA_MAX_LAG;
-    private volatile long lagCacheTtlMs = DEFAULT_LAG_CACHE_TTL_MS;
-    private volatile long circuitBreakerWindowMs = DEFAULT_CIRCUIT_BREAKER_MS;
-    private volatile long writePrimaryPinMs = DEFAULT_WRITE_PRIMARY_PIN_MS;
-
-    private final Map<String, LagSnapshot> lagCache = new ConcurrentHashMap<>();
-    private final Map<String, Long> circuitBreakerUntil = new ConcurrentHashMap<>();
-    private final Map<String, Long> recentWrites = new ConcurrentHashMap<>();
     private final Set<String> watchedTables = ConcurrentHashMap.newKeySet();
     private final Set<String> watchedRegionPaths = ConcurrentHashMap.newKeySet();
 
@@ -67,148 +51,29 @@ public class Router {
         this.watchedRegionPaths.clear();
     }
 
-    public void setDefaultReadConsistency(ReadConsistency defaultReadConsistency) {
-        this.defaultReadConsistency = defaultReadConsistency == null
-            ? ReadConsistency.SECONDARY_IF_FRESH
-            : defaultReadConsistency;
-    }
-
-    public void setFreshReplicaMaxLag(long freshReplicaMaxLag) {
-        this.freshReplicaMaxLag = Math.max(0L, freshReplicaMaxLag);
-    }
-
-    public void setLagCacheTtlMs(long lagCacheTtlMs) {
-        this.lagCacheTtlMs = Math.max(0L, lagCacheTtlMs);
-    }
-
-    public void setCircuitBreakerWindowMs(long circuitBreakerWindowMs) {
-        this.circuitBreakerWindowMs = Math.max(0L, circuitBreakerWindowMs);
-    }
-
-    public void setWritePrimaryPinMs(long writePrimaryPinMs) {
-        this.writePrimaryPinMs = Math.max(0L, writePrimaryPinMs);
-    }
-
-    public void recordWrite(String tableName, byte[] rowKey) {
-        if (tableName == null || rowKey == null) {
-            return;
-        }
-        recentWrites.put(buildRecentWriteKey(tableName, rowKey), System.currentTimeMillis() + writePrimaryPinMs);
-    }
-
     /**
-     * 根据表名和rowKey定位RegionServer（改进版）
-     * 支持基于负载的选择（当多个副本存在时）
+     * 根据表名和 rowKey 定位 RegionServer 的 Primary。
      */
     public ServerAddress route(String tableName, byte[] rowKey) {
         // 1. 从缓存获取该表的所有 Region
         List<RegionRouteInfo> regions = routeCache.get(tableName);
         if (regions == null || regions.isEmpty()) {
-            // 如果没有缓存，刷新路由信息
             refreshRouteCache(tableName);
             regions = routeCache.get(tableName);
         }
 
         if (regions == null || regions.isEmpty()) {
-            // 仍然没有，返回 Master 地址
             return getMaster();
         }
 
         // 2. 根据 rowKey 找到对应的 Region
         RegionRouteInfo targetRegion = findRegionByKey(regions, rowKey);
         if (targetRegion != null) {
-            // 如果有多个副本，选择负载最低的
-            return selectBestServer(targetRegion);
+            return targetRegion.getPrimaryServer();
         }
 
         // 3. 没找到，返回 Master
         return getMaster();
-    }
-
-    /**
-     * 选择最佳的服务器（考虑负载）
-     */
-    private ServerAddress selectBestServer(RegionRouteInfo region) {
-        // 目前只返回主副本，后续可以扩展为从多个副本中选择
-        // 可以从 ZooKeeper 获取副本列表和负载信息
-        return region.getPrimaryServer();
-    }
-
-    /**
-     * 获取表的任意一个RegionServer（改进版）
-     * 基于负载选择而非随机
-     */
-    public ServerAddress routeForRead(String tableName, byte[] rowKey) {
-        return routeForRead(tableName, rowKey, defaultReadConsistency);
-    }
-
-    public ServerAddress routeForRead(String tableName, byte[] rowKey, ReadConsistency consistency) {
-        List<RegionRouteInfo> regions = routeCache.get(tableName);
-        if (regions == null || regions.isEmpty()) {
-            refreshRouteCache(tableName);
-            regions = routeCache.get(tableName);
-        }
-
-        if (regions == null || regions.isEmpty()) {
-            return getMaster();
-        }
-
-        RegionRouteInfo targetRegion = findRegionByKey(regions, rowKey);
-        if (targetRegion != null) {
-            return selectBestReadServer(targetRegion, tableName, rowKey, consistency);
-        }
-
-        return getMaster();
-    }
-
-    private ServerAddress selectBestReadServer(RegionRouteInfo region,
-                                               String tableName,
-                                               byte[] rowKey,
-                                               ReadConsistency consistency) {
-        if (consistency == null) {
-            consistency = defaultReadConsistency;
-        }
-        if (shouldPinToPrimary(tableName, rowKey) || consistency == ReadConsistency.PRIMARY_ONLY) {
-            return region.getPrimaryServer();
-        }
-
-        List<ServerAddress> candidates = region.getReadableServers();
-        if (candidates.isEmpty()) {
-            return region.getPrimaryServer();
-        }
-
-        ServerAddress bestServer = consistency == ReadConsistency.PREFER_SECONDARY
-            ? null
-            : region.getPrimaryServer();
-        long lowestLag = Long.MAX_VALUE;
-        boolean allowStaleReplica = consistency == ReadConsistency.PREFER_SECONDARY
-            || consistency == ReadConsistency.ANY_REPLICA;
-
-        for (ServerAddress candidate : candidates) {
-            if (candidate.equals(region.getPrimaryServer()) && consistency == ReadConsistency.PREFER_SECONDARY) {
-                continue;
-            }
-            if (isCircuitOpen(region.getRegionId(), candidate)) {
-                continue;
-            }
-
-            long lag = fetchReplicationLag(region.getRegionId(), candidate);
-            if (!allowStaleReplica && !candidate.equals(region.getPrimaryServer()) && lag > freshReplicaMaxLag) {
-                continue;
-            }
-            if (lag < lowestLag) {
-                lowestLag = lag;
-                bestServer = candidate;
-            }
-        }
-
-        if (bestServer != null) {
-            return bestServer;
-        }
-        if (consistency == ReadConsistency.PREFER_SECONDARY) {
-            return region.getPrimaryServer();
-        }
-        return region.getPrimaryServer();
     }
 
     /**
@@ -233,16 +98,13 @@ public class Router {
         }
 
         try {
-            // 从 ZooKeeper 获取该表的所有 Region 信息
             String tablePath = "/minisql/tables/" + tableName;
 
-            // 检查表是否存在
             if (!zkClient.exists(tablePath)) {
                 logger.warn("Table not found in ZooKeeper: {}", tableName);
                 return;
             }
 
-            // 获取所有 Region
             String regionsPath = tablePath + "/regions";
             if (!zkClient.exists(regionsPath)) {
                 logger.warn("No regions found for table: {}", tableName);
@@ -256,18 +118,15 @@ public class Router {
 
             for (String regionId : regionIds) {
                 try {
-                    // 获取 Region 元数据
                     String regionPath = regionsPath + "/" + regionId;
                     byte[] regionData = zkClient.getData(regionPath);
 
                     Region region = parseRegionData(regionId, tableName, regionData);
 
                     if (region != null) {
-                        // 获取 Region 的主副本服务器
                         String primaryPath = regionPath + "/primary";
                         String replicasPath = regionPath + "/replicas";
                         ServerAddress primaryServer = null;
-                        List<ServerAddress> replicas = Collections.emptyList();
 
                         ensureRegionWatch(tableName, regionPath, primaryPath, replicasPath);
 
@@ -276,13 +135,8 @@ public class Router {
                             primaryServer = parseServerAddress(new String(primaryData, java.nio.charset.StandardCharsets.UTF_8));
                         }
 
-                        if (zkClient.exists(replicasPath)) {
-                            byte[] replicasData = zkClient.getData(replicasPath);
-                            replicas = parseReplicaAddresses(new String(replicasData, java.nio.charset.StandardCharsets.UTF_8));
-                        }
-
                         if (primaryServer != null) {
-                            regions.add(new RegionRouteInfo(region, primaryServer, replicas));
+                            regions.add(new RegionRouteInfo(region, primaryServer));
                         }
                     }
                 } catch (Exception e) {
@@ -290,7 +144,6 @@ public class Router {
                 }
             }
 
-            // 更新缓存
             if (!regions.isEmpty()) {
                 routeCache.put(tableName, regions);
                 return;
@@ -308,11 +161,6 @@ public class Router {
         }
     }
 
-    /**
-     * 解析 Region 数据
-     * 格式：regionId|tableName|startKeyBase64|endKeyBase64
-     * 注意：split 需要 limit=-1 来保留尾部的空字符串
-     */
     private boolean refreshRouteCacheFromMaster(String tableName) {
         ServerAddress master = getMaster();
         if (master == null) {
@@ -346,20 +194,12 @@ public class Router {
                 region.setStartKey(regionInfo.getStartKey().toByteArray());
                 region.setEndKey(regionInfo.getEndKey().toByteArray());
 
-                List<ServerAddress> replicas = new ArrayList<>();
-                for (CommonProto.ServerId replica : regionInfo.getReplicasList()) {
-                    replicas.add(new ServerAddress(replica.getHost(), replica.getPort()));
-                }
-
                 ServerAddress primary = regionInfo.hasPrimary()
                     ? new ServerAddress(regionInfo.getPrimary().getHost(), regionInfo.getPrimary().getPort())
                     : null;
-                if (primary == null && !replicas.isEmpty()) {
-                    primary = replicas.get(0);
-                }
 
                 if (primary != null) {
-                    regions.add(new RegionRouteInfo(region, primary, replicas));
+                    regions.add(new RegionRouteInfo(region, primary));
                 }
             }
 
@@ -378,97 +218,16 @@ public class Router {
         return false;
     }
 
-    private long fetchReplicationLag(String regionId, ServerAddress candidate) {
-        String cacheKey = buildLagCacheKey(regionId, candidate);
-        long now = System.currentTimeMillis();
-        LagSnapshot cached = lagCache.get(cacheKey);
-        if (cached != null && cached.expiresAt >= now) {
-            return cached.lagInEntries;
-        }
-
-        ManagedChannel channel = null;
-        try {
-            channel = ManagedChannelBuilder.forAddress(candidate.getHost(), candidate.getPort())
-                .usePlaintext()
-                .build();
-
-            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
-                RegionServerServiceGrpc.newBlockingStub(channel)
-                    .withDeadlineAfter(2, TimeUnit.SECONDS);
-
-            RegionServerProto.GetReplicationLagResponse response = stub.getReplicationLag(
-                RegionServerProto.GetReplicationLagRequest.newBuilder()
-                    .setRegionId(regionId)
-                    .build()
-            );
-
-            if (response.getStatus().getSuccess()) {
-                lagCache.put(cacheKey, new LagSnapshot(response.getLagInEntries(), now + lagCacheTtlMs));
-                circuitBreakerUntil.remove(cacheKey);
-                return response.getLagInEntries();
-            }
-        } catch (Exception e) {
-            circuitBreakerUntil.put(cacheKey, now + circuitBreakerWindowMs);
-            logger.warn("Failed to fetch replication lag from {} for region {}: {}",
-                candidate, regionId, e.getMessage());
-        } finally {
-            if (channel != null) {
-                channel.shutdown();
-            }
-        }
-
-        return Long.MAX_VALUE;
-    }
-
-    private boolean isCircuitOpen(String regionId, ServerAddress candidate) {
-        Long until = circuitBreakerUntil.get(buildLagCacheKey(regionId, candidate));
-        if (until == null) {
-            return false;
-        }
-        if (until < System.currentTimeMillis()) {
-            circuitBreakerUntil.remove(buildLagCacheKey(regionId, candidate));
-            return false;
-        }
-        return true;
-    }
-
-    private boolean shouldPinToPrimary(String tableName, byte[] rowKey) {
-        if (tableName == null || rowKey == null || writePrimaryPinMs <= 0) {
-            return false;
-        }
-        String key = buildRecentWriteKey(tableName, rowKey);
-        Long until = recentWrites.get(key);
-        if (until == null) {
-            return false;
-        }
-        if (until < System.currentTimeMillis()) {
-            recentWrites.remove(key);
-            return false;
-        }
-        return true;
-    }
-
-    private String buildRecentWriteKey(String tableName, byte[] rowKey) {
-        return tableName + "|" + Base64.getEncoder().encodeToString(rowKey);
-    }
-
-    private String buildLagCacheKey(String regionId, ServerAddress candidate) {
-        return regionId + "|" + candidate;
-    }
-
     private Region parseRegionData(String regionId, String tableName, byte[] data) {
         try {
             String dataStr = new String(data, "UTF-8");
-            // 使用 limit=-1 保留尾部的空字符串
             String[] parts = dataStr.split("\\|", -1);
 
             Region region = new Region();
 
-            // 新格式：regionId|tableName|startKeyBase64|endKeyBase64
             if (parts.length >= 4) {
                 region.setRegionId(parts[0]);
                 region.setTableName(parts[1]);
-                // 空字符串表示空字节数组
                 if (!parts[2].isEmpty()) {
                     region.setStartKey(Base64.getDecoder().decode(parts[2]));
                 } else {
@@ -480,7 +239,6 @@ public class Router {
                     region.setEndKey(new byte[0]);
                 }
             } else {
-                // 数据格式异常，记录日志并返回 null
                 logger.warn("Invalid region data format for {}/{}: expected 4 parts, got {}, data: {}",
                     tableName, regionId, parts.length, dataStr);
                 return null;
@@ -494,7 +252,7 @@ public class Router {
     }
 
     /**
-     * 获取Master地址
+     * 获取 Master 地址
      */
     public ServerAddress getMaster() {
         if (masterAddress != null) {
@@ -503,7 +261,6 @@ public class Router {
 
         if (isZkUsable()) {
             try {
-                // 从 ZooKeeper 获取当前 Master
                 String masterPath = Constants.ZK_MASTER_LEADER_PATH;
                 if (zkClient.exists(masterPath)) {
                     byte[] masterData = zkClient.getData(masterPath);
@@ -519,13 +276,9 @@ public class Router {
             }
         }
 
-        // 默认地址
         return new ServerAddress("localhost", 16000);
     }
 
-    /**
-     * 解析服务器地址
-     */
     private ServerAddress parseServerAddress(String address) {
         if (address == null || address.isEmpty()) {
             return null;
@@ -537,16 +290,10 @@ public class Router {
         return new ServerAddress(host, port);
     }
 
-    /**
-     * 设置 Master 地址
-     */
     public void setMasterAddress(ServerAddress masterAddress) {
         this.masterAddress = masterAddress;
     }
 
-    /**
-     * 添加路由信息（用于测试或本地缓存）
-     */
     public void addRoute(String tableName, Region region, ServerId primaryServer) {
         RegionRouteInfo newRoute = new RegionRouteInfo(region, primaryServer);
         routeCache.compute(tableName, (key, existing) -> {
@@ -559,21 +306,17 @@ public class Router {
         });
     }
 
-    /**
-     * 获取路由缓存（包可见）
-     */
     List<RegionRouteInfo> getRouteCache(String tableName) {
         return routeCache.get(tableName);
     }
 
-    /**
-     * 清除路由缓存
-     */
     public void clearCache() {
         routeCache.clear();
         watchedTables.clear();
         watchedRegionPaths.clear();
     }
+
+    // --- ZK watchers ---
 
     private void ensureTableWatcher(String tableName, String regionsPath) {
         if (watchedTables.add(tableName)) {
@@ -667,44 +410,26 @@ public class Router {
             && e.getMessage().contains("Expected state [STARTED] was [STOPPED]");
     }
 
-    private List<ServerAddress> parseReplicaAddresses(String encodedReplicas) {
-        if (encodedReplicas == null || encodedReplicas.isBlank()) {
-            return Collections.emptyList();
-        }
-        List<ServerAddress> replicas = new ArrayList<>();
-        for (String address : encodedReplicas.split(",")) {
-            ServerAddress replica = parseServerAddress(address.trim());
-            if (replica != null) {
-                replicas.add(replica);
-            }
-        }
-        return replicas;
-    }
+    // --- Inner types ---
 
     /**
-     * 路由信息（包可见）
+     * 路由信息
      */
     static class RegionRouteInfo {
         private final String regionId;
         private final byte[] startKey;
         private final byte[] endKey;
         private final ServerAddress primaryServer;
-        private final List<ServerAddress> replicaServers;
 
         public RegionRouteInfo(Region region, ServerAddress primaryServer) {
-            this(region, primaryServer, Collections.emptyList());
-        }
-
-        public RegionRouteInfo(Region region, ServerAddress primaryServer, List<ServerAddress> replicaServers) {
             this.regionId = region.getRegionId();
             this.startKey = region.getStartKey();
             this.endKey = region.getEndKey();
             this.primaryServer = primaryServer;
-            this.replicaServers = normalizeReplicas(primaryServer, replicaServers);
         }
 
         public RegionRouteInfo(Region region, ServerId primaryServer) {
-            this(region, new ServerAddress(primaryServer.getHost(), primaryServer.getPort()), toReplicaAddresses(region));
+            this(region, new ServerAddress(primaryServer.getHost(), primaryServer.getPort()));
         }
 
         public String getRegionId() {
@@ -722,61 +447,11 @@ public class Router {
         public ServerAddress getPrimaryServer() {
             return primaryServer;
         }
-
-        public List<ServerAddress> getReplicaServers() {
-            return replicaServers;
-        }
-
-        public List<ServerAddress> getReadableServers() {
-            return replicaServers.isEmpty()
-                ? Collections.singletonList(primaryServer)
-                : replicaServers;
-        }
-
-        private static List<ServerAddress> toReplicaAddresses(Region region) {
-            if (region.getReplicas() == null || region.getReplicas().isEmpty()) {
-                return Collections.emptyList();
-            }
-
-            List<ServerAddress> replicas = new ArrayList<>();
-            for (ServerId replica : region.getReplicas()) {
-                replicas.add(new ServerAddress(replica.getHost(), replica.getPort()));
-            }
-            return replicas;
-        }
-
-        private static List<ServerAddress> normalizeReplicas(ServerAddress primaryServer, List<ServerAddress> replicaServers) {
-            LinkedHashSet<ServerAddress> normalized = new LinkedHashSet<>();
-            if (replicaServers != null) {
-                normalized.addAll(replicaServers);
-            }
-            if (primaryServer != null) {
-                normalized.add(primaryServer);
-            }
-            return new ArrayList<>(normalized);
-        }
     }
 
     /**
      * 服务器地址
      */
-    public enum ReadConsistency {
-        PRIMARY_ONLY,
-        PREFER_SECONDARY,
-        SECONDARY_IF_FRESH,
-        ANY_REPLICA
-    }
-
-    private static final class LagSnapshot {
-        private final long lagInEntries;
-        private final long expiresAt;
-
-        private LagSnapshot(long lagInEntries, long expiresAt) {
-            this.lagInEntries = lagInEntries;
-            this.expiresAt = expiresAt;
-        }
-    }
-
     public static class ServerAddress {
         private final String host;
         private final int port;

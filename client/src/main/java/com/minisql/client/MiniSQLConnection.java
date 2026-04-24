@@ -430,7 +430,6 @@ public class MiniSQLConnection implements Connection {
             throw new SQLException("Delete failed: " + response.getStatus().getMessage());
         }
 
-        router.recordWrite(tableName, rowKey);
         clearTableSchemaCache(tableName);
         return 1;
     }
@@ -622,7 +621,6 @@ public class MiniSQLConnection implements Connection {
                     .build());
 
             if (response.getStatus().getSuccess()) {
-                router.recordWrite(tableName, rowKey);
                 return;
             }
 

@@ -146,6 +146,9 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     public void get(RegionServerProto.GetRequest request, StreamObserver<RegionServerProto.GetResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
+            if (!regionServer.getRegionManager().isPrimary(regionId)) {
+                throw new IOException("Region is not primary on this server: " + regionId);
+            }
             byte[] rowKey = request.getRowKey().toByteArray();
             RegionStorage storage = regionServer.getRegionManager().getRegionStorage(regionId);
             if (storage == null) {
@@ -180,6 +183,9 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     public void scan(RegionServerProto.ScanRequest request, StreamObserver<RegionServerProto.ScanResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
+            if (!regionServer.getRegionManager().isPrimary(regionId)) {
+                throw new IOException("Region is not primary on this server: " + regionId);
+            }
             // proto3 中 bytes 字段没有 hasXxx() 方法，需要通过 isEmpty() 判断
             byte[] startKey = !request.getStartKey().isEmpty() ? request.getStartKey().toByteArray() : null;
             byte[] endKey = !request.getEndKey().isEmpty() ? request.getEndKey().toByteArray() : null;

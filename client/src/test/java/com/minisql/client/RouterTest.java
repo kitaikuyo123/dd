@@ -39,38 +39,6 @@ class RouterTest {
     }
 
     @Test
-    @DisplayName("route returns the primary even when read preference prefers secondaries")
-    void testWriteRouteAlwaysUsesPrimary() {
-        Router router = new Router();
-        router.setDefaultReadConsistency(Router.ReadConsistency.PREFER_SECONDARY);
-
-        Region region = buildRegion("region-1", "users", "a", "z");
-        region.addReplica(new ServerId("secondary", 16021));
-        ServerId primary = new ServerId("primary", 16020);
-        router.addRoute("users", region, primary);
-
-        Router.ServerAddress target = router.route("users", "m".getBytes());
-
-        assertEquals("primary", target.getHost());
-        assertEquals(16020, target.getPort());
-    }
-
-    @Test
-    @DisplayName("routeForRead can use primary only consistency")
-    void testRouteForReadPrimaryOnly() {
-        Router router = new Router();
-        Region region = buildRegion("region-1", "users", "a", "z");
-        region.addReplica(new ServerId("secondary", 16021));
-        ServerId primary = new ServerId("primary", 16020);
-        router.addRoute("users", region, primary);
-
-        Router.ServerAddress target = router.routeForRead("users", "m".getBytes(), Router.ReadConsistency.PRIMARY_ONLY);
-
-        assertEquals("primary", target.getHost());
-        assertEquals(16020, target.getPort());
-    }
-
-    @Test
     @DisplayName("clearCache removes cached routes")
     void testClearCache() {
         Router router = new Router();
