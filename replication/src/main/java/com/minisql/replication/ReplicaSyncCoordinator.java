@@ -83,13 +83,12 @@ public class ReplicaSyncCoordinator {
             registry.updateReplicaRole(regionId, replica, ReplicaRole.CANDIDATE);
         }
 
-        List<com.minisql.common.model.KeyValue> snapshot =
-            transportClient.fetchSnapshot(primary, regionId, config.getReplicationTimeoutMs());
         long currentSequence = currentSequenceSupplier == null ? 0L : currentSequenceSupplier.getAsLong();
-        boolean success = transportClient.sendSnapshotStreaming(
+        // Use direct streaming to avoid materializing the full snapshot in memory
+        boolean success = transportClient.streamSnapshotDirect(
+            primary,
             replica,
             regionId,
-            snapshot,
             1000,
             Math.max(config.getReplicationTimeoutMs(), config.getAckTimeoutMs() * 2),
             currentSequence

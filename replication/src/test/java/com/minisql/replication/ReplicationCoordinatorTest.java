@@ -272,6 +272,11 @@ class ReplicationCoordinatorTest {
         }
 
         @Override
+        public boolean streamSnapshotDirect(ServerId primary, ServerId replica, String regionId, int batchSize, long timeoutMs, long finalSequenceId) {
+            return true;
+        }
+
+        @Override
         public boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId) {
             return true;
         }

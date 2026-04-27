@@ -3,10 +3,10 @@ package com.minisql.master.recover;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.*;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,14 +27,21 @@ public class DataRepairCoordinator {
     // 正在进行的修复任务
     private final Map<String, RepairTask> activeRepairs = new ConcurrentHashMap<>();
 
-    // 修复历史
+    // 修复历史（上限 MAX_HISTORY，超出时淘汰最早记录，防止无限增长）
+    private static final int MAX_REPAIR_HISTORY = 1000;
     private final List<RepairRecord> repairHistory = new CopyOnWriteArrayList<>();
 
     public DataRepairCoordinator(ClusterManager clusterManager, MetadataManager metadataManager) {
+        this(clusterManager, metadataManager, 4);
+    }
+
+    public DataRepairCoordinator(ClusterManager clusterManager, MetadataManager metadataManager,
+                                  int threadPoolSize) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
 
-        this.repairExecutor = Executors.newFixedThreadPool(4, r -> {
+        int poolSize = Math.max(1, threadPoolSize);
+        this.repairExecutor = Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r, "DataRepair-Worker");
             t.setDaemon(true);
             return t;
@@ -142,6 +149,10 @@ public class DataRepairCoordinator {
                 task.getStatus()
             );
             repairHistory.add(record);
+            // Evict oldest entries if over the history cap
+            while (repairHistory.size() > MAX_REPAIR_HISTORY) {
+                repairHistory.remove(0);
+            }
 
         } catch (Exception e) {
             logger.error("Error repairing region {}: {}", regionId, e.getMessage());
@@ -203,10 +214,7 @@ public class DataRepairCoordinator {
 
         // 通知新主副本
         try {
-            ManagedChannel channel = ManagedChannelBuilder
-                .forAddress(newPrimary.getHost(), newPrimary.getPort())
-                .usePlaintext()
-                .build();
+            ManagedChannel channel = GrpcChannelFactory.newChannel(newPrimary.getHost(), newPrimary.getPort());
 
             try {
                 RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
@@ -238,10 +246,7 @@ public class DataRepairCoordinator {
      */
     private boolean triggerFullSync(String regionId, ServerId sourceServer, ServerId targetServer) {
         try {
-            ManagedChannel channel = ManagedChannelBuilder
-                .forAddress(sourceServer.getHost(), sourceServer.getPort())
-                .usePlaintext()
-                .build();
+            ManagedChannel channel = GrpcChannelFactory.newChannel(sourceServer.getHost(), sourceServer.getPort());
 
             try {
                 RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
@@ -278,18 +283,44 @@ public class DataRepairCoordinator {
     }
 
     /**
-     * 等待同步完成
+     * 等待同步完成（轮询目标服务器的复制进度，直到跟上源服务器或超时）
      */
     private boolean waitForSyncCompletion(String regionId, ServerId targetServer) {
-        // 简化实现：等待固定时间
-        // 实际应该轮询同步进度
-        try {
-            Thread.sleep(10000); // 等待 10 秒
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+        long deadline = System.currentTimeMillis() + 120_000L; // 2-minute timeout
+        long pollIntervalMs = 1000L;
+
+        // Get the source server's current sequence ID as the catch-up target
+        ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+        long targetSeqId = primary != null
+            ? clusterManager.getReplicaSequenceId(regionId, primary)
+            : Long.MAX_VALUE;
+
+        while (System.currentTimeMillis() < deadline) {
+            long appliedSeqId = clusterManager.getReplicaSequenceId(regionId, targetServer);
+            if (appliedSeqId >= targetSeqId) {
+                logger.info("Sync completed for region {} on {}: appliedSeq={}, targetSeq={}",
+                    regionId, targetServer, appliedSeqId, targetSeqId);
+                return true;
+            }
+
+            try {
+                Thread.sleep(pollIntervalMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+
+            // Re-fetch target in case the source advanced during sync
+            ServerId currentPrimary = clusterManager.getPrimaryServerForRegion(regionId);
+            if (currentPrimary != null && !currentPrimary.equals(primary)) {
+                // Primary changed during sync — re-target
+                primary = currentPrimary;
+                targetSeqId = clusterManager.getReplicaSequenceId(regionId, primary);
+            }
         }
+
+        logger.warn("Sync timed out for region {} on {} after 120s", regionId, targetServer);
+        return false;
     }
 
     /**

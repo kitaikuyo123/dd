@@ -1,16 +1,19 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 echo ==========================================
 echo   MiniSQL Cluster Stop Script
 echo ==========================================
 echo.
 
-echo Stopping MiniSQL service ports...
-call :stop_port 16000 Master
-call :stop_port 16020 RegionServer-1
-call :stop_port 16021 RegionServer-2
-call :stop_port 16022 RegionServer-3
+echo Shutting down RegionServers first, then Master...
+echo Graceful: WM_CLOSE triggers JVM shutdown hook, 3s wait, then force-kill if needed.
+echo.
+
+call :stop_port_graceful 16022 RegionServer-3
+call :stop_port_graceful 16021 RegionServer-2
+call :stop_port_graceful 16020 RegionServer-1
+call :stop_port_graceful 16000 Master
 
 echo.
 echo Stopping CLI helper windows...
@@ -23,14 +26,9 @@ echo.
 pause
 exit /b 0
 
-:stop_port
+:stop_port_graceful
 set "PORT=%~1"
 set "NAME=%~2"
-
-echo Checking %NAME% on port %PORT%...
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$c = Get-NetTCPConnection -State Listen -LocalPort %PORT% -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; if ($c) { $c | ForEach-Object { $_ } }"`) do (
-    echo   Stopping PID %%P for %NAME%...
-    taskkill /F /PID %%P >nul 2>nul
-)
-
+set "SCRIPT_DIR=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%stop-port.ps1" -Port %PORT% -Name "%NAME%"
 exit /b 0

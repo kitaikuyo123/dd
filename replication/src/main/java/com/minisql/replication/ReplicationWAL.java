@@ -6,6 +6,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -51,12 +53,19 @@ public class ReplicationWAL implements AutoCloseable {
                 dir.mkdirs();
             }
 
-            // Clean up stale LOCK file
+            // Check for stale LOCK file.
+            // Try to open exclusively: if another process holds it, this fails.
+            // If it succeeds, the previous process is dead and we can safely remove it.
             File lockFile = new File(dir, "LOCK");
             if (lockFile.exists()) {
-                logger.warn("Found stale WAL LOCK file at {}, deleting...", dbPath);
-                if (!lockFile.delete()) {
-                    logger.warn("Failed to delete stale WAL LOCK file");
+                try (FileOutputStream fos = new FileOutputStream(lockFile)) {
+                    fos.close();
+                    lockFile.delete();
+                    logger.debug("Removed stale WAL LOCK file at {}", dbPath);
+                } catch (IOException e) {
+                    throw new IllegalStateException(
+                        "WAL LOCK file at " + dbPath + " is held by another process. " +
+                        "The WAL may already be in use.", e);
                 }
             }
 
@@ -170,6 +179,7 @@ public class ReplicationWAL implements AutoCloseable {
     }
 
     private void doCleanup(String regionId, int maxRetention, long minConfirmedSeqId) {
+        if (db == null) return;
         long currentMax = getCurrentSequenceId(regionId);
         long cutoffSeq = currentMax - maxRetention;
         // Don't delete entries that haven't been confirmed by all replicas
@@ -187,9 +197,10 @@ public class ReplicationWAL implements AutoCloseable {
         try {
             // Delete entries from the beginning of the region up to cutoffSeq
             byte[] upperBound = buildKey(regionId, cutoffSeq + 1);
-            try (RocksIterator it = db.newIterator()) {
+            try (RocksIterator it = db.newIterator();
+                 WriteBatch batch = new WriteBatch()) {
                 it.seek(startKey);
-                List<byte[]> toDelete = new ArrayList<>();
+                int deleteCount = 0;
                 while (it.isValid()) {
                     byte[] key = it.key();
                     if (compareBytes(key, upperBound) >= 0) {
@@ -198,11 +209,12 @@ public class ReplicationWAL implements AutoCloseable {
                     if (!startsWith(key, regionPrefix(regionId))) {
                         break;
                     }
-                    toDelete.add(key);
+                    batch.delete(key);
+                    deleteCount++;
                     it.next();
                 }
-                for (byte[] key : toDelete) {
-                    db.delete(key);
+                if (deleteCount > 0) {
+                    db.write(new WriteOptions(), batch);
                 }
             }
         } catch (RocksDBException e) {
@@ -211,48 +223,51 @@ public class ReplicationWAL implements AutoCloseable {
     }
 
     public void deleteRegion(String regionId) {
+        if (db == null) {
+            sequenceIdCache.remove(regionId);
+            return;
+        }
         byte[] prefix = regionPrefix(regionId);
         byte[] upperBound = regionUpperBound(regionId);
 
-        try (RocksIterator it = db.newIterator()) {
-            it.seek(prefix);
-            List<byte[]> toDelete = new ArrayList<>();
-            while (it.isValid()) {
-                byte[] key = it.key();
-                if (upperBound != null && compareBytes(key, upperBound) >= 0) {
-                    break;
+        try (WriteBatch batch = new WriteBatch()) {
+            int wcount = 0, pcount = 0;
+            try (RocksIterator it = db.newIterator()) {
+                it.seek(prefix);
+                while (it.isValid()) {
+                    byte[] key = it.key();
+                    if (upperBound != null && compareBytes(key, upperBound) >= 0) {
+                        break;
+                    }
+                    if (!startsWith(key, prefix)) {
+                        break;
+                    }
+                    batch.delete(key);
+                    wcount++;
+                    it.next();
                 }
-                if (!startsWith(key, prefix)) {
-                    break;
-                }
-                toDelete.add(key);
-                it.next();
             }
-            for (byte[] key : toDelete) {
-                db.delete(key);
+
+            // Also delete progress keys for this region
+            byte[] progressPrefix = progressRegionPrefix(regionId);
+            try (RocksIterator it = db.newIterator()) {
+                it.seek(progressPrefix);
+                while (it.isValid()) {
+                    byte[] key = it.key();
+                    if (!startsWith(key, progressPrefix)) {
+                        break;
+                    }
+                    batch.delete(key);
+                    pcount++;
+                    it.next();
+                }
+            }
+
+            if (wcount > 0 || pcount > 0) {
+                db.write(new WriteOptions(), batch);
             }
         } catch (RocksDBException e) {
             logger.warn("WAL deleteRegion failed for region {}: {}", regionId, e.getMessage());
-        }
-
-        // Also delete progress keys for this region
-        byte[] progressPrefix = progressRegionPrefix(regionId);
-        try (RocksIterator it = db.newIterator()) {
-            it.seek(progressPrefix);
-            List<byte[]> toDelete = new ArrayList<>();
-            while (it.isValid()) {
-                byte[] key = it.key();
-                if (!startsWith(key, progressPrefix)) {
-                    break;
-                }
-                toDelete.add(key);
-                it.next();
-            }
-            for (byte[] key : toDelete) {
-                db.delete(key);
-            }
-        } catch (RocksDBException e) {
-            logger.warn("WAL deleteRegion progress cleanup failed for {}: {}", regionId, e.getMessage());
         }
 
         sequenceIdCache.remove(regionId);
@@ -421,31 +436,28 @@ public class ReplicationWAL implements AutoCloseable {
     }
 
     /**
-     * Scan RocksDB for the highest sequenceId in the given region.
-     * Does NOT touch sequenceIdCache — safe to call from getNextSequenceId.
+     * Find the highest sequenceId in the given region.
+     *
+     * <p>Because WAL keys are ordered as {@code <regionId><0x00><sequenceId-be>},
+     * the last entry in the region's key range always has the max sequenceId.
+     * We seek to the region's upper bound and step back once — O(1) instead
+     * of scanning all WAL entries for this region.
      */
     private long scanMaxSequenceId(String regionId) {
-        long maxSeq = 0;
         try (RocksIterator it = db.newIterator()) {
             byte[] prefix = regionPrefix(regionId);
             byte[] upperBound = regionUpperBound(regionId);
-            it.seek(prefix);
-            while (it.isValid()) {
-                byte[] key = it.key();
-                if (upperBound != null && compareBytes(key, upperBound) >= 0) {
-                    break;
-                }
-                if (!startsWith(key, prefix)) {
-                    break;
-                }
-                long seqId = extractSequenceId(key, prefix.length);
-                if (seqId > maxSeq) {
-                    maxSeq = seqId;
-                }
-                it.next();
+
+            // Seek to the first key ≥ upperBound, then step back to the last key < upperBound.
+            // That is the last entry in this region (if any).
+            it.seek(upperBound);
+            it.prev();
+
+            if (it.isValid() && startsWith(it.key(), prefix)) {
+                return extractSequenceId(it.key(), prefix.length);
             }
+            return 0;
         }
-        return maxSeq;
     }
 
     private boolean startsWith(byte[] data, byte[] prefix) {

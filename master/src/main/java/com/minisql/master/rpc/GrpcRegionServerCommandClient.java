@@ -6,9 +6,9 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.master.state.ClusterManager;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 
 import java.util.concurrent.TimeUnit;
 
@@ -199,36 +199,29 @@ public class GrpcRegionServerCommandClient implements RegionServerCommandClient 
             .build();
     }
 
+    /**
+     * Open a short-lived session backed by a cached channel.
+     * The channel is reused across commands to avoid the overhead of
+     * TCP + HTTP/2 negotiation per command.
+     */
     private CommandSession openSession(ServerId serverId, long timeoutMs) {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(serverId.getHost(), serverId.getPort())
-            .usePlaintext()
-            .build();
+        ManagedChannel channel = GrpcChannelFactory.forAddress(serverId.getHost(), serverId.getPort());
         RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
             RegionServerServiceGrpc.newBlockingStub(channel)
                 .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
-        return new CommandSession(channel, stub);
+        return new CommandSession(stub);
     }
 
     private static final class CommandSession implements AutoCloseable {
-        private final ManagedChannel channel;
         private final RegionServerServiceGrpc.RegionServerServiceBlockingStub stub;
 
-        private CommandSession(ManagedChannel channel, RegionServerServiceGrpc.RegionServerServiceBlockingStub stub) {
-            this.channel = channel;
+        private CommandSession(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub) {
             this.stub = stub;
         }
 
         @Override
         public void close() {
-            channel.shutdown();
-            try {
-                if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
-                    channel.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                channel.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
+            // Channel is pooled — do NOT shut down here.
         }
     }
 }

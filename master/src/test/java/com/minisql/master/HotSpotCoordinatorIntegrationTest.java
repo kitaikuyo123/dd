@@ -719,6 +719,7 @@ class HotSpotCoordinatorIntegrationTest {
         @Override public List<com.minisql.common.model.KeyValue> fetchSnapshot(ServerId p, String rid, long t) { return List.of(); }
         @Override public boolean sendSnapshot(ServerId r, String rid, List<com.minisql.common.model.KeyValue> s, int b, long t, long f) { return true; }
         @Override public boolean sendSnapshotStreaming(ServerId r, String rid, List<com.minisql.common.model.KeyValue> s, int b, long t, long f) { return true; }
+        @Override public boolean streamSnapshotDirect(ServerId p, ServerId r, String rid, int b, long t, long f) { return true; }
         @Override public void close() {}
     }
 }

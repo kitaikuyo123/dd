@@ -6,8 +6,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.function.Supplier;
 
 /**
  * RocksDB-backed KV storage engine.
@@ -38,12 +41,23 @@ public class RocksDBStorageEngine implements StorageEngine {
                 dir.mkdirs();
             }
 
-            // Clean up stale LOCK file from previous runs
+            // Check for stale LOCK file.
+            // On Windows, RocksDB may leave the LOCK file after shutdown. Instead of
+            // blindly checking file existence (which forces manual cleanup on every restart),
+            // try to open the file exclusively: if another process holds it, this fails.
+            // If it succeeds, the previous process is dead and we can safely remove it.
             File lockFile = new File(dir, "LOCK");
             if (lockFile.exists()) {
-                logger.warn("Found stale LOCK file at {}, deleting...", dbPath);
-                if (!lockFile.delete()) {
-                    logger.warn("Failed to delete stale LOCK file");
+                try (FileOutputStream fos = new FileOutputStream(lockFile)) {
+                    // Opened successfully — no other process holds the lock.
+                    // Safe to delete the stale file.
+                    fos.close();
+                    lockFile.delete();
+                    logger.debug("Removed stale RocksDB LOCK file at {}", dbPath);
+                } catch (IOException e) {
+                    throw new IllegalStateException(
+                        "RocksDB LOCK file at " + dbPath + " is held by another process. " +
+                        "The database may already be in use.", e);
                 }
             }
 
@@ -126,30 +140,77 @@ public class RocksDBStorageEngine implements StorageEngine {
         byte[] startKey = filter.getStartKey() != null ? filter.getStartKey() : EMPTY_BYTES;
         byte[] endKey = filter.getEndKey() != null ? filter.getEndKey() : new byte[]{(byte) 0xFF};
 
-        // Use rowKey-level prefix for iterating
         byte[] seekKey = buildRowKeyPrefix(startKey);
+        RocksIterator it = db.newIterator();
+        it.seek(seekKey);
 
-        List<KeyValue> results = new ArrayList<>();
-        byte[] endPrefix = buildRowKeyPrefix(endKey);
+        return new RowStreamIterator(it, endKey, filter);
+    }
 
-        try (RocksIterator it = db.newIterator()) {
-            it.seek(seekKey);
-            Map<String, KeyValue> currentRow = new LinkedHashMap<>();
-            byte[] currentRowKey = null;
+    // ---- Streaming iterator ----
 
+    /**
+     * Streaming iterator that wraps RocksIterator directly, buffering one row
+     * at a time instead of materializing all results into memory.
+     *
+     * <p>RocksIterator lifecycle: the iterator is closed when exhausted
+     * (hasMore returns false). Callers may also {@link #close()} it early.
+     */
+    private class RowStreamIterator implements Iterator<KeyValue>, AutoCloseable {
+
+        private final RocksIterator it;
+        private final byte[] endKey;
+        private final StorageScanFilter filter;
+
+        // Buffer for the current row's KeyValues (flushed per row key change)
+        private final ArrayDeque<KeyValue> rowBuffer = new ArrayDeque<>();
+        // Row-level aggregation state for the current in-progress row
+        private final Map<String, KeyValue> currentRow = new LinkedHashMap<>();
+        private byte[] currentRowKey;
+
+        private boolean exhausted;
+
+        RowStreamIterator(RocksIterator it, byte[] endKey, StorageScanFilter filter) {
+            this.it = it;
+            this.endKey = endKey;
+            this.filter = filter;
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (!rowBuffer.isEmpty()) return true;
+            if (exhausted) return false;
+            fillRowBuffer();
+            return !rowBuffer.isEmpty();
+        }
+
+        @Override
+        public KeyValue next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException("No more elements");
+            }
+            return rowBuffer.poll();
+        }
+
+        private void fillRowBuffer() {
             while (it.isValid()) {
                 byte[] compositeKey = it.key();
                 byte[] rowKey = extractRowKey(compositeKey);
 
-                // Check if past end key
+                // Past end key?
                 if (compareBytes(rowKey, endKey) >= 0) {
-                    break;
+                    flushRowBuffer();
+                    closeIt();
+                    return;
                 }
 
-                // If new rowKey, flush previous row
+                // Row key change — flush current row
                 if (currentRowKey != null && !Arrays.equals(rowKey, currentRowKey)) {
-                    flushRow(results, currentRow, filter);
-                    currentRow.clear();
+                    flushRowBuffer();
+                    if (!rowBuffer.isEmpty()) {
+                        // Have a row to yield; pause RocksIterator
+                        return;
+                    }
                 }
                 currentRowKey = rowKey;
 
@@ -160,13 +221,70 @@ public class RocksDBStorageEngine implements StorageEngine {
                 }
                 it.next();
             }
-            // Flush last row
-            if (!currentRow.isEmpty()) {
-                flushRow(results, currentRow, filter);
-            }
+            // RocksIterator exhausted
+            flushRowBuffer();
+            closeIt();
         }
 
-        return results.iterator();
+        private void flushRowBuffer() {
+            if (currentRow.isEmpty()) return;
+
+            // Row-level filter check
+            boolean passes = true;
+            if (filter != null && filter.hasColumnPredicates()) {
+                for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
+                    KeyValue targetKv = null;
+                    for (KeyValue kv : currentRow.values()) {
+                        if (kv.isDelete()) continue;
+                        if (pred.matchesQualifier(kv.getQualifier())) {
+                            targetKv = kv;
+                            break;
+                        }
+                    }
+                    if (targetKv == null) {
+                        passes = false;
+                        break;
+                    }
+                    int cmp = compareBytes(
+                        targetKv.getValue() != null ? targetKv.getValue() : EMPTY_BYTES,
+                        pred.getValue() != null ? pred.getValue() : EMPTY_BYTES);
+                    switch (pred.getOperator()) {
+                        case "=": case "==": passes = (cmp == 0); break;
+                        case ">":  passes = (cmp > 0); break;
+                        case ">=": passes = (cmp >= 0); break;
+                        case "<":  passes = (cmp < 0); break;
+                        case "<=": passes = (cmp <= 0); break;
+                    }
+                    if (!passes) break;
+                }
+            }
+
+            if (passes) {
+                for (KeyValue kv : currentRow.values()) {
+                    if (kv.isDelete()) continue;
+                    if (filter != null && filter.hasProjectedQualifiers()
+                        && !filter.getProjectedQualifiers().contains(kv.getQualifier())) {
+                        continue;
+                    }
+                    rowBuffer.add(kv);
+                }
+            }
+
+            currentRow.clear();
+        }
+
+        private void closeIt() {
+            exhausted = true;
+            it.close();
+        }
+
+        @Override
+        public void close() {
+            if (!exhausted) {
+                it.close();
+                exhausted = true;
+            }
+        }
     }
 
     @Override
@@ -437,13 +555,67 @@ public class RocksDBStorageEngine implements StorageEngine {
     }
 
     private Options buildOptions(RocksDBConfig config) {
+        // Block-based table config — the single most impactful RocksDB tuning lever.
+        // Without a block cache, every read hits disk/OS page cache.
+        BlockBasedTableConfig tableConfig = new BlockBasedTableConfig();
+
+        // LRU block cache — caches data blocks and index blocks in off-heap memory
+        long cacheSize = config.getBlockCacheSizeBytes();
+        if (cacheSize > 0) {
+            tableConfig.setBlockCache(new LRUCache(cacheSize));
+            logger.info("RocksDB block cache: {} MB", cacheSize / (1024 * 1024));
+        }
+
+        // Bloom filter — reduces disk I/O for point-lookup of non-existent keys.
+        // Typical value: ~10 bits per key gives ~1% false-positive rate.
+        int bfBits = config.getBloomFilterBitsPerKey();
+        if (bfBits > 0) {
+            tableConfig.setFilterPolicy(new BloomFilter(bfBits));
+        }
+
+        // Enable block cache for index and filter blocks (not just data blocks)
+        tableConfig.setCacheIndexAndFilterBlocks(true);
+
         Options options = new Options()
             .setCreateIfMissing(true)
             .setWriteBufferSize(config.getWriteBufferSizeBytes())
-            .setMaxWriteBufferNumber(config.getMaxWriteBufferNumber());
+            .setMaxWriteBufferNumber(config.getMaxWriteBufferNumber())
+            .setTableFormatConfig(tableConfig);
+
+        // Compaction style — LEVEL is generally best for read-heavy workloads
+        String style = config.getCompactionStyle();
+        if ("UNIVERSAL".equalsIgnoreCase(style)) {
+            options.setCompactionStyle(CompactionStyle.UNIVERSAL);
+        } else if ("FIFO".equalsIgnoreCase(style)) {
+            options.setCompactionStyle(CompactionStyle.FIFO);
+        } else {
+            // Default: LEVEL compaction
+            options.setCompactionStyle(CompactionStyle.LEVEL);
+            // Level compaction tuning: keep L0 small (frequent minor compactions),
+            // grow exponentially per level
+            options.setLevel0FileNumCompactionTrigger(4);
+            options.setMaxBytesForLevelBase(256 * 1024 * 1024L); // 256 MB L1
+            options.setTargetFileSizeBase(64 * 1024 * 1024L);    // 64 MB SST files
+        }
 
         CompressionType compression = CompressionType.getCompressionType(config.getCompressionType());
         options.setCompressionType(compression);
+
+        // Background job limit — not strictly a thread pool, but bounds compaction/flush parallelism
+        options.setMaxBackgroundJobs(config.getMaxBackgroundJobs());
+
+        // Statistics — exposes rocksdb.* properties for monitoring (cache hit rate, compaction count, etc.)
+        if (config.isEnableStatistics()) {
+            options.setStatistics(new Statistics());
+            options.setStatsDumpPeriodSec(300); // dump stats to log every 5 minutes
+        }
+
+        // Rate limiter — caps compaction/flush I/O to avoid starving foreground reads
+        long rateLimit = config.getRateLimiterBytesPerSec();
+        if (rateLimit > 0) {
+            options.setRateLimiter(new RateLimiter(rateLimit));
+            logger.info("RocksDB rate limiter: {} MB/s", rateLimit / (1024 * 1024));
+        }
 
         return options;
     }

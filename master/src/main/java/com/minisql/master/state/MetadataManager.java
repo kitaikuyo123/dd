@@ -8,7 +8,6 @@ import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -495,7 +494,7 @@ public class MetadataManager {
 
     /**
      * 反序列化字节数组为 Region
-     * 支持新格式（字符串，包含 MySQL 配置）和旧格式（Java 序列化）
+     * 格式：regionId|tableName|startKeyBase64|endKeyBase64|primaryServer|replicaServers
      */
     private Region deserializeRegion(byte[] data) {
         if (data == null || data.length == 0) {
@@ -506,8 +505,8 @@ public class MetadataManager {
             String[] parts = dataStr.split("\\|");
 
             if (parts.length < 4) {
-                // 尝试旧的 Java 序列化格式（向后兼容）
-                return deserializeJavaSerializedRegion(data);
+                logger.warn("Invalid region data format (expected at least 4 pipe-delimited fields, got {})", parts.length);
+                return null;
             }
 
             Region region = new Region();
@@ -532,21 +531,7 @@ public class MetadataManager {
 
             return region;
         } catch (Exception e) {
-            logger.warn("Failed to deserialize region: {}", e.getMessage(), e);
-            // 尝试旧的 Java 序列化格式
-            return deserializeJavaSerializedRegion(data);
-        }
-    }
-
-    /**
-     * 反序列化 Java 序列化格式（向后兼容）
-     */
-    private Region deserializeJavaSerializedRegion(byte[] data) {
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
-             ObjectInputStream ois = new ObjectInputStream(bais)) {
-            return (Region) ois.readObject();
-        } catch (Exception e) {
-            logger.warn("Failed to deserialize Java serialized region: {}", e.getMessage(), e);
+            logger.warn("Failed to deserialize region (Java serialization no longer supported): {}", e.getMessage(), e);
             return null;
         }
     }

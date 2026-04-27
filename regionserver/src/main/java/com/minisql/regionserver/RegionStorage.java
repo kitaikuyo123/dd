@@ -46,10 +46,9 @@ public class RegionStorage {
         storageEngine.batchPut(kvs);
     }
 
-    public KeyValue get(byte[] rowKey) {
+    public List<KeyValue> get(byte[] rowKey) {
         readRequestCount.incrementAndGet();
-        List<KeyValue> results = storageEngine.get(rowKey);
-        return results != null && !results.isEmpty() ? results.get(0) : null;
+        return storageEngine.get(rowKey);
     }
 
     public Iterator<KeyValue> scan(byte[] startKey, byte[] endKey) {

@@ -410,12 +410,63 @@ public class MiniSQLConnection implements Connection {
         String tableName = stmt.getTable();
         com.minisql.common.model.Table schema = getTableSchema(tableName);
         byte[] rowKey = resolveRowKeyForMutation(stmt.getWhere(), schema, "DELETE");
-        MutationTarget target = resolveMutationTarget(tableName, rowKey);
 
+        if (rowKey != null) {
+            return deleteSingleRow(tableName, schema, rowKey);
+        }
+
+        // Scan-based: group matching rows by target RegionServer and batch-delete per region
+        List<Row> matchingRows = scanRowsForMutation(tableName, schema, stmt.getWhere(), "DELETE");
+        if (matchingRows.isEmpty()) {
+            return 0;
+        }
+
+        long timestamp = System.currentTimeMillis();
         List<String> qualifiers = schema.getColumns().stream()
                 .map(com.minisql.common.model.Column::getName)
                 .collect(Collectors.toList());
+        Map<String, List<byte[]>> regionRows = new LinkedHashMap<>();
 
+        for (Row row : matchingRows) {
+            MutationTarget target = resolveMutationTarget(tableName, row.getRowKey());
+            regionRows.computeIfAbsent(target.regionId, k -> new ArrayList<>()).add(row.getRowKey());
+        }
+
+        for (Map.Entry<String, List<byte[]>> entry : regionRows.entrySet()) {
+            String regionId = entry.getKey();
+            List<byte[]> rowKeys = entry.getValue();
+            // Batch all tombstones for this region into a single PutRequest
+            RegionServerProto.PutRequest.Builder batch = RegionServerProto.PutRequest.newBuilder()
+                .setRegionId(regionId)
+                .setDurable(true);
+            for (byte[] rk : rowKeys) {
+                for (String q : qualifiers) {
+                    batch.addKeyValues(CommonProto.KeyValue.newBuilder()
+                        .setRowKey(com.google.protobuf.ByteString.copyFrom(rk))
+                        .setColumnFamily("")
+                        .setQualifier(q)
+                        .setTimestamp(timestamp)
+                        .setValue(com.google.protobuf.ByteString.EMPTY)
+                        .setType(CommonProto.KeyValueType.DELETE)
+                        .build());
+                }
+            }
+            MutationTarget target = resolveMutationTarget(tableName, rowKeys.get(0));
+            RegionServerProto.PutResponse response = target.stub.put(batch.build());
+            if (!response.getStatus().getSuccess()) {
+                throw new SQLException("Batch delete failed on " + regionId + ": " + response.getStatus().getMessage());
+            }
+        }
+
+        clearTableSchemaCache(tableName);
+        return matchingRows.size();
+    }
+
+    private int deleteSingleRow(String tableName, com.minisql.common.model.Table schema, byte[] rowKey) throws SQLException {
+        MutationTarget target = resolveMutationTarget(tableName, rowKey);
+        List<String> qualifiers = schema.getColumns().stream()
+                .map(com.minisql.common.model.Column::getName)
+                .collect(Collectors.toList());
         RegionServerProto.DeleteRequest deleteRequest = RegionServerProto.DeleteRequest.newBuilder()
                 .setRegionId(target.regionId)
                 .setRowKey(com.google.protobuf.ByteString.copyFrom(rowKey))
@@ -423,38 +474,97 @@ public class MiniSQLConnection implements Connection {
                 .setTimestamp(System.currentTimeMillis())
                 .setDeleteAllVersions(true)
                 .build();
-
         RegionServerProto.DeleteResponse response = target.stub.delete(deleteRequest);
-
         if (!response.getStatus().getSuccess()) {
             throw new SQLException("Delete failed: " + response.getStatus().getMessage());
         }
-
-        clearTableSchemaCache(tableName);
         return 1;
     }
 
     private int executeUpdate(com.minisql.sql.ast.UpdateStatement stmt) throws SQLException {
         String tableName = stmt.getTable();
         com.minisql.common.model.Table schema = getTableSchema(tableName);
-        byte[] rowKey = resolveRowKeyForMutation(stmt.getWhere(), schema, "UPDATE");
-        Row existingRow = fetchExistingRowWithRetry(tableName, rowKey, schema, "Update");
 
         for (com.minisql.sql.ast.Assignment assignment : stmt.getAssignments()) {
             if (schema.getAllPrimaryKeys().contains(assignment.getColumn())) {
                 throw new SQLException("UPDATE of primary key columns is not supported: " + assignment.getColumn());
             }
-
-            Column.ColumnType type = findColumnType(schema, assignment.getColumn());
-            existingRow.setColumn(assignment.getColumn(), convertValue(assignment.getValue(), type));
         }
 
+        byte[] rowKey = resolveRowKeyForMutation(stmt.getWhere(), schema, "UPDATE");
+        if (rowKey != null) {
+            return updateSingleRow(tableName, schema, rowKey, stmt.getAssignments());
+        }
+
+        // Scan-based: group matching rows by RegionServer and batch-update per region
+        List<Row> matchingRows = scanRowsForMutation(tableName, schema, stmt.getWhere(), "UPDATE");
+        if (matchingRows.isEmpty()) {
+            return 0;
+        }
+
+        // Group KeyValues by region for batch put
+        Map<String, List<KeyValue>> regionKvs = new LinkedHashMap<>();
+        long timestamp = System.currentTimeMillis();
+        for (Row row : matchingRows) {
+            Row existing = fetchExistingRowWithRetry(tableName, row.getRowKey(), schema, "Update");
+            for (com.minisql.sql.ast.Assignment assignment : stmt.getAssignments()) {
+                Column.ColumnType type = findColumnType(schema, assignment.getColumn());
+                existing.setColumn(assignment.getColumn(), convertValue(assignment.getValue(), type));
+            }
+            existing.setRowKey(row.getRowKey());
+            existing.setTimestamp(timestamp);
+
+            MutationTarget target = resolveMutationTarget(tableName, row.getRowKey());
+            KeyValue[] kvs = KeyValueConverter.rowToKeyValues(existing, schema);
+            regionKvs.computeIfAbsent(target.regionId, k -> new ArrayList<>())
+                .addAll(Arrays.asList(kvs));
+        }
+
+        // Send one batch PutRequest per region
+        for (Map.Entry<String, List<KeyValue>> entry : regionKvs.entrySet()) {
+            RegionServerProto.PutRequest.Builder batch = RegionServerProto.PutRequest.newBuilder()
+                .setRegionId(entry.getKey())
+                .setDurable(true);
+            for (KeyValue kv : entry.getValue()) {
+                batch.addKeyValues(convertToProto(kv));
+            }
+            byte[] firstRk = matchingRows.get(0).getRowKey();
+            MutationTarget target = resolveMutationTarget(tableName, firstRk);
+            RegionServerProto.PutResponse response = target.stub.put(batch.build());
+            if (!response.getStatus().getSuccess()) {
+                throw new SQLException("Batch update failed on " + entry.getKey() + ": " + response.getStatus().getMessage());
+            }
+        }
+
+        clearTableSchemaCache(tableName);
+        return matchingRows.size();
+    }
+
+    private int updateSingleRow(String tableName, com.minisql.common.model.Table schema,
+                                 byte[] rowKey, List<com.minisql.sql.ast.Assignment> assignments) throws SQLException {
+        // 1. fetch
+        Row existingRow = fetchExistingRowWithRetry(tableName, rowKey, schema, "Update");
+        // 2. modify
+        for (com.minisql.sql.ast.Assignment assignment : assignments) {
+            Column.ColumnType type = findColumnType(schema, assignment.getColumn());
+            Object converted = convertValue(assignment.getValue(), type);
+            existingRow.setColumn(assignment.getColumn(), converted);
+        }
         existingRow.setRowKey(rowKey);
         existingRow.setTimestamp(System.currentTimeMillis());
-
-        executeTypedPutMutation(tableName, schema, rowKey, KeyValueConverter.rowToKeyValues(existingRow, schema), "Update");
-        clearTableSchemaCache(tableName);
+        // 3. serialize + write
+        executeTypedPutMutation(tableName, schema, rowKey,
+            KeyValueConverter.rowToKeyValues(existingRow, schema), "Update");
         return 1;
+    }
+
+    /** Mutable region + stub pair for building batch requests. */
+    private static class MutationTarget {
+        final String regionId;
+        final RegionServerServiceGrpc.RegionServerServiceBlockingStub stub;
+        MutationTarget(String regionId, RegionServerServiceGrpc.RegionServerServiceBlockingStub stub) {
+            this.regionId = regionId; this.stub = stub;
+        }
     }
 
     private Row buildRowFromInsert(com.minisql.sql.ast.InsertStatement stmt,
@@ -492,12 +602,21 @@ public class MiniSQLConnection implements Connection {
         return new MutationTarget(regionId, stub);
     }
 
+    /**
+     * Resolve a single row key from WHERE condition.
+     * Returns null when not all primary key columns are specified — caller should
+     * fall back to scan-based mutation.
+     */
     private byte[] resolveRowKeyForMutation(com.minisql.sql.ast.Condition where,
                                             com.minisql.common.model.Table schema,
                                             String operation) throws SQLException {
+        if (where == null) {
+            return null;
+        }
+
         Map<String, String> equalityConditions = new HashMap<>();
         if (!collectEqualityConditions(where, equalityConditions)) {
-            throw new SQLException(operation + " requires equality conditions on all primary key columns");
+            return null; // Complex condition — needs scan
         }
 
         List<String> primaryKeys = schema.getAllPrimaryKeys();
@@ -509,12 +628,46 @@ public class MiniSQLConnection implements Connection {
         for (String primaryKey : primaryKeys) {
             String rawValue = equalityConditions.get(primaryKey);
             if (rawValue == null) {
-                throw new SQLException(operation + " requires equality conditions on keys " + primaryKeys);
+                return null; // Partial key — fall back to scan
             }
             keyRow.setColumn(primaryKey, convertValue(rawValue, findColumnType(schema, primaryKey)));
         }
 
         return KeyValueConverter.createRowKeyFromRow(keyRow, schema);
+    }
+
+    /**
+     * Scan matching rows for UPDATE/DELETE by reusing the SELECT path.
+     * No new Router APIs needed — just queries the table and filters client-side.
+     */
+    private List<Row> scanRowsForMutation(String tableName, com.minisql.common.model.Table schema,
+                                          com.minisql.sql.ast.Condition where,
+                                          String operation) throws SQLException {
+        try {
+            com.minisql.sql.ast.SelectStatement selectStmt = new com.minisql.sql.ast.SelectStatement();
+            selectStmt.setTable(tableName);
+            selectStmt.setSelectAll(true);
+            selectStmt.setWhere(where);
+
+            List<com.minisql.sql.execution.Row> rows = parallelQueryExecutor.executeQuery(selectStmt,
+                "SELECT * FROM " + tableName);
+
+            List<Row> result = new ArrayList<>();
+            for (com.minisql.sql.execution.Row row : rows) {
+                Row r = new Row();
+                for (String col : row.getColumns()) {
+                    r.setColumn(col, row.getValue(col));
+                }
+                byte[] reconstructedKey = KeyValueConverter.createRowKeyFromRow(r, schema);
+                r.setRowKey(reconstructedKey);
+                result.add(r);
+            }
+            return result;
+        } catch (SQLException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new SQLException("Scan-based " + operation + " failed: " + e.getMessage(), e);
+        }
     }
 
     private boolean collectEqualityConditions(com.minisql.sql.ast.Condition condition, Map<String, String> values) {
@@ -657,16 +810,6 @@ public class MiniSQLConnection implements Connection {
             }
         }
         throw new SQLException("Column not found in schema: " + columnName);
-    }
-
-    private static final class MutationTarget {
-        private final String regionId;
-        private final RegionServerServiceGrpc.RegionServerServiceBlockingStub stub;
-
-        private MutationTarget(String regionId, RegionServerServiceGrpc.RegionServerServiceBlockingStub stub) {
-            this.regionId = regionId;
-            this.stub = stub;
-        }
     }
 
     private int executeCreateTable(com.minisql.sql.ast.CreateTableStatement stmt) throws SQLException {

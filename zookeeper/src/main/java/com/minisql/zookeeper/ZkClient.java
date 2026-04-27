@@ -122,18 +122,72 @@ public class ZkClient {
     }
 
     /**
-     * 监听节点变化
+     * 监听节点变化（一次性 Watcher，触发后不重注册）
      */
     public void watchNode(String path, NodeWatcher watcher) throws Exception {
+        watchNodeOnce(path, watcher);
+    }
+
+    /**
+     * 持久监听节点变化（自动重注册，适合需要持续监听变化的场景）
+     */
+    public void watchNodePersistent(String path, NodeWatcher watcher) throws Exception {
+        watchNodeOnce(path, new NodeWatcher() {
+            @Override
+            public void onNodeChanged(String changedPath, org.apache.zookeeper.Watcher.Event.EventType type) {
+                try {
+                    watcher.onNodeChanged(changedPath, type);
+                } finally {
+                    // Re-register after callback — only if we're still connected
+                    try {
+                        if (isConnected() && isStarted()) {
+                            watchNodePersistent(path, watcher);
+                        }
+                    } catch (Exception e) {
+                        // Best-effort re-registration; ZooKeeper session reconnect
+                        // will typically re-trigger watches via session events
+                    }
+                }
+            }
+        });
+    }
+
+    private void watchNodeOnce(String path, NodeWatcher watcher) throws Exception {
         client.getData().usingWatcher((org.apache.curator.framework.api.CuratorWatcher) event -> {
             watcher.onNodeChanged(event.getPath(), event.getType());
         }).forPath(path);
     }
 
     /**
-     * 监听子节点变化
+     * 监听子节点变化（一次性 Watcher，触发后不重注册）
      */
     public void watchChildren(String path, ChildrenWatcher watcher) throws Exception {
+        watchChildrenOnce(path, watcher);
+    }
+
+    /**
+     * 持久监听子节点变化（自动重注册，适合需要持续监听子节点变更的场景）
+     */
+    public void watchChildrenPersistent(String path, ChildrenWatcher watcher) throws Exception {
+        watchChildrenOnce(path, new ChildrenWatcher() {
+            @Override
+            public void onChildrenChanged(String changedPath, List<String> children) {
+                try {
+                    watcher.onChildrenChanged(changedPath, children);
+                } finally {
+                    try {
+                        if (isConnected() && isStarted()) {
+                            watchChildrenPersistent(path, watcher);
+                        }
+                    } catch (Exception e) {
+                        // Best-effort re-registration
+                    }
+                }
+            }
+        });
+    }
+
+    private void watchChildrenOnce(String path, ChildrenWatcher watcher) throws Exception {
         client.getChildren().usingWatcher((org.apache.curator.framework.api.CuratorWatcher) event -> {
             try {
                 List<String> children = client.getChildren().forPath(path);

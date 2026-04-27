@@ -94,12 +94,14 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             logger.debug("Local commit completed for region: {}", regionId);
 
             // 3. 复制到从副本（如果有副本组）
+            // Best-effort: local write already committed; replication failure degrades
+            // durability but should not reject the client's write.
             if (replicationCoordinator != null && replicationCoordinator.getReplicaGroup(regionId) != null) {
                 boolean replicationSuccess = replicationEntry != null
                     ? replicationCoordinator.replicateSync(regionId, replicationEntry)
                     : replicationCoordinator.replicateSync(regionId, keyValues);
                 if (!replicationSuccess) {
-                    throw new IllegalStateException("Replication failed for region: " + regionId);
+                    logger.warn("Replication degraded for region {}: local write committed but replica sync failed", regionId);
                 } else {
                     logger.debug("Replication completed successfully for region: {}", regionId);
                 }
@@ -155,13 +157,14 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 throw new IOException("Region storage not found: " + regionId);
             }
 
-            KeyValue result = storage.get(rowKey);
+            List<KeyValue> results = storage.get(rowKey);
 
             RegionServerProto.GetResponse.Builder builder = RegionServerProto.GetResponse.newBuilder()
                 .setStatus(createSuccessStatus());
-
-            if (result != null) {
-                builder.addKeyValues(convertToProto(result));
+            if (results != null) {
+                for (KeyValue kv : results) {
+                    builder.addKeyValues(convertToProto(kv));
+                }
             }
 
             responseObserver.onNext(builder.build());

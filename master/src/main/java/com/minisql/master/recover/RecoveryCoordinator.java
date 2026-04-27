@@ -50,7 +50,7 @@ public class RecoveryCoordinator {
                                ReplicationCoordinator replicationCoordinator,
                                ReplicaLifecycleManager lifecycleManager) {
         this(clusterManager, metadataManager, replicaMonitor, replicationCoordinator, lifecycleManager,
-            new GrpcRegionServerCommandClient(clusterManager));
+            new GrpcRegionServerCommandClient(clusterManager), 2);
     }
 
     public RecoveryCoordinator(ClusterManager clusterManager,
@@ -59,13 +59,25 @@ public class RecoveryCoordinator {
                                ReplicationCoordinator replicationCoordinator,
                                ReplicaLifecycleManager lifecycleManager,
                                RegionServerCommandClient commandClient) {
+        this(clusterManager, metadataManager, replicaMonitor, replicationCoordinator, lifecycleManager,
+            commandClient, 2);
+    }
+
+    public RecoveryCoordinator(ClusterManager clusterManager,
+                               MetadataManager metadataManager,
+                               ReplicaMonitor replicaMonitor,
+                               ReplicationCoordinator replicationCoordinator,
+                               ReplicaLifecycleManager lifecycleManager,
+                               RegionServerCommandClient commandClient,
+                               int threadPoolSize) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.replicaMonitor = replicaMonitor;
         this.replicationCoordinator = replicationCoordinator;
         this.lifecycleManager = lifecycleManager;
         this.commandClient = commandClient;
-        this.recoveryExecutor = Executors.newFixedThreadPool(2, r -> {
+        int poolSize = Math.max(1, threadPoolSize);
+        this.recoveryExecutor = Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r, "Replica-Recovery");
             t.setDaemon(true);
             return t;
@@ -123,6 +135,19 @@ public class RecoveryCoordinator {
             return;
         }
         enforceReplicaTarget(regionId);
+    }
+
+    /**
+     * Clean up per-region resources (locks, desired counts) when a region is
+     * permanently removed, to prevent unbounded growth of these maps.
+     */
+    public void cleanupRegion(String regionId) {
+        if (regionId == null || regionId.isBlank()) {
+            return;
+        }
+        regionLocks.remove(regionId);
+        desiredReplicaCounts.remove(regionId);
+        logger.debug("Cleaned up recovery resources for region {}", regionId);
     }
 
     public void bootstrapReplica(String regionId, ServerId replica) {
@@ -500,6 +525,8 @@ public class RecoveryCoordinator {
         synchronized (regionLock) {
             Region region = metadataManager.getRegion(regionId);
             if (region == null || region.getPrimary() == null) {
+                // Region no longer exists — clean up the lock to prevent unbounded growth
+                regionLocks.remove(regionId);
                 return;
             }
 

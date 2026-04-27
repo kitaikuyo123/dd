@@ -6,8 +6,8 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -195,6 +195,76 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
     }
 
     @Override
+    public boolean streamSnapshotDirect(ServerId primary, ServerId replica, String regionId,
+                                         int batchSize, long timeoutMs, long finalSequenceId) {
+        try {
+            // Open server-streaming fetch from primary
+            RegionServerServiceGrpc.RegionServerServiceBlockingStub primaryStub =
+                newStub(primary, timeoutMs);
+            Iterator<RegionServerProto.SnapshotResponse> responses = primaryStub.getSnapshot(
+                RegionServerProto.SnapshotRequest.newBuilder().setRegionId(regionId).build());
+
+            // Open client-streaming send to replica
+            RegionServerServiceGrpc.RegionServerServiceStub replicaAsyncStub =
+                RegionServerServiceGrpc.newStub(channelFor(replica))
+                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+
+            java.util.concurrent.CompletableFuture<RegionServerProto.StreamSnapshotResponse> resultFuture =
+                new java.util.concurrent.CompletableFuture<>();
+
+            io.grpc.stub.StreamObserver<RegionServerProto.StreamSnapshotRequest> requestObserver =
+                replicaAsyncStub.streamSnapshot(new io.grpc.stub.StreamObserver<>() {
+                    @Override
+                    public void onNext(RegionServerProto.StreamSnapshotResponse response) {
+                        resultFuture.complete(response);
+                    }
+                    @Override
+                    public void onError(Throwable t) {
+                        resultFuture.completeExceptionally(t);
+                    }
+                    @Override
+                    public void onCompleted() {
+                    }
+                });
+
+            // Pipe each batch from primary's snapshot response directly to replica
+            int batchCount = 0;
+            boolean lastBatch = false;
+            while (responses.hasNext()) {
+                RegionServerProto.SnapshotResponse response = responses.next();
+                if (!response.getStatus().getSuccess()) {
+                    requestObserver.onError(new IllegalStateException(
+                        "Snapshot fetch failed: " + response.getStatus().getMessage()));
+                    return false;
+                }
+
+                List<CommonProto.KeyValue> batchKvs = response.getKeyValuesList();
+                lastBatch = !responses.hasNext();
+
+                RegionServerProto.StreamSnapshotRequest.Builder reqBuilder =
+                    RegionServerProto.StreamSnapshotRequest.newBuilder()
+                        .setRegionId(regionId)
+                        .setIsFinal(lastBatch);
+                if (lastBatch) {
+                    reqBuilder.setFinalSequenceId(finalSequenceId);
+                }
+                reqBuilder.addAllBatch(batchKvs);
+                requestObserver.onNext(reqBuilder.build());
+                batchCount++;
+            }
+            requestObserver.onCompleted();
+
+            RegionServerProto.StreamSnapshotResponse result = resultFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
+            logger.info("Streamed {} batches directly from {} to {} for region {}",
+                batchCount, primary, replica, regionId);
+            return result.getStatus().getSuccess();
+        } catch (Exception e) {
+            logger.warn("Direct snapshot streaming from {} to {} failed: {}", primary, replica, e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         for (ManagedChannel channel : channels.values()) {
             channel.shutdown();
@@ -220,11 +290,29 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
 
     private ManagedChannel channelFor(ServerId serverId) {
         String key = serverId.getHost() + ":" + serverId.getPort();
-        return channels.computeIfAbsent(key, ignored -> ManagedChannelBuilder
-            .forAddress(serverId.getHost(), serverId.getPort())
-            .usePlaintext()
-            .maxInboundMessageSize(64 * 1024 * 1024)
-            .build());
+        return channels.computeIfAbsent(key, ignored ->
+            GrpcChannelFactory.newChannel(serverId.getHost(), serverId.getPort()));
+    }
+
+    /**
+     * Remove and shut down the cached channel for the given server.
+     * Call this when a RegionServer is permanently decommissioned to prevent
+     * unbounded growth of the channels map.
+     */
+    public void removeChannel(ServerId serverId) {
+        String key = serverId.getHost() + ":" + serverId.getPort();
+        ManagedChannel channel = channels.remove(key);
+        if (channel != null) {
+            channel.shutdown();
+            try {
+                if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
+                    channel.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                channel.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private CommonProto.KeyValue toProto(KeyValue kv) {

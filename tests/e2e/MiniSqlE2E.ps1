@@ -98,7 +98,7 @@ function Invoke-SqlText {
     $projectRoot = Get-ProjectRoot
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
-    $psi.Arguments = "/c mvn -q -pl minisql-client exec:java -Dexec.mainClass=com.minisql.client.cli.SqlCli"
+    $psi.Arguments = "/c mvn -q -pl client exec:java -Dexec.mainClass=com.minisql.client.cli.SqlCli"
     $psi.WorkingDirectory = $projectRoot
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true

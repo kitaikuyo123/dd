@@ -209,24 +209,21 @@ public class SqlCli {
     }
 
     /**
-     * 执行 SQL 语句
+     * 执行 SQL 语句，使用 JDBC 标准 execute() 自动判断查询/更新。
      */
     private void executeSql(String sql) {
         if (sql.isEmpty()) {
             return;
         }
 
-        String upper = sql.trim().toUpperCase();
-
         try (Statement stmt = conn.createStatement()) {
-            if (upper.startsWith("SELECT") || upper.startsWith("SHOW") || upper.startsWith("DESCRIBE")) {
-                // 查询语句
-                try (ResultSet rs = stmt.executeQuery(sql)) {
+            boolean hasResultSet = stmt.execute(sql);
+            if (hasResultSet) {
+                try (ResultSet rs = stmt.getResultSet()) {
                     CliResultFormatter.printResultSet(rs);
                 }
             } else {
-                // 更新语句
-                int rows = stmt.executeUpdate(sql);
+                int rows = stmt.getUpdateCount();
                 System.out.println("OK (" + rows + " row" + (rows != 1 ? "s" : "") + " affected)");
             }
         } catch (SQLException e) {
@@ -330,8 +327,7 @@ public class SqlCli {
 
         System.out.println("执行 SQL 文件：" + filePath);
 
-        try (BufferedReader fileReader = new BufferedReader(new FileReader(file));
-             Statement stmt = conn.createStatement()) {
+        try (BufferedReader fileReader = new BufferedReader(new FileReader(file))) {
 
             String line;
             StringBuilder sqlBuffer = new StringBuilder();
@@ -352,14 +348,7 @@ public class SqlCli {
                     sql = sql.substring(0, sql.length() - 1).trim();
 
                     if (!sql.isEmpty()) {
-                        if (sql.toUpperCase().startsWith("SELECT")) {
-                            try (ResultSet rs = stmt.executeQuery(sql)) {
-                                CliResultFormatter.printResultSet(rs);
-                            }
-                        } else {
-                            int rows = stmt.executeUpdate(sql);
-                            System.out.println("OK (" + rows + " row(s) affected)");
-                        }
+                        executeSql(sql);
                     }
 
                     sqlBuffer.setLength(0);
@@ -368,8 +357,6 @@ public class SqlCli {
 
             System.out.println("文件执行完成。");
 
-        } catch (SQLException e) {
-            System.err.println("SQL 错误：" + e.getMessage());
         } catch (IOException e) {
             System.err.println("读取文件失败：" + e.getMessage());
         }

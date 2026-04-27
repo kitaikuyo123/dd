@@ -185,9 +185,10 @@ class RegionServerServiceImplTest {
             assertEquals(1L, obs.value.getLastAppliedSeqId());
 
             // Verify data was written
-            KeyValue result = regionServer.get(regionId, "row1".getBytes());
-            assertNotNull(result);
-            assertEquals("Alice", new String(result.getValue()));
+            List<KeyValue> results = regionServer.get(regionId, "row1".getBytes());
+            assertNotNull(results);
+            assertFalse(results.isEmpty());
+            assertEquals("Alice", new String(results.get(0).getValue()));
         }
 
         @Test
@@ -243,8 +244,8 @@ class RegionServerServiceImplTest {
             // seqId 3 should be skipped, lastApplied stays at 5
             assertEquals(5L, obs2.value.getLastAppliedSeqId());
             // row2 should NOT exist (seqId 3 was skipped)
-            KeyValue result = regionServer.get(regionId, "row2".getBytes());
-            assertNull(result);
+            List<KeyValue> row2results = regionServer.get(regionId, "row2".getBytes());
+            assertTrue(row2results == null || row2results.isEmpty());
         }
 
         @Test
@@ -337,9 +338,10 @@ class RegionServerServiceImplTest {
                 assertEquals(2, response.getTotalApplied());
 
                 // Verify data
-                KeyValue r1 = regionServer.get(regionId, "row1".getBytes());
-                assertNotNull(r1);
-                assertEquals("Alice", new String(r1.getValue()));
+                List<KeyValue> r1list = regionServer.get(regionId, "row1".getBytes());
+                assertNotNull(r1list);
+                assertFalse(r1list.isEmpty());
+                assertEquals("Alice", new String(r1list.get(0).getValue()));
             } catch (Exception e) {
                 fail("Snapshot streaming failed: " + e.getMessage());
             }

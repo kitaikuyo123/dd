@@ -48,6 +48,9 @@ public class FailoverCoordinator {
     // 正在进行的故障转移：regionId -> Future
     private final Map<String, Future<?>> ongoingFailovers = new ConcurrentHashMap<>();
 
+    // Sentinel value used during the atomic check-and-reserve window in triggerFailover
+    private static final Future<?> FAILOVER_SENTINEL = new CompletableFuture<>();
+
     // ZooKeeper 客户端
     private com.minisql.zookeeper.ZkClient zkClient;
     private MonitoringService monitoringService;
@@ -115,7 +118,7 @@ public class FailoverCoordinator {
                                ReplicaMonitor replicaMonitor,
                                ReplicaLifecycleManager lifecycleManager) {
         this(clusterManager, metadataManager, replicaMonitor, lifecycleManager,
-            new GrpcRegionServerCommandClient(clusterManager), 3, 30000, 300000, 10000, 60000);
+            new GrpcRegionServerCommandClient(clusterManager), 3, 30000, 300000, 10000, 60000, 3);
     }
 
     public FailoverCoordinator(ClusterManager clusterManager,
@@ -128,6 +131,22 @@ public class FailoverCoordinator {
                                long maxFailoverCooldownMs,
                                long failoverTimeoutMs,
                                long emergencyFailoverThresholdMs) {
+        this(clusterManager, metadataManager, replicaMonitor, lifecycleManager,
+            commandClient, maxFailoverRetries, baseFailoverCooldownMs,
+            maxFailoverCooldownMs, failoverTimeoutMs, emergencyFailoverThresholdMs, 3);
+    }
+
+    public FailoverCoordinator(ClusterManager clusterManager,
+                               MetadataManager metadataManager,
+                               ReplicaMonitor replicaMonitor,
+                               ReplicaLifecycleManager lifecycleManager,
+                               RegionServerCommandClient commandClient,
+                               int maxFailoverRetries,
+                               long baseFailoverCooldownMs,
+                               long maxFailoverCooldownMs,
+                               long failoverTimeoutMs,
+                               long emergencyFailoverThresholdMs,
+                               int threadPoolSize) {
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.replicaMonitor = replicaMonitor;
@@ -138,7 +157,8 @@ public class FailoverCoordinator {
         this.maxFailoverCooldownMs = maxFailoverCooldownMs;
         this.failoverTimeoutMs = failoverTimeoutMs;
 
-        this.executor = Executors.newFixedThreadPool(3, r -> {
+        int poolSize = Math.max(1, threadPoolSize);
+        this.executor = Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r, "Failover-Worker");
             t.setDaemon(true);
             return t;
@@ -205,12 +225,6 @@ public class FailoverCoordinator {
             return;
         }
 
-        // 检查是否已有正在进行的故障转移
-        if (ongoingFailovers.containsKey(regionId)) {
-            logger.warn("Failover already in progress for region: {}", regionId);
-            return;
-        }
-
         // 检查故障转移次数是否超过限制
         if (state.failoverCount >= maxFailoverRetries && !emergency) {
             logger.error("Max failover retries ({}) reached for region: {}. Manual intervention required.",
@@ -218,7 +232,17 @@ public class FailoverCoordinator {
             return;
         }
 
-        // 提交故障转移任务
+        // Record failover NOW to set cooldown before submitting to executor.
+        // This prevents a race where the executor task hasn't called recordFailover
+        // yet by the time the next triggerFailover checks isInCooldown.
+        state.recordFailover(baseFailoverCooldownMs, maxFailoverCooldownMs);
+
+        // Atomically check-and-reserve to prevent concurrent submissions
+        if (ongoingFailovers.putIfAbsent(regionId, FAILOVER_SENTINEL) != null) {
+            logger.warn("Failover already in progress for region: {}", regionId);
+            return;
+        }
+
         Future<?> future = executor.submit(() -> {
             try {
                 executeFailover(regionId);
@@ -227,7 +251,9 @@ public class FailoverCoordinator {
             }
         });
 
+        // Replace sentinel with real future
         ongoingFailovers.put(regionId, future);
+
         logger.info("Failover task submitted for region: {}", regionId);
     }
 
@@ -299,11 +325,7 @@ public class FailoverCoordinator {
             // 5. 更新 ZooKeeper
             updateZooKeeper(regionId, newPrimary.getServerId());
 
-            // 6. 记录故障转移历史（应用指数退避）
-            FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
-            state.recordFailover(baseFailoverCooldownMs, maxFailoverCooldownMs);
-
-            // 7. 通知相关组件
+            // 6. 通知相关组件
             notifyFailoverComplete(regionId, newPrimary);
 
             logger.info("Failover completed for region: {} new primary: {} (took {}ms)",
@@ -315,10 +337,6 @@ public class FailoverCoordinator {
             logger.error("Failover failed for region: {}: {}", regionId, e.getMessage(), e);
             recordEvent("FAILOVER_TRIGGERED", "ERROR", regionId, null, null, null,
                 "Failover failed", e.getMessage());
-
-            // 记录失败的故障转移
-            FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
-            state.recordFailover(baseFailoverCooldownMs, maxFailoverCooldownMs);
         } finally {
             releaseLock(lock);
         }

@@ -58,7 +58,7 @@ public class MiniSQLStatement implements Statement {
                 connection.reportSqlExecution(sql, true, System.currentTimeMillis() - start, null);
                 return true;
             }
-            connection.executeUpdate(sql);
+            updateCount = connection.executeUpdate(sql);
             connection.reportSqlExecution(sql, true, System.currentTimeMillis() - start, null);
             return false;
         } catch (SQLException e) {

@@ -4,6 +4,8 @@ import com.minisql.common.model.KeyValue;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
+
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -174,6 +176,13 @@ class ReplicationWALIntegrationTest {
             wal.markAsApplied("region-1", 100L, "host1:1234");
             wal.markAsApplied("region-1", 200L, "host2:5678");
             wal.close();
+
+            // RocksDB may leave the LOCK file on Windows after close().
+            // Since we know this is a safe reopen in the same JVM, clean it up.
+            File lockFile = new File(dbPath, "LOCK");
+            if (lockFile.exists()) {
+                lockFile.delete();
+            }
 
             // Reopen
             wal = new ReplicationWAL(dbPath);

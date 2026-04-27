@@ -3,6 +3,8 @@ package com.minisql.sql.execution.operators;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.QueryPlan;
 import com.minisql.sql.execution.Row;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -17,6 +19,8 @@ import java.util.Objects;
  */
 public class JoinOperator extends Operator {
 
+    private static final Logger log = LoggerFactory.getLogger(JoinOperator.class);
+
     private final Operator left;
     private final Operator right;
     private final JoinCondition condition;
@@ -26,17 +30,27 @@ public class JoinOperator extends Operator {
     private JoinStrategy strategy;
     private Row nextRow;
 
+    // Max rows for hash join build side before falling back to nested loop join
+    private final int hashJoinMaxRows;
+
     public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
                         JoinCondition condition) {
-        this(left, right, joinType, condition, JoinAlgorithm.HASH);
+        this(left, right, joinType, condition, JoinAlgorithm.HASH, 100_000);
     }
 
     public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
                         JoinCondition condition, JoinAlgorithm algorithm) {
+        this(left, right, joinType, condition, algorithm, 100_000);
+    }
+
+    public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
+                        JoinCondition condition, JoinAlgorithm algorithm,
+                        int hashJoinMaxRows) {
         this.left = left;
         this.right = right;
         this.condition = condition;
         this.algorithm = algorithm;
+        this.hashJoinMaxRows = Math.max(1000, hashJoinMaxRows);
     }
 
     @Override
@@ -44,7 +58,12 @@ public class JoinOperator extends Operator {
         left.open();
         right.open();
         opened = true;
-        strategy = algorithm == JoinAlgorithm.HASH ? new HashJoinStrategy() : new NestedLoopJoinStrategy();
+        if (algorithm == JoinAlgorithm.HASH && condition != null
+            && condition.getOperator() == JoinOperatorType.EQUALS) {
+            strategy = new HashJoinStrategy();
+        } else {
+            strategy = new NestedLoopJoinStrategy();
+        }
         strategy.open();
         prefetch();
     }
@@ -160,6 +179,8 @@ public class JoinOperator extends Operator {
         private Iterator<Row> matchingRows;
         private Row currentRightRow;
         private int rightKeyIndex;
+        private boolean fellBackToNestedLoop;
+        private NestedLoopJoinStrategy fallback;
 
         @Override
         public void open() throws IOException {
@@ -172,14 +193,35 @@ public class JoinOperator extends Operator {
 
             int leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
             rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn());
+
+            int rowCount = 0;
             while (left.hasMore()) {
                 Row row = left.nextRow();
+                if (rowCount >= hashJoinMaxRows) {
+                    // Hash table too large — fall back to nested loop join
+                    log.warn("Hash join build side exceeded {} rows (got {}), falling back to nested loop join. " +
+                        "Consider increasing hashJoinMaxRows or adding a more selective filter.",
+                        hashJoinMaxRows, rowCount);
+                    hashTable.clear();
+                    fellBackToNestedLoop = true;
+                    fallback = new NestedLoopJoinStrategy();
+                    // The left rows we already read are gone, but the full scan
+                    // means NestedLoopJoinStrategy will re-read from left.reset()
+                    // which should re-open the child operator chain
+                    left.reset();
+                    fallback.open();
+                    return;
+                }
                 hashTable.computeIfAbsent(new JoinKey(row.getValue(leftKeyIndex)), ignored -> new ArrayList<>()).add(row);
+                rowCount++;
             }
         }
 
         @Override
         public Row next() throws IOException {
+            if (fellBackToNestedLoop) {
+                return fallback.next();
+            }
             while (true) {
                 if (matchingRows != null && matchingRows.hasNext()) {
                     return combineRows(matchingRows.next(), currentRightRow);

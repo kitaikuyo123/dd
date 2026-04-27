@@ -12,10 +12,10 @@ import com.minisql.replication.ReplicationConfig;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.replication.ReplicationWAL;
 import com.minisql.replication.GrpcReplicationTransportClient;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.storage.StorageEngineFactory;
 import com.minisql.storage.StorageScanFilter;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import org.slf4j.Logger;
@@ -43,6 +43,8 @@ public class RegionServer {
     private final ReplicationWAL wal;
 
     private volatile boolean running = false;
+    private volatile boolean draining = false;
+    private static final long DRAIN_TIMEOUT_MS = 30_000L;
     private ManagedChannel masterChannel;
     private MasterServiceGrpc.MasterServiceBlockingStub masterStub;
 
@@ -100,9 +102,7 @@ public class RegionServer {
         String host = parts[0];
         int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16000;
 
-        masterChannel = ManagedChannelBuilder.forAddress(host, port)
-            .usePlaintext()
-            .build();
+        masterChannel = GrpcChannelFactory.newChannel(host, port);
         masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
         logger.info("Connected to Master successfully");
     }
@@ -163,12 +163,62 @@ public class RegionServer {
         logger.info("gRPC server started on port {}", serverId.getPort());
     }
 
+    /**
+     * Graceful shutdown: drain inflight requests, flush regions, then tear down
+     * components in reverse dependency order.
+     *
+     * <p>Callers (RegionServerMain) should stop the HeartbeatSender first, which
+     * causes the Master to detect this server going away via missed heartbeats
+     * (faster than waiting for the ZooKeeper ephemeral node to expire at ~30s).
+     */
     public void stop() throws Exception {
         running = false;
+        draining = true;
+        logger.info("RegionServer {} beginning graceful shutdown...", serverId);
 
+        // 1. Shutdown gRPC server gracefully — stop accepting new requests,
+        //    but allow inflight RPCs to complete within the drain timeout.
+        if (grpcServer != null) {
+            logger.info("Shutting down gRPC server (drain timeout: {}ms)...", DRAIN_TIMEOUT_MS);
+            grpcServer.shutdown();
+            try {
+                if (!grpcServer.awaitTermination(DRAIN_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    logger.warn("gRPC server did not drain in time, forcing shutdown");
+                    grpcServer.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                grpcServer.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+            logger.info("gRPC server stopped");
+        }
+
+        // 2. Flush all open regions to persist pending writes before closing
+        for (Region region : regionManager.getAllRegions()) {
+            try {
+                RegionStorage storage = regionManager.getRegionStorage(region.getRegionId());
+                if (storage != null) {
+                    storage.flush();
+                }
+            } catch (Exception e) {
+                logger.warn("Flush failed for region {}: {}", region.getRegionId(), e.getMessage());
+            }
+        }
+
+        // 3. Stop replication (stop accepting new write log entries)
         replicationCoordinator.stop();
         wal.close();
 
+        // 4. Close all regions
+        for (Region region : regionManager.getAllRegions()) {
+            try {
+                regionManager.closeRegion(region.getRegionId(), false);
+            } catch (Exception e) {
+                logger.warn("Close region {} failed: {}", region.getRegionId(), e.getMessage());
+            }
+        }
+
+        // 5. Close Master channel last
         if (masterChannel != null && !masterChannel.isShutdown()) {
             masterChannel.shutdown();
             try {
@@ -181,15 +231,11 @@ public class RegionServer {
             }
         }
 
-        if (grpcServer != null) {
-            grpcServer.shutdown();
-        }
+        logger.info("RegionServer {} stopped gracefully", serverId);
+    }
 
-        for (Region region : regionManager.getAllRegions()) {
-            regionManager.closeRegion(region.getRegionId(), false);
-        }
-
-        logger.info("RegionServer stopped");
+    public boolean isDraining() {
+        return draining;
     }
 
     public void put(String regionId, List<KeyValue> keyValues) throws Exception {
@@ -217,7 +263,7 @@ public class RegionServer {
         logger.debug("Put completed successfully for region: {}", regionId);
     }
 
-    public KeyValue get(String regionId, byte[] rowKey) {
+    public List<KeyValue> get(String regionId, byte[] rowKey) {
         checkRegionOpen(regionId);
 
         RegionStorage storage = regionManager.getRegionStorage(regionId);

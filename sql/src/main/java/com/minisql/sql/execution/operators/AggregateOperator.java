@@ -4,6 +4,8 @@ import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.Row;
 import com.minisql.sql.execution.QueryPlan;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
@@ -14,9 +16,14 @@ import java.util.*;
  */
 public class AggregateOperator extends Operator {
 
+    private static final Logger log = LoggerFactory.getLogger(AggregateOperator.class);
+
     private final Operator child;
     private final List<QueryPlan.AggregateExpr> aggregates;
     private final List<String> groupByColumns;
+
+    // 最大分组数警告阈值（超过此值记录 WARN，提示可能 OOM）
+    private final int maxGroupWarningThreshold;
 
     // 聚合状态
     private Map<GroupKey, AggregateState[]> groupStates;
@@ -30,9 +37,15 @@ public class AggregateOperator extends Operator {
 
     public AggregateOperator(Operator child, List<QueryPlan.AggregateExpr> aggregates,
                              List<String> groupByColumns) {
+        this(child, aggregates, groupByColumns, 1_000_000);
+    }
+
+    public AggregateOperator(Operator child, List<QueryPlan.AggregateExpr> aggregates,
+                             List<String> groupByColumns, int maxGroupWarningThreshold) {
         this.child = child;
         this.aggregates = aggregates;
         this.groupByColumns = groupByColumns != null ? groupByColumns : new ArrayList<>();
+        this.maxGroupWarningThreshold = Math.max(1000, maxGroupWarningThreshold);
     }
 
     @Override
@@ -110,6 +123,7 @@ public class AggregateOperator extends Operator {
      */
     private void computeAggregates() throws IOException {
         // 遍历所有输入数据
+        boolean warningLogged = false;
         while (child.hasMore()) {
             Row row = child.nextRow();
 
@@ -132,6 +146,14 @@ public class AggregateOperator extends Operator {
             for (int i = 0; i < aggregates.size(); i++) {
                 Object value = columnIndices[i] >= 0 ? row.getValue(columnIndices[i]) : null;
                 states[i].accumulate(value);
+            }
+
+            // 检查分组数是否超过警告阈值
+            if (!warningLogged && groupStates.size() > maxGroupWarningThreshold) {
+                log.warn("Aggregate group count ({}) exceeds warning threshold ({}). " +
+                    "High-cardinality GROUP BY may cause OOM. Consider using more selective filters.",
+                    groupStates.size(), maxGroupWarningThreshold);
+                warningLogged = true;
             }
         }
 

@@ -25,6 +25,7 @@ import org.apache.curator.test.TestingServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -67,6 +68,9 @@ public class MasterMain {
     private HotSpotCoordinator.HotSpotSettings hotSpotSettings;
     private boolean loadBalanceEnabled = true;
     private long loadBalanceIntervalMs = TimeUnit.MINUTES.toMillis(5);
+    private String configFilePath;
+    private long configLastModified;
+    private volatile boolean configReloadRunning;
 
     public static void main(String[] args) {
         MasterMain master = new MasterMain();
@@ -106,22 +110,29 @@ public class MasterMain {
         logger.info("========================================");
 
         addShutdownHook();
+        startConfigReloader();
         awaitTermination();
     }
 
     private Properties loadConfig(String[] args) {
         Properties config = new Properties();
-        String configFile = args.length > 0 ? args[0] : "master.properties";
+        this.configFilePath = args.length > 0 ? args[0] : "master.properties";
 
-        try (InputStream is = getConfigInputStream(configFile)) {
+        try (InputStream is = getConfigInputStream(configFilePath)) {
             if (is != null) {
                 config.load(is);
-                logger.info("Loaded config from: {}", configFile);
+                logger.info("Loaded config from: {}", configFilePath);
             } else {
-                logger.info("Config file not found: {}, using defaults", configFile);
+                logger.info("Config file not found: {}, using defaults", configFilePath);
             }
         } catch (IOException e) {
             logger.warn("Failed to load config: {}, using defaults", e.getMessage());
+        }
+
+        // Track file modification time for hot-reload detection
+        File f = new File(configFilePath);
+        if (f.isFile()) {
+            configLastModified = f.lastModified();
         }
 
         String zkConnect = System.getenv("MINISQL_ZK_CONNECT");
@@ -230,7 +241,11 @@ public class MasterMain {
         metadataManager = new MetadataManager(zkClient);
 
         int replicationFactor = Integer.parseInt(config.getProperty("replication.factor", "3"));
-        replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(replicationFactor).build());
+        int replicationThreadPool = parseIntProperty(config, "replication.thread.pool.size", 0);
+        ReplicationConfig replicationCfg = ReplicationConfig.builder(replicationFactor)
+            .replicationThreadPoolSize(replicationThreadPool)
+            .build();
+        replicationCoordinator = new ReplicationCoordinator(replicationCfg);
         replicationCoordinator.setZkClient(zkClient);
         replicationCoordinator.start();
         rebuildReplicationGroups();
@@ -239,12 +254,16 @@ public class MasterMain {
         replicaLifecycleManager = new ReplicaLifecycleManager();
         rebuildReplicaRuntimeState();
 
-        failoverCoordinator = new FailoverCoordinator(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
+        int failoverThreadPool = parseIntProperty(config, "failover.thread.pool.size", 3);
+        int recoveryThreadPool = parseIntProperty(config, "recovery.thread.pool.size", 2);
+        failoverCoordinator = new FailoverCoordinator(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager,
+            new GrpcRegionServerCommandClient(clusterManager), 3, 30000, 300000, 10000, 60000, failoverThreadPool);
         failoverCoordinator.setZkClient(zkClient);
         failoverCoordinator.setReplicationCoordinator(replicationCoordinator);
 
         recoveryCoordinator = new RecoveryCoordinator(
-            clusterManager, metadataManager, replicaMonitor, replicationCoordinator, replicaLifecycleManager);
+            clusterManager, metadataManager, replicaMonitor, replicationCoordinator, replicaLifecycleManager,
+            new GrpcRegionServerCommandClient(clusterManager), recoveryThreadPool);
         recoveryCoordinator.start();
 
         monitoringService = new MonitoringService(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
@@ -253,7 +272,8 @@ public class MasterMain {
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
 
-        dataRepairCoordinator = new DataRepairCoordinator(clusterManager, metadataManager);
+        int repairThreadPool = parseIntProperty(config, "repair.thread.pool.size", 4);
+        dataRepairCoordinator = new DataRepairCoordinator(clusterManager, metadataManager, repairThreadPool);
         logger.info("Components initialized (replication factor: {})", replicationFactor);
     }
 
@@ -428,7 +448,13 @@ public class MasterMain {
         }
         int colon = serverPart.lastIndexOf(':');
         if (colon <= 0 || colon >= serverPart.length() - 1) {
-            logger.warn("Ignoring invalid RegionServer path from ZooKeeper: {}", path);
+            // CuratorCache fires events for the parent path (e.g. /minisql/regionservers)
+            // on startup — that's expected, not a warning-worthy condition.
+            if (separator >= 0 && !serverPart.contains(":")) {
+                logger.debug("Skipping non-server ZK path: {}", path);
+            } else {
+                logger.warn("Ignoring invalid RegionServer path from ZooKeeper: {}", path);
+            }
             return null;
         }
         try {
@@ -508,7 +534,101 @@ public class MasterMain {
         }
     }
 
+    /**
+     * Start a background thread that periodically checks the config file
+     * for changes and hot-reloads tunable parameters without a restart.
+     */
+    private void startConfigReloader() {
+        configReloadRunning = true;
+        Thread reloader = new Thread(() -> {
+            logger.info("Config reloader started (poll interval: 30s, file: {})", configFilePath);
+            while (configReloadRunning) {
+                try {
+                    Thread.sleep(30_000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                try {
+                    checkAndReloadConfig();
+                } catch (Exception e) {
+                    logger.warn("Config reload check failed: {}", e.getMessage());
+                }
+            }
+            logger.info("Config reloader stopped");
+        }, "ConfigReloader");
+        reloader.setDaemon(true);
+        reloader.start();
+    }
+
+    private void checkAndReloadConfig() {
+        File f = new File(configFilePath);
+        if (!f.isFile() || f.lastModified() <= configLastModified) {
+            return;
+        }
+        logger.info("Config file {} changed (lastModified {} -> {}), reloading...",
+            configFilePath, configLastModified, f.lastModified());
+
+        Properties newConfig = new Properties();
+        try (InputStream is = new FileInputStream(f)) {
+            newConfig.load(is);
+        } catch (IOException e) {
+            logger.warn("Failed to read updated config file {}: {}", configFilePath, e.getMessage());
+            return;
+        }
+
+        // Hot-reload load balancer settings
+        if (loadBalancer != null) {
+            LoadBalancer.Strategy strategy = LoadBalancer.Strategy.fromString(
+                newConfig.getProperty("load.balance.strategy", "load_based"));
+            double threshold = parseDoubleProperty(newConfig, "load.balance.threshold", loadBalancer.getBalanceThreshold());
+            loadBalancer.setStrategy(strategy);
+            loadBalancer.setBalanceThreshold(threshold);
+            loadBalanceEnabled = parseBooleanProperty(newConfig, "load.balance.enabled", loadBalanceEnabled);
+            loadBalanceIntervalMs = Math.max(1_000L,
+                parseLongProperty(newConfig, "load.balance.interval.ms", loadBalanceIntervalMs));
+            logger.info("Reloaded load-balancer: strategy={} threshold={} enabled={} interval={}ms",
+                strategy, threshold, loadBalanceEnabled, loadBalanceIntervalMs);
+            if (serviceImpl != null) {
+                serviceImpl.setLoadBalanceConfig(loadBalanceEnabled, loadBalanceIntervalMs);
+            }
+        }
+
+        // Hot-reload hotspot settings
+        long readThreshold = parseLongProperty(newConfig, "hotspot.read.threshold.per.interval",
+            hotSpotSettings != null ? hotSpotSettings.getReadThresholdPerInterval() : 200L);
+        long writeThreshold = parseLongProperty(newConfig, "hotspot.write.threshold.per.interval",
+            hotSpotSettings != null ? hotSpotSettings.getWriteThresholdPerInterval() : 100L);
+        long hotSpotCooldown = parseLongProperty(newConfig, "hotspot.cooldown.ms",
+            hotSpotSettings != null ? hotSpotSettings.getCooldownMs() : TimeUnit.MINUTES.toMillis(5));
+        hotSpotDetectorIntervalMs = parseLongProperty(newConfig, "hotspot.detector.interval.ms", hotSpotDetectorIntervalMs);
+        if (hotSpotSettings != null) {
+            hotSpotSettings = new HotSpotCoordinator.HotSpotSettings(
+                readThreshold, writeThreshold,
+                hotSpotSettings.getTargetReadReplicaCount(),
+                hotSpotCooldown);
+            if (serviceImpl != null) {
+                serviceImpl.setHotSpotSettings(hotSpotSettings);
+                serviceImpl.setHotSpotDetectorIntervalMs(hotSpotDetectorIntervalMs);
+            }
+            logger.info("Reloaded hotspot: readThresh={} writeThresh={} cooldown={}ms interval={}ms",
+                readThreshold, writeThreshold, hotSpotCooldown, hotSpotDetectorIntervalMs);
+        }
+
+        // Hot-reload monitoring target QPS
+        double targetQps = parseDoubleProperty(newConfig, "load.balance.request.max.target.qps",
+            newConfig.getProperty("load.balance.request.max.target.qps") != null ? 5000.0d : 5000.0d);
+        if (monitoringService != null) {
+            monitoringService.setLoadBalanceRequestTargetQps(targetQps);
+        }
+
+        this.config = newConfig;
+        configLastModified = f.lastModified();
+        logger.info("Config reloaded successfully from {}", configFilePath);
+    }
+
     public void stop() throws Exception {
+        configReloadRunning = false;
         if (dataRepairCoordinator != null) {
             dataRepairCoordinator.stop();
         }

@@ -16,6 +16,15 @@ public interface ReplicationTransportClient extends AutoCloseable {
 
     List<KeyValue> fetchSnapshot(ServerId primary, String regionId, long timeoutMs);
 
+    /**
+     * Stream snapshot directly from primary to replica without materializing the
+     * entire dataset in the coordinator's memory.
+     *
+     * @return true if the full snapshot was streamed successfully
+     */
+    boolean streamSnapshotDirect(ServerId primary, ServerId replica, String regionId,
+                                  int batchSize, long timeoutMs, long finalSequenceId);
+
     boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId);
 
     boolean sendSnapshotStreaming(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId);

@@ -61,9 +61,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private volatile boolean leader = true;
     private volatile ZkClient zkClient;
-    private final long hotSpotDetectorIntervalMs;
-    private final boolean loadBalanceEnabled;
-    private final long loadBalanceIntervalMs;
+    private volatile long hotSpotDetectorIntervalMs;
+    private volatile boolean loadBalanceEnabled;
+    private volatile long loadBalanceIntervalMs;
+    private volatile HotSpotCoordinator.HotSpotSettings hotSpotSettings;
 
     // Master 状态
     private final String clusterId;
@@ -160,6 +161,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         if (hotSpotSettings != null) {
             this.hotSpotCoordinator.configure(hotSpotSettings);
         }
+        this.hotSpotSettings = hotSpotSettings;
         this.hotSpotDetectorIntervalMs = Math.max(1_000L, hotSpotDetectorIntervalMs);
         this.loadBalanceEnabled = loadBalanceEnabled;
         this.loadBalanceIntervalMs = Math.max(1_000L, loadBalanceIntervalMs);
@@ -281,6 +283,22 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     public void setLeader(boolean leader) {
         this.leader = leader;
+    }
+
+    public void setLoadBalanceConfig(boolean enabled, long intervalMs) {
+        this.loadBalanceEnabled = enabled;
+        this.loadBalanceIntervalMs = Math.max(1_000L, intervalMs);
+    }
+
+    public void setHotSpotSettings(HotSpotCoordinator.HotSpotSettings settings) {
+        this.hotSpotSettings = settings;
+        if (hotSpotCoordinator != null && settings != null) {
+            hotSpotCoordinator.configure(settings);
+        }
+    }
+
+    public void setHotSpotDetectorIntervalMs(long intervalMs) {
+        this.hotSpotDetectorIntervalMs = Math.max(1_000L, intervalMs);
     }
 
     public void setZkClient(ZkClient zkClient) {
@@ -913,6 +931,33 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                             replicaServer, region.getRegionId());
                         recoveryCoordinator.bootstrapReplicaSync(region.getRegionId(), replicaServer);
                     }
+
+                    // Wait for all secondary replicas to reach SECONDARY_READY before
+                    // returning success, so immediate INSERTs don't fail replication.
+                    long readyDeadline = System.currentTimeMillis() + 30_000L;
+                    for (int i = 1; i < selectedServers.size(); i++) {
+                        ServerId replicaServer = selectedServers.get(i);
+                        boolean ready = false;
+                        while (System.currentTimeMillis() < readyDeadline) {
+                            ReplicaLifecycleManager.ReplicaLifecycleStatus status =
+                                lifecycleManager.getStatus(region.getRegionId(), replicaServer);
+                            if (status != null && status.getState() == ReplicaLifecycleManager.ReplicaLifecycleState.SECONDARY_READY) {
+                                ready = true;
+                                break;
+                            }
+                            try {
+                                Thread.sleep(200);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                        if (!ready) {
+                            logger.warn("[CREATE TABLE] Replica {} for region {} did not reach SECONDARY_READY within timeout",
+                                replicaServer, region.getRegionId());
+                        }
+                    }
+
                     if (selectedServers.size() == 1) {
                         logger.warn("[CREATE TABLE] WARNING: Region {} initialized with primary only; no secondary replica available at create time",
                             region.getRegionId());

@@ -2,10 +2,10 @@ package com.minisql.client;
 
 import com.minisql.common.Constants;
 import com.minisql.common.proto.MasterServiceGrpc;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -165,9 +165,7 @@ public class MasterConnectionManager {
         String host = parts[0];
         int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
 
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port)
-            .usePlaintext()
-            .build();
+        ManagedChannel channel = GrpcChannelFactory.newChannel(host, port);
 
         MasterServiceGrpc.MasterServiceBlockingStub stub = MasterServiceGrpc.newBlockingStub(channel)
             .withDeadlineAfter(connectionTimeoutMs, TimeUnit.MILLISECONDS);

@@ -5,10 +5,10 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.CommonProto;
 import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.zookeeper.ZkManager;
 import com.minisql.zookeeper.ZkPayloads;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -182,9 +182,7 @@ public class HeartbeatSender {
             String host = parts[0];
             int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
 
-            masterChannel = ManagedChannelBuilder.forAddress(host, port)
-                .usePlaintext()
-                .build();
+            masterChannel = GrpcChannelFactory.newChannel(host, port);
             masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
             logger.info("HeartbeatSender connected to Master: {}", address);
         } catch (Exception e) {

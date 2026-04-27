@@ -35,6 +35,9 @@ public class ReplicationConfig {
     // 自动追赶滞后阈值（条目数）
     private final int catchUpLagThreshold;
 
+    // 复制线程池大小（0 表示使用 CPU 核数自适应）
+    private final int replicationThreadPoolSize;
+
     private ReplicationConfig(Builder builder) {
         this.replicationFactor = builder.replicationFactor;
         this.replicationTimeoutMs = builder.replicationTimeoutMs;
@@ -46,6 +49,7 @@ public class ReplicationConfig {
         this.quorumAckEnabled = builder.quorumAckEnabled;
         this.maxReplicationBatchSize = builder.maxReplicationBatchSize;
         this.catchUpLagThreshold = builder.catchUpLagThreshold;
+        this.replicationThreadPoolSize = builder.replicationThreadPoolSize;
     }
 
     public int getReplicationFactor() { return replicationFactor; }
@@ -58,6 +62,7 @@ public class ReplicationConfig {
     public boolean isQuorumAckEnabled() { return quorumAckEnabled; }
     public int getMaxReplicationBatchSize() { return maxReplicationBatchSize; }
     public int getCatchUpLagThreshold() { return catchUpLagThreshold; }
+    public int getReplicationThreadPoolSize() { return replicationThreadPoolSize; }
 
     /**
      * 计算需要的确认数
@@ -87,6 +92,7 @@ public class ReplicationConfig {
         private boolean quorumAckEnabled = true;
         private int maxReplicationBatchSize = 64;
         private int catchUpLagThreshold = 100;
+        private int replicationThreadPoolSize = 0;
 
         public Builder(int replicationFactor) {
             this.replicationFactor = replicationFactor;
@@ -134,6 +140,11 @@ public class ReplicationConfig {
 
         public Builder catchUpLagThreshold(int threshold) {
             this.catchUpLagThreshold = threshold;
+            return this;
+        }
+
+        public Builder replicationThreadPoolSize(int size) {
+            this.replicationThreadPoolSize = size;
             return this;
         }
 
