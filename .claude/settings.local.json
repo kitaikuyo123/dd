@@ -53,7 +53,9 @@
       "Bash(grep -v \"\\\\[INFO\\\\]\\\\|WARNING\\\\|SLF4J\\\\|Detecting\\\\|Building\\\\|\\\\.jar\\\\|exec:java\\\\|----\\\\|Scanning\\\\|^$\\\\|from pom\\\\|os\\\\.\\\\|classifier\\\\|MiniSQL\\\\|jdbc:mini\\\\|输入\\\\|连接\")",
       "Bash(grep -v \"\\\\[INFO\\\\]\\\\|WARNING\\\\|SLF4J\\\\|Detecting\\\\|Building\\\\|\\\\.jar\\\\|exec:java\\\\|----\\\\|Scanning\\\\|^$\\\\|from pom\\\\|os\\\\.\\\\|classifier\\\\|MiniSQL\\\\|jdbc:mini\\\\|输入\\\\|连接\\\\|help\\\\|exit\\\\|Goodbye\")",
       "Bash(grep -v \"\\\\[INFO\\\\]\\\\|WARNING\\\\|SLF4J\\\\|Detecting\\\\|Building\\\\|\\\\.jar\\\\|exec\\\\|----\\\\|Scanning\\\\|^$\\\\|from pom\\\\|os\\\\.\\\\|classifier\\\\|MiniSQL\\\\|jdbc:mini\\\\|输入\\\\|连接\\\\|help\\\\|exit\\\\|Goodbye\")",
-      "Bash(cat zookeeper/target/surefire-reports/*.txt)"
+      "Bash(cat zookeeper/target/surefire-reports/*.txt)",
+      "Bash(grep -rn \"Thread\\\\.sleep\" --include=\"*Test.java\" */src/test)",
+      "Bash(ls:*)"
     ]
   }
 }

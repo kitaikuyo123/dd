@@ -176,6 +176,13 @@ public class RegionMergeCoordinator {
         cleanupRecentSplits();
     }
 
+    /**
+     * Trigger a synchronous merge check (for tests; production uses the scheduler).
+     */
+    public void triggerCheckNow() {
+        checkAndScheduleMerges();
+    }
+
     // --- Internal ---
 
     private void cleanupRecentSplits() {

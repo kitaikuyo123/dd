@@ -148,11 +148,8 @@ class RegionMergeCoordinatorTest {
         coordinator.recordRegionSplit("orders_r1");
         coordinator.recordRegionSplit("orders_r2");
 
-        // Start the coordinator which runs checkAndScheduleMerges periodically
-        // We verify indirectly that no merge happens: metadata should still have both regions
-        coordinator.start();
-        Thread.sleep(1000); // allow one check cycle
-        coordinator.stop();
+        // Trigger merge check synchronously
+        coordinator.triggerCheckNow();
 
         // Both regions should still exist (not merged)
         assertNotNull(metadataManager.getRegion("orders_r1"));
@@ -230,19 +227,13 @@ class RegionMergeCoordinatorTest {
         rightLoad.setMemStoreSize(0);
         clusterManager.updateRegionLoad(server, "orders_r2", rightLoad);
 
-        // Record splits but with a short cooldown that will expire
+        // Record splits but with a very short cooldown that's already expired
         coordinator.recordRegionSplit("orders_r1");
         coordinator.recordRegionSplit("orders_r2");
 
-        // Wait for cooldown to expire
-        Thread.sleep(300);
-
-        // Now start the coordinator; the check cycle should find these as merge candidates
-        // The actual merge will fail because there's no gRPC server, but the key behavior
-        // we're validating is that the regions were considered (no crash / exception).
-        coordinator.start();
-        Thread.sleep(2000); // allow the periodic check to run
-        coordinator.stop();
+        // Trigger merge check synchronously — cooldown expired, so regions should be considered.
+        // The actual merge will fail because there's no gRPC server, but no exception should propagate.
+        assertDoesNotThrow(() -> coordinator.triggerCheckNow());
 
         // The merge would have been attempted (and failed due to no gRPC server),
         // but the coordinator should not have thrown any unhandled exceptions.
@@ -292,9 +283,7 @@ class RegionMergeCoordinatorTest {
         rightLoad.setMemStoreSize(0);
         clusterManager.updateRegionLoad(server, "orders_r2", rightLoad);
 
-        coordinator.start();
-        Thread.sleep(2000);
-        coordinator.stop();
+        coordinator.triggerCheckNow();
 
         // Both regions should still exist because they are not adjacent
         assertNotNull(metadataManager.getRegion("orders_r1"));
@@ -342,9 +331,7 @@ class RegionMergeCoordinatorTest {
         rightLoad.setMemStoreSize(0);
         clusterManager.updateRegionLoad(server2, "orders_r2", rightLoad);
 
-        coordinator.start();
-        Thread.sleep(2000);
-        coordinator.stop();
+        coordinator.triggerCheckNow();
 
         // Both regions should still exist because they are on different servers
         assertNotNull(metadataManager.getRegion("orders_r1"));
@@ -392,9 +379,7 @@ class RegionMergeCoordinatorTest {
         rightLoad.setMemStoreSize(0);
         clusterManager.updateRegionLoad(server, "orders_r2", rightLoad);
 
-        coordinator.start();
-        Thread.sleep(2000);
-        coordinator.stop();
+        coordinator.triggerCheckNow();
 
         // Both regions should still exist because combined size exceeds maxMergeSize
         assertNotNull(metadataManager.getRegion("orders_r1"));
@@ -424,12 +409,9 @@ class RegionMergeCoordinatorTest {
     @Test
     @DisplayName("expired split records are cleaned up on recordRegionSplit")
     void expiredSplitRecordsCleanedUp() throws Exception {
-        // Use a very short cooldown so entries expire quickly
-        coordinator.setMergeCooldownMs(100);
+        // Use cooldown of 0 so entries are already "expired"
+        coordinator.setMergeCooldownMs(0);
         coordinator.recordRegionSplit("temp_r1");
-
-        // Wait for the cooldown to expire
-        Thread.sleep(200);
 
         // Recording another split should trigger cleanup of expired entries
         assertDoesNotThrow(() -> coordinator.recordRegionSplit("temp_r2"));

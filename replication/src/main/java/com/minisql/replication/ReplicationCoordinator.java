@@ -473,6 +473,15 @@ public class ReplicationCoordinator {
         }
     }
 
+    /**
+     * Trigger a synchronous health check (for tests; production uses the scheduler).
+     * Note: catch-up tasks are submitted asynchronously; callers should poll
+     * replica progress after invoking this.
+     */
+    public void triggerHealthCheckNow() {
+        performHealthCheck();
+    }
+
     private void performHealthCheck() {
         for (Map.Entry<String, ReplicaGroup> entry : registry.getAllReplicaGroups().entrySet()) {
             String regionId = entry.getKey();

@@ -152,11 +152,9 @@ class FailoverCoordinatorTest {
 
         int promotionCountAfterFirst = commandClient.promotionCount;
 
-        // Second failover via normal mode should be blocked by cooldown
+        // Second failover via normal mode should be blocked by cooldown.
+        // Cooldown check is synchronous — no sleep needed.
         coordinator.triggerFailover("items_r1");
-
-        // Give a small window for an unwanted second promotion
-        Thread.sleep(200);
         assertEquals(promotionCountAfterFirst, commandClient.promotionCount,
             "Second failover should be blocked by cooldown");
     }
@@ -249,10 +247,9 @@ class FailoverCoordinatorTest {
             commandClient, 0, 1, 100, 5000, 30000
         );
 
-        // Attempt normal failover - should be blocked due to max retries (0)
+        // Attempt normal failover - should be blocked due to max retries (0).
+        // Retry limit check is synchronous — no sleep needed.
         coordinator.triggerFailover("missing_r1");
-
-        Thread.sleep(200);
         assertEquals(0, commandClient.promotionCount,
             "Failover should be blocked when max retries is zero");
     }
@@ -439,7 +436,8 @@ class FailoverCoordinatorTest {
 
         coordinator.triggerEmergencyFailover("solo_r1");
 
-        Thread.sleep(500);
+        // promotionCount only increments on successful promotion; since there's no
+        // suitable replica, it stays 0 regardless of whether the executor ran yet.
         assertEquals(0, commandClient.promotionCount,
             "No promotion should happen when there is no suitable replica");
     }

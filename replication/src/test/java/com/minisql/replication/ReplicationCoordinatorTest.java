@@ -122,8 +122,8 @@ class ReplicationCoordinatorTest {
             ServerId secondary2 = new ServerId("secondary-2", 16022);
             coordinator.createReplicaGroup(region, List.of(primary, secondary1, secondary2));
 
-            // Wait well past the stale threshold (healthCheckIntervalMs * 3 = 300ms)
-            Thread.sleep(600);
+            // Trigger health check synchronously
+            coordinator.triggerHealthCheckNow();
 
             // Primary should still be the same — no failover triggered
             assertEquals(primary, coordinator.getReplicaGroup(region.getRegionId()).getPrimary());
@@ -156,14 +156,17 @@ class ReplicationCoordinatorTest {
             long initialTime = coordinator.getReplicaGroup(region.getRegionId())
                 .getReplicaState(primary).getLastUpdateTime();
 
-            // Wait for several health check cycles
-            Thread.sleep(500);
+            // Wait 1ms to ensure the health check's timestamp is strictly later
+            Thread.sleep(1);
+
+            // Trigger health check synchronously to refresh lastUpdateTime
+            coordinator.triggerHealthCheckNow();
 
             // The primary's lastUpdateTime should have been refreshed by health checks
             long afterTime = coordinator.getReplicaGroup(region.getRegionId())
                 .getReplicaState(primary).getLastUpdateTime();
             assertTrue(afterTime > initialTime,
-                "Primary lastUpdateTime should be refreshed by health check heartbeat");
+                "Primary lastUpdateTime should be refreshed by health check heartbeat, initial=" + initialTime + " after=" + afterTime);
             assertEquals(primary, coordinator.getReplicaGroup(region.getRegionId()).getPrimary());
         } finally {
             coordinator.stop();
@@ -203,12 +206,18 @@ class ReplicationCoordinatorTest {
             coordinator.getReplicaGroup(region.getRegionId())
                 .updateReplicaState(secondary2, 3L, 0L);
 
-            // Wait for health check to trigger catch-up (lag = 10-3 = 7 > threshold 5)
-            Thread.sleep(600);
+            // Trigger health check to detect lag and start async catch-up
+            coordinator.triggerHealthCheckNow();
 
-            // secondary2 should have been caught up
-            long progress = coordinator.getReplicaGroup(region.getRegionId())
-                .getReplicaState(secondary2).getLastAppliedSequenceId();
+            // Poll until catch-up completes or timeout (async task runs quickly with FakeTransport)
+            long deadline = System.currentTimeMillis() + 3000;
+            long progress;
+            do {
+                progress = coordinator.getReplicaGroup(region.getRegionId())
+                    .getReplicaState(secondary2).getLastAppliedSequenceId();
+                if (progress >= 10) break;
+                Thread.sleep(10);
+            } while (System.currentTimeMillis() < deadline);
             assertTrue(progress >= 10,
                 "Secondary2 should have been caught up via health check, progress=" + progress);
         } finally {

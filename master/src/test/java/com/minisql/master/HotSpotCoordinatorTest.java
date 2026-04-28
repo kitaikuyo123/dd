@@ -194,7 +194,7 @@ class HotSpotCoordinatorTest {
         invokeHotSpotDetection(manager);
         assertTrue(manager.getCurrentHotSpots().containsKey(region.getRegionId()));
 
-        // Wait for cooldown to expire
+        // Cooldown is 50ms — wait for it to expire, then record more data to dilute
         Thread.sleep(100);
 
         // Load returns to normal (delta of 1 per interval, below threshold of 20)
@@ -447,7 +447,7 @@ class HotSpotCoordinatorTest {
             load.setReadRequests(readRequest);
             load.setWriteRequests(0L);
             manager.recordRegionLoad(regionId, null, load);
-            Thread.sleep(50);
+            Thread.sleep(30); // gap for per-second rate calculation
         }
     }
 
@@ -459,7 +459,7 @@ class HotSpotCoordinatorTest {
             load.setReadRequests(0L);
             load.setWriteRequests(writeRequest);
             manager.recordRegionLoad(regionId, null, load);
-            Thread.sleep(50);
+            Thread.sleep(30); // gap for per-second rate calculation
         }
     }
 
@@ -471,7 +471,7 @@ class HotSpotCoordinatorTest {
             load.setReadRequests(pair[0]);
             load.setWriteRequests(pair[1]);
             manager.recordRegionLoad(regionId, null, load);
-            Thread.sleep(50);
+            Thread.sleep(30); // gap for per-second rate calculation
         }
     }
 
