@@ -38,6 +38,7 @@
         <log4j2.version>2.20.0</log4j2.version>
         <junit.version>5.10.0</junit.version>
         <netty.version>4.1.100.Final</netty.version>
+        <jacoco.version>0.8.12</jacoco.version>
     </properties>
 
     <dependencyManagement>
@@ -166,6 +167,22 @@
                         <source>11</source>
                         <target>11</target>
                     </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>${jacoco.version}</version>
+                    <executions>
+                        <execution>
+                            <goals><goal>prepare-agent</goal></goals>
+                        </execution>
+                        <execution>
+                            <id>report</id>
+                            <phase>test</phase>
+                            <goals><goal>report</goal></goals>
+                        </execution>
+                    </executions>
                 </plugin>
 
                 <plugin>
