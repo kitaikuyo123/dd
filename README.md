@@ -157,8 +157,43 @@ Client (CLI / JDBC)
 
 ### 负载均衡与热点检测
 
-- `LoadBalancer` 基于 CPU/Mem/Disk/Region/Request 加权评分，自动跨节点迁移 Region
-- `HotSpotCoordinator` 检测读/写热点，自动为目标 Region 添加只读副本
+**综合负载评分**：`LoadBalancer` 基于 CPU、内存、磁盘、Region 数量、请求负载五个指标加权评分（权重可配置，自动归一化），自动跨节点迁移 Region。
+
+**EWMA 负载预测**：使用指数加权移动平均替代简单滑动窗口，通过趋势预测提前识别负载上升/下降趋势，而非仅依赖历史均值。
+
+**多因子 Region 选择**：迁移时综合考虑四个因子选择最优 Region——负载降低收益、迁移传输成本、写密集惩罚（二次方）、目标服务器适配度，替代简单的"大小/热度"评分。
+
+**迁移预算控制**：每轮最大并发迁移数可配置（默认 3），结合正在进行的迁移数量动态计算预算，防止惊群效应。
+
+**热点感知放置**：`HotSpotCoordinator` 检测读/写热点后，通过共享的 `HotSpotRegistry` 将热点信息同步给 `LoadBalancer`。放置 Region 时自动避开已托管同表热点 Region 的服务器，避免热点聚集。
+
+**相关配置项**（`master.properties`，均支持热加载）：
+
+```properties
+# 负载评分权重（相对值，自动归一化）
+load.balance.weight.cpu=25
+load.balance.weight.memory=25
+load.balance.weight.disk=20
+load.balance.weight.region.count=15
+load.balance.weight.request=15
+
+# 每轮最大并发迁移数
+load.balance.max.migrations.per.round=3
+
+# EWMA 负载预测参数
+load.balance.ewma.alpha=0.3
+load.balance.ewma.trend.threshold=5.0
+load.balance.ewma.prediction.steps=2
+
+# Region 选择成本模型权重
+load.balance.region.weight.benefit=1.0
+load.balance.region.weight.cost=0.5
+load.balance.region.weight.write.penalty=0.8
+load.balance.region.weight.fit=0.3
+
+# 热点感知放置惩罚权重
+load.balance.hotspot.penalty.weight=15.0
+```
 
 ### 并发安全
 
@@ -189,8 +224,7 @@ Client (CLI / JDBC)
 
 Master 每 30 秒检查配置文件变更，自动热加载：
 
-- LoadBalancer 策略/阈值/间隔
-- HotSpot 读写阈值/冷却时间
+- LoadBalancer 策略/阈值/间隔/评分权重/迁移预算/EWMA 参数/Region 选择权重/热点惩罚
 - Monitoring 目标 QPS
 
 无需重启。
@@ -221,7 +255,7 @@ Ctrl+C → `RegionServer.stop()`：
 ## 测试
 
 ```powershell
-mvn test                            # 102 个单元+集成测试
+mvn test                            # 649 个单元+集成测试
 powershell -File tests/e2e/Run-P3Test.ps1         # P3 验证测试
 powershell -File tests/e2e/Run-FeatureTest.ps1    # 核心功能验证
 powershell -File tests/e2e/Run-FailoverRejoin.ps1 # Failover E2E

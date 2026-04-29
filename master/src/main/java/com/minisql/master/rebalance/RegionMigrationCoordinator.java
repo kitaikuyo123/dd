@@ -194,6 +194,23 @@ public class RegionMigrationCoordinator {
         return status != null ? status.getState() : null;
     }
 
+    /**
+     * 获取当前正在进行中的迁移数量（非终态）
+     */
+    public int getOngoingMigrationCount() {
+        int count = 0;
+        for (MigrationStatus status : migrationStatuses.values()) {
+            MigrationState state = status.getState();
+            if (state != null
+                && state != MigrationState.COMPLETED
+                && state != MigrationState.ROLLED_BACK
+                && state != MigrationState.FAILED_REQUIRES_MANUAL_INTERVENTION) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private long notifyServerStartMigration(ServerId sourceServer, String regionId, ServerId targetServer) {
         try {
             RegionServerProto.MigrateResponse response =

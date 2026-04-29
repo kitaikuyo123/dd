@@ -146,7 +146,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.commandClient = commandClient;
         this.migrationCoordinator = new RegionMigrationCoordinator(
             clusterManager, metadataManager, loadBalancer, commandClient, lifecycleManager);
-        this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
+        this.loadBalancer.setMigrationCoordinator(migrationCoordinator);        this.splitCoordinator = new RegionSplitCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.mergeCoordinator = new RegionMergeCoordinator(clusterManager, metadataManager, loadBalancer, commandClient);
         this.splitCoordinator.setRecoveryCoordinator(recoveryCoordinator);
         this.splitCoordinator.setReplicationCoordinator(replicationCoordinator);
@@ -158,6 +158,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.mergeCoordinator.setLifecycleManager(lifecycleManager);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
+        this.hotSpotCoordinator.setHotSpotRegistry(loadBalancer.getHotSpotRegistry());
         if (hotSpotSettings != null) {
             this.hotSpotCoordinator.configure(hotSpotSettings);
         }

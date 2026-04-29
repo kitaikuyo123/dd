@@ -80,6 +80,16 @@ public class HotSpotCoordinator {
         this.cooldownMs = Math.max(0L, settings.getCooldownMs());
     }
 
+    /**
+     * 注入热点注册表，用于将检测到的热点信息同步给负载均衡器
+     */
+    public void setHotSpotRegistry(LoadBalancer.HotSpotRegistry hotSpotRegistry) {
+        this.hotSpotRegistry = hotSpotRegistry;
+    }
+
+    // 热点注册表（可选注入）
+    private volatile LoadBalancer.HotSpotRegistry hotSpotRegistry;
+
     public long getReadThresholdPerInterval() {
         return readThresholdPerInterval;
     }
@@ -169,7 +179,6 @@ public class HotSpotCoordinator {
             HotSpotType hotSpotType = analyzeHotSpot(history);
 
             // 始终更新热点状态（用于监控显示）
-            // Keep hotspot state updated for monitoring.
             if (hotSpotType != null) {
                 long requestCount = estimateRequestDelta(history);
                 hotSpots.put(regionId, new HotSpotInfo(regionId, hotSpotType, requestCount));
@@ -190,13 +199,27 @@ public class HotSpotCoordinator {
                     regionId, hotSpotType, action.getType(), action.getTargetServer());
                 pendingActions.offer(action);
                 pendingRegionIds.add(regionId);
-                // Cooldown is applied only after successful execution (see executeAction),
-                // so a failed action will be retried on the next detection cycle.
             } else {
                 logger.info("Hot spot detected but no executable action: region={} type={} (likely no eligible target replica server or incomplete metadata)",
                     regionId, hotSpotType);
             }
         }
+
+        // 将当前热点信息同步到注册表，供负载均衡器放置决策使用
+        syncHotSpotsToRegistry();
+    }
+
+    /**
+     * 将检测到的热点信息同步到 HotSpotRegistry
+     */
+    private void syncHotSpotsToRegistry() {
+        if (hotSpotRegistry == null) {
+            return;
+        }
+        hotSpotRegistry.updateHotSpots(hotSpots, regionId -> {
+            Region region = metadataManager.getRegion(regionId);
+            return region != null ? region.getTableName() : null;
+        });
     }
 
     private boolean isPrimaryReporter(String regionId, ServerId reporter) {
@@ -223,6 +246,9 @@ public class HotSpotCoordinator {
             return;
         }
         cooldownUntilMs.remove(regionId);
+        if (hotSpotRegistry != null) {
+            hotSpotRegistry.clearHotSpot(regionId);
+        }
         if (recoveryCoordinator != null) {
             recoveryCoordinator.clearDesiredReplicaCount(regionId);
             recoveryCoordinator.reconcileReplicaTarget(regionId);
