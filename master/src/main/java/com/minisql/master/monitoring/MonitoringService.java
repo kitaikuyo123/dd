@@ -22,6 +22,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * 集群监控服务
+ *
+ * 聚合集群状态信息，为监控 HTTP 接口提供数据。
+ * 职责包括:
+ *   - 集群概览（服务器数、Region数、QPS、告警数）
+ *   - 服务器列表及其负载指标
+ *   - Region 列表及其读写统计、复制延迟、热点评分
+ *   - 表级汇总（Region数、读写量、错误数、热点分数）
+ *   - SQL 指标统计（QPS、延迟分位数、错误率）
+ *   - 集群事件时间线
+ */
 public class MonitoringService {
 
     private static final long FIVE_MINUTES_MS = 5L * 60L * 1000L;

@@ -6,12 +6,7 @@ import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
 import java.io.File;
 
-/**
- * TLS/SSL configuration for gRPC channels.
- *
- * When no trust/cert paths are configured, plaintext is used (backward compatible).
- * When configured, all gRPC channels use TLS with the provided certificates.
- */
+/** gRPC 通道的 TLS/SSL 配置 */
 public class GrpcSslConfig {
 
     private final String trustCertPath;

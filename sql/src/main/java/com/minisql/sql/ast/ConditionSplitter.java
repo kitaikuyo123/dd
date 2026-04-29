@@ -3,12 +3,7 @@ package com.minisql.sql.ast;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Splits a WHERE condition into three parts for JOIN optimization:
- * - leftOnly:  conditions referencing only the left table
- * - rightOnly: conditions referencing only the right table
- * - crossTable: conditions that reference both tables (evaluated client-side after JOIN)
- */
+/** 条件分割器，将 WHERE 条件拆分为 Region 扫描范围、谓词下推和残留过滤三部分 */
 public class ConditionSplitter {
 
     private final String leftTable;

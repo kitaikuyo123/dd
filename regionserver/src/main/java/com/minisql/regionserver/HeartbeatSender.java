@@ -21,9 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Sends registration and heartbeats to the current leader master.
- */
+/** 心跳发送器，定期向 Master 发送注册和心跳请求 */
 public class HeartbeatSender {
 
     private static final Logger logger = LoggerFactory.getLogger(HeartbeatSender.class);

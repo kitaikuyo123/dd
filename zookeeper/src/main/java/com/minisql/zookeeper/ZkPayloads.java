@@ -3,9 +3,7 @@ package com.minisql.zookeeper;
 import com.minisql.common.model.ServerId;
 import java.nio.charset.StandardCharsets;
 
-/**
- * Small JSON helpers for ZooKeeper payloads.
- */
+/** ZooKeeper 节点数据的 JSON 序列化工具 */
 public final class ZkPayloads {
 
     private ZkPayloads() {

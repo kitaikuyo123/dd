@@ -2,9 +2,7 @@ package com.minisql.zookeeper;
 
 import com.minisql.common.Constants;
 
-/**
- * Ensures the MiniSQL ZooKeeper path layout exists.
- */
+/** 确保 MiniSQL 所需的 ZooKeeper 路径布局已创建 */
 public class PathBootstrapper {
 
     private final ZkClient zkClient;

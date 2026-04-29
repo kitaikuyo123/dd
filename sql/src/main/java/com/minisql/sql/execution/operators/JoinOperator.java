@@ -15,22 +15,35 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Join operator with explicit prefetch semantics.
+ * 连接算子，支持 Hash Join 和嵌套循环两种执行策略
+ *
+ * 策略选择规则:
+ *   - 等值连接条件（=）且算法指定为 HASH 时，使用 Hash Join
+ *   - 其余情况（非等值条件或显式指定 NESTED_LOOP）使用嵌套循环连接
+ *
+ * Hash Join 以左表为构建侧建立哈希表，右表为探测侧逐行匹配。
+ * 当构建侧行数超过 hashJoinMaxRows 阈值时，自动降级为嵌套循环连接以避免内存溢出。
  */
 public class JoinOperator extends Operator {
 
     private static final Logger log = LoggerFactory.getLogger(JoinOperator.class);
 
+    /** 左子算子（构建侧） */
     private final Operator left;
+    /** 右子算子（探测侧） */
     private final Operator right;
+    /** 连接条件 */
     private final JoinCondition condition;
+    /** 指定的连接算法 */
     private final JoinAlgorithm algorithm;
 
     private boolean opened;
+    /** 实际执行策略，在 open 时确定 */
     private JoinStrategy strategy;
+    /** 预取的下一行结果 */
     private Row nextRow;
 
-    // Max rows for hash join build side before falling back to nested loop join
+    /** Hash Join 构建侧行数上限，超过此阈值自动降级为嵌套循环 */
     private final int hashJoinMaxRows;
 
     public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
@@ -43,6 +56,9 @@ public class JoinOperator extends Operator {
         this(left, right, joinType, condition, algorithm, 100_000);
     }
 
+    /**
+     * @param hashJoinMaxRows Hash Join 构建侧行数上限，最小值为 1000
+     */
     public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
                         JoinCondition condition, JoinAlgorithm algorithm,
                         int hashJoinMaxRows) {
@@ -114,10 +130,12 @@ public class JoinOperator extends Operator {
         return result;
     }
 
+    /** 预取下一行结果，用于实现 pull 模型的迭代器接口 */
     private void prefetch() throws IOException {
         nextRow = strategy == null ? null : strategy.next();
     }
 
+    /** 将左右两行合并为一行，输出列 = 左表列 + 右表列 */
     private Row combineRows(Row leftRow, Row rightRow) {
         Object[] leftValues = leftRow.getValues();
         Object[] rightValues = rightRow.getValues();
@@ -127,6 +145,7 @@ public class JoinOperator extends Operator {
         return new Row(getOutputColumns(), combined);
     }
 
+    /** 在列名数组中查找指定列的位置，支持 table.column 格式的列名 */
     private int findColumnIndex(String[] columns, String columnName) {
         String fallback = columnName != null && columnName.contains(".")
             ? columnName.substring(columnName.lastIndexOf('.') + 1)
@@ -139,11 +158,13 @@ public class JoinOperator extends Operator {
         throw new IllegalArgumentException("Column not found in join output: " + columnName);
     }
 
+    /** 连接算法枚举 */
     public enum JoinAlgorithm {
         NESTED_LOOP,
         HASH
     }
 
+    /** 连接条件，包含左右列名和比较运算符 */
     public static class JoinCondition {
         private final String leftColumn;
         private final String rightColumn;
@@ -169,11 +190,20 @@ public class JoinOperator extends Operator {
         GREATER_EQUAL
     }
 
+    /** 连接执行策略接口 */
     private interface JoinStrategy {
         void open() throws IOException;
         Row next() throws IOException;
     }
 
+    /**
+     * Hash Join 策略
+     *
+     * 执行流程:
+     *   1. open 阶段: 遍历左表所有行，按连接键建立哈希表
+     *   2. 若构建侧行数超过阈值，清空哈希表并降级为嵌套循环
+     *   3. next 阶段: 逐行扫描右表，在哈希表中查找匹配行
+     */
     private final class HashJoinStrategy implements JoinStrategy {
         private final Map<JoinKey, List<Row>> hashTable = new HashMap<>();
         private Iterator<Row> matchingRows;
@@ -236,6 +266,12 @@ public class JoinOperator extends Operator {
         }
     }
 
+    /**
+     * 嵌套循环连接策略
+     *
+     * 对左表每一行，遍历右表所有行进行条件比较。
+     * 时间复杂度 O(M*N)，适用于非等值连接或构建侧数据量过大的场景。
+     */
     private final class NestedLoopJoinStrategy implements JoinStrategy {
         private Row currentLeftRow;
         private Row currentRightRow;
@@ -300,6 +336,7 @@ public class JoinOperator extends Operator {
         }
     }
 
+    /** 比较两个值，优先尝试数值比较，失败则回退到字符串比较 */
     private int compareValues(Object leftValue, Object rightValue) {
         if (leftValue == null && rightValue == null) {
             return 0;
@@ -317,6 +354,7 @@ public class JoinOperator extends Operator {
         }
     }
 
+    /** Hash Join 中的哈希键包装类 */
     private static class JoinKey {
         private final Object value;
 

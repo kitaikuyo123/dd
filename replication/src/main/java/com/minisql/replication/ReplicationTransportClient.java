@@ -5,9 +5,7 @@ import com.minisql.common.model.ServerId;
 
 import java.util.List;
 
-/**
- * Transport abstraction for replication-related RPCs.
- */
+/** 复制传输客户端接口，定义副本间数据传输的抽象 */
 public interface ReplicationTransportClient extends AutoCloseable {
 
     boolean replicate(ServerId replica, String regionId, ReplicationLogEntry entry, long timeoutMs);

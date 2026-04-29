@@ -12,10 +12,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Supplier;
 
-/**
- * RocksDB-backed KV storage engine.
- * Each region gets its own RocksDB instance under {dataDir}/{regionId}/.
- */
+/** 基于 RocksDB 的 KV 存储引擎，每个 Region 使用独立的 RocksDB 实例 */
 public class RocksDBStorageEngine implements StorageEngine {
 
     private static final Logger logger = LoggerFactory.getLogger(RocksDBStorageEngine.class);

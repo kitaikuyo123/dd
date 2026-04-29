@@ -19,9 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
-/**
- * gRPC implementation of the replication transport abstraction.
- */
+/** 基于 gRPC 的复制传输客户端实现 */
 public class GrpcReplicationTransportClient implements ReplicationTransportClient {
 
     private static final Logger logger = LoggerFactory.getLogger(GrpcReplicationTransportClient.class);

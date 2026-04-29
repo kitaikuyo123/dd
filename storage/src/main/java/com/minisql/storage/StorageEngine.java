@@ -5,9 +5,7 @@ import com.minisql.common.model.KeyValue;
 import java.util.Iterator;
 import java.util.List;
 
-/**
- * Storage engine abstraction.
- */
+/** 存储引擎抽象接口，定义 KV 存储的基本操作 */
 public interface StorageEngine {
 
     void put(byte[] key, KeyValue value);

@@ -11,7 +11,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Handles full sync and resync flows for replicas.
+ * 副本同步协调器
+ *
+ * 负责新副本的全量同步（Full Sync）和已有副本的重新同步（Resync）。
+ * 同步流程:
+ *   1. 将副本角色标记为 CANDIDATE
+ *   2. 通过传输客户端执行快照流式传输（避免内存中物化完整快照）
+ *   3. 更新副本进度和角色（CANDIDATE -> SECONDARY）
+ *
+ * 支持异步（CompletableFuture）和同步（带超时）两种调用模式。
  */
 public class ReplicaSyncCoordinator {
 

@@ -1,11 +1,6 @@
 package com.minisql.common.utils;
 
-/**
- * Type-safe value comparison utility.
- *
- * <p>Handles nulls (nulls-last), Comparable types of any kind,
- * and falls back to String comparison for heterogeneous types.
- */
+/** 类型安全的值比较工具 */
 public final class ValueComparator {
 
     private ValueComparator() {}

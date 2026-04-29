@@ -1,8 +1,6 @@
 package com.minisql.storage;
 
-/**
- * Factory for creating StorageEngine instances per region.
- */
+/** 存储引擎工厂接口 */
 public interface StorageEngineFactory {
 
     /**

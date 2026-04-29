@@ -8,18 +8,9 @@ import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
-/**
- * Centralized gRPC channel factory.
- *
- * <p>All gRPC channel creation should go through this factory to ensure
- * consistent TLS/plaintext configuration and channel reuse.
- *
- * <p>By default, plaintext is used (backward compatible). Set a {@link GrpcSslConfig}
- * to enable TLS across all channels.
- */
+/** 集中式 gRPC 通道工厂，管理和复用 gRPC 连接 */
 public class GrpcChannelFactory {
 
     private static final Logger logger = Logger.getLogger(GrpcChannelFactory.class.getName());

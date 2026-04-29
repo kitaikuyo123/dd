@@ -2,9 +2,7 @@ package com.minisql.replication;
 
 import com.minisql.common.model.ServerId;
 
-/**
- * Selects and promotes a new primary for a region.
- */
+/** 主副本故障转移协调器，管理主副本自动切换流程 */
 public class PrimaryFailoverCoordinator {
 
     private final ReplicaGroupRegistry registry;

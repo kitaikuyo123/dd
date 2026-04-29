@@ -14,9 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * Publishes primary changes to ZooKeeper and Master.
- */
+/** 主副本变更通知器，通过 ZooKeeper 发布主副本变更事件 */
 public class PrimaryChangeNotifier {
 
     private static final Logger logger = LoggerFactory.getLogger(PrimaryChangeNotifier.class);

@@ -5,9 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Immutable scan request/filter shared by storage implementations.
- */
+/** 不可变的存储扫描请求和过滤条件 */
 public class StorageScanFilter {
 
     private final byte[] startKey;

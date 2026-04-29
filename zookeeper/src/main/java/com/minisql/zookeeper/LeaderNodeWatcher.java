@@ -7,9 +7,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.function.Consumer;
 
-/**
- * Watches the elected master leader node.
- */
+/** Leader 节点观察器，监听 Master Leader 的选举结果变化 */
 public class LeaderNodeWatcher implements Closeable {
 
     private final ZkClient zkClient;

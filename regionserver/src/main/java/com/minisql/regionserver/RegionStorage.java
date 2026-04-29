@@ -11,9 +11,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Region storage backed by a pluggable StorageEngine.
- */
+/** Region 存储层，基于可插拔的 StorageEngine 提供 Region 级别的读写操作 */
 public class RegionStorage {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionStorage.class);

@@ -6,9 +6,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Unified replication log entry shared by in-memory replication and WAL.
- */
+/** 复制日志条目，记录一次变更的序列号、时间戳和变更数据 */
 public class ReplicationLogEntry {
 
     private final long sequenceId;

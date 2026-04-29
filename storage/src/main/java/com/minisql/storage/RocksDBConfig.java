@@ -1,8 +1,6 @@
 package com.minisql.storage;
 
-/**
- * Configuration for RocksDB storage engine.
- */
+/** RocksDB 存储引擎配置 */
 public class RocksDBConfig {
 
     private final String dataDir;

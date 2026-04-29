@@ -18,8 +18,25 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Owns the region migration state machine so MasterServiceImpl can stay focused
- * on RPC entrypoints and high-level coordination.
+ * Region 迁移协调器
+ *
+ * 管理负载均衡中 Region 在 RegionServer 间迁移的完整状态机，
+ * 使 MasterServiceImpl 只需关注 RPC 入口和高层协调。
+ *
+ * 迁移状态机:
+ *   OPENING_TARGET -> INITIAL_SYNC -> FINALIZING_SOURCE -> WAITING_FINAL_SYNC
+ *   -> PROMOTING_TARGET -> CLOSING_SOURCE -> COMMITTING_METADATA -> COMPLETED
+ *
+ * 关键步骤:
+ *   1. 在目标服务器打开 Region 副本
+ *   2. 初始数据同步（通过复制通道追赶）
+ *   3. 暂停源服务器写入，排空最后的 WAL
+ *   4. 等待目标服务器完成最终同步
+ *   5. 提升目标服务器为主副本
+ *   6. 关闭源服务器上的 Region
+ *   7. 提交元数据切换
+ *
+ * 失败时自动回滚，但目标提升后的失败需要人工干预。
  */
 public class RegionMigrationCoordinator {
 

@@ -1,8 +1,6 @@
 package com.minisql.common;
 
-/**
- * Shared system constants.
- */
+/** 系统共享常量 */
 public final class Constants {
 
     public static final String VERSION = "1.0.0";

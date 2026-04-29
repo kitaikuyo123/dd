@@ -5,9 +5,7 @@ import com.minisql.common.model.ServerId;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/**
- * High-level ZooKeeper coordinator facade.
- */
+/** ZooKeeper 高层协调门面，统一管理服务注册、Leader 选举和路径初始化 */
 public class ZkManager {
 
     private final ZkClient zkClient;

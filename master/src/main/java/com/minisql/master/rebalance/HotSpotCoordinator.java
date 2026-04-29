@@ -20,8 +20,19 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Detects hot regions and emits standardized actions so hotspot mitigation can
- * be scheduled by the master together with regular balance actions.
+ * 热点检测与缓解协调器
+ *
+ * 通过收集 Region 负载快照，检测读写热点 Region，并生成标准化的缓解动作。
+ * 热点检测算法基于时间窗口内的平均 QPS 与阈值的比较:
+ *   - 读热点: 平均读 QPS 超过读阈值
+ *   - 写热点: 平均写 QPS 超过写阈值
+ *   - 混合热点: 读写总 QPS 超过综合阈值（0.7 * 读阈值 + 写阈值）
+ *
+ * 缓解动作:
+ *   - ADD_READ_REPLICA: 增加读副本分散读压力
+ *   - SPLIT_REGION: 分裂 Region 减小热点范围
+ *
+ * 内置冷却机制，同一 Region 在冷却期内不会重复触发动作。
  */
 public class HotSpotCoordinator {
 

@@ -25,9 +25,20 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Coordinates replica bootstrap and recovery catch-up so recovered or newly
- * added replicas rejoin the serving path only after metadata and replication
- * state are refreshed together.
+ * 副本恢复协调器
+ *
+ * 负责新副本引导（Bootstrap）和故障副本恢复（Recovery）的全流程编排。
+ * 恢复流程确保副本在元数据和复制状态完全同步后才重新加入服务路径。
+ *
+ * 核心流程（performRecovery）:
+ *   1. 注册副本到集群元数据
+ *   2. 在目标 RegionServer 上打开 Region
+ *   3. 执行复制追赶（全量同步或增量同步）
+ *   4. 标记副本为就绪状态
+ *   5. 检查并修剪多余副本至目标副本数
+ *
+ * 支持异步调度（scheduleRecovery）和同步执行（executeRecovery）两种模式。
+ * 当 RegionServer 恢复上线时，通过 reconcileRecoveredServer 进行全量对账。
  */
 public class RecoveryCoordinator {
 

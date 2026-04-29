@@ -8,9 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Maintains region replica groups and runtime replica state.
- */
+/** 副本组注册表，维护 Region 到副本组的映射关系 */
 public class ReplicaGroupRegistry {
 
     private final Map<String, ReplicaGroup> replicaGroups = new ConcurrentHashMap<>();

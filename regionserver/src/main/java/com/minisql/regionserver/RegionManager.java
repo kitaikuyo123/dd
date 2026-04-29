@@ -16,7 +16,17 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Region manager backed by pluggable storage.
+ * Region 管理器
+ *
+ * 基于 RegionStorage 抽象管理本 RegionServer 上的所有 Region 生命周期。
+ * 维护以下状态:
+ *   - Region 元数据（id -> Region）
+ *   - Region 存储引擎（id -> RegionStorage）
+ *   - Region 生命周期状态（OPENING / OPEN / CLOSING / CLOSED）
+ *   - 主副本标记（是否为本服务器上的主副本）
+ *   - 复制序列号追踪
+ *   - 写入阻塞状态（用于迁移/防护期间）
+ *   - 防护令牌（Fencing Token，用于防止脑裂写入）
  */
 public class RegionManager {
 

@@ -12,9 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
-/**
- * Registers region servers and exposes watcher-based cluster membership.
- */
+/** RegionServer 注册管理器，处理服务注册与发现 */
 public class RegionServerRegistry implements Closeable {
 
     private final ZkClient zkClient;

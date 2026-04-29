@@ -23,7 +23,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Coordinates replication lifecycle while delegating storage, transport and failover concerns.
+ * 复制生命周期协调器
+ *
+ * 统一管理数据复制的完整生命周期，将存储（WAL）、传输（gRPC）和故障转移
+ * 委托给专门的组件处理。
+ *
+ * 核心职责:
+ *   - 副本组的创建、删除和查询
+ *   - 变更数据的 WAL 持久化
+ *   - 异步/同步复制分发（支持批量合并和重试）
+ *   - ACK 确认策略（全部确认或法定人数确认）
+ *   - 副本降级检测（所有从副本不可达时降级为主副本独立写入）
+ *   - 定期健康检查和落后副本自动追赶
+ *   - 主副本故障转移和提升
  */
 public class ReplicationCoordinator {
 

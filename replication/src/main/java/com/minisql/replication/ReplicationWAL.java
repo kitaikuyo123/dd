@@ -16,13 +16,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Persistent write-ahead log for replication, backed by a dedicated RocksDB instance.
+ * 复制预写日志（WAL），基于独立的 RocksDB 实例持久化
  *
- * <p>WAL entry key layout: {@code <regionId-UTF8><0x00><sequenceId-big-endian-8bytes>}
- * <p>WAL entry value: binary-encoded ReplicationLogEntry (sequenceId + timestamp + mutations).
+ * WAL 条目 Key 布局: regionId-UTF8 + 0x00 + sequenceId-大端序-8字节
+ * WAL 条目 Value: 二进制编码的 ReplicationLogEntry（序列号 + 时间戳 + 变更列表）
  *
- * <p>Applied progress key layout: {@code <regionId-UTF8><0x01><replicaAddress-UTF8>}
- * <p>Applied progress value: 8-byte big-endian lastAppliedSequenceId.
+ * 已应用进度 Key 布局: regionId-UTF8 + 0x01 + replicaAddress-UTF8
+ * 已应用进度 Value: 8字节大端序的 lastAppliedSequenceId
+ *
+ * Value 编码格式: [sequenceId:8][timestamp:8][mutationCount:4]
+ *   每个 mutation: [type:1][rowKeyLen:4][rowKey][familyLen:4][family]
+ *                  [qualifierLen:4][qualifier][timestamp:8][valueLen:4][value]
  */
 public class ReplicationWAL implements AutoCloseable {
 

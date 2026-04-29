@@ -25,9 +25,7 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.List;
 
-/**
- * RegionServer main runtime.
- */
+/** RegionServer 主运行时，管理本节点的 Region、存储和复制 */
 public class RegionServer {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionServer.class);

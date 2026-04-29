@@ -2,9 +2,7 @@ package com.minisql.sql.ast;
 
 import com.minisql.sql.execution.Row;
 
-/**
- * Simple comparison condition.
- */
+/** 简单比较条件，表示 列名 运算符 值 的二元比较 */
 public class SimpleCondition extends Condition {
     private final String column;
     private final String operator;

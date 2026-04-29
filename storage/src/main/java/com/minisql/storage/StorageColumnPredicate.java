@@ -2,9 +2,7 @@ package com.minisql.storage;
 
 import java.util.Arrays;
 
-/**
- * A storage-layer predicate on a single logical column qualifier.
- */
+/** 存储层列过滤谓词 */
 public class StorageColumnPredicate {
 
     private final String qualifier;

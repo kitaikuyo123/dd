@@ -14,8 +14,17 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Builds storage-level row_key bounds for predicates that can be translated
- * safely to indexed storage range scans.
+ * 谓词下推规划器
+ *
+ * 将 WHERE 条件中可以安全转换为存储层范围扫描的谓词提取出来，
+ * 生成存储引擎可直接使用的扫描范围（startKey/endKey）和列过滤条件。
+ *
+ * 支持的谓词类型:
+ *   - 主键上的等值和范围条件（=, >, >=, <, <=）-> 转化为 startKey/endKey 范围
+ *   - AND 组合条件 -> 取左右子计划的交集（范围取交集）
+ *   - 非主键列的简单条件 -> 转化为 StorageColumnPredicate
+ *
+ * 不支持的谓词（OR 条件、复合主键、LIKE 等）返回空计划，由上层 FilterOperator 处理。
  */
 final class PredicatePushdownPlanner {
 
@@ -219,6 +228,7 @@ final class PredicatePushdownPlanner {
         }
     }
 
+    /** 下推计划，包含扫描范围和列过滤条件 */
     static final class PushdownPlan {
         private final byte[] startKey;
         private final byte[] endKey;
