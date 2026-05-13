@@ -15,6 +15,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 @DisplayName("RegionSplitCoordinator tests")
@@ -135,9 +138,13 @@ class RegionSplitCoordinatorTest {
 
     @Test
     @DisplayName("scheduleSplit rejects duplicate region already splitting")
-    void scheduleSplitRejectsDuplicateRegion() {
+    void scheduleSplitRejectsDuplicateRegion() throws Exception {
+        CountDownLatch splitStarted = new CountDownLatch(1);
+        CountDownLatch allowSplitComplete = new CountDownLatch(1);
+
         coordinator = new RegionSplitCoordinator(
-            clusterManager, metadataManager, new LoadBalancer(), new StubCommandClient());
+            clusterManager, metadataManager, new LoadBalancer(),
+            new BlockingSplitClient(splitStarted, allowSplitComplete));
         coordinator.start();
 
         ServerId server = new ServerId("host-a", 16020, 1L);
@@ -147,8 +154,15 @@ class RegionSplitCoordinatorTest {
         load.setMemStoreSize(0);
 
         assertTrue(coordinator.scheduleSplit("orders_r1", "orders", server, load));
+
+        // Wait until the split worker enters executeSplit (region in splittingRegions)
+        assertTrue(splitStarted.await(5, TimeUnit.SECONDS),
+            "Split worker should start within timeout");
+
         assertFalse(coordinator.scheduleSplit("orders_r1", "orders", server, load),
             "Duplicate scheduleSplit should be rejected");
+
+        allowSplitComplete.countDown();
     }
 
     // ---------------------------------------------------------------
@@ -277,7 +291,28 @@ class RegionSplitCoordinatorTest {
     // Stub client (no Mockito)
     // ---------------------------------------------------------------
 
-    private static final class StubCommandClient implements RegionServerCommandClient {
+    private static final class BlockingSplitClient extends StubCommandClient {
+        private final CountDownLatch splitStarted;
+        private final CountDownLatch allowComplete;
+
+        BlockingSplitClient(CountDownLatch splitStarted, CountDownLatch allowComplete) {
+            this.splitStarted = splitStarted;
+            this.allowComplete = allowComplete;
+        }
+
+        @Override
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+            splitStarted.countDown();
+            try {
+                allowComplete.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return super.splitRegion(serverId, regionId, splitKey);
+        }
+    }
+
+    private static class StubCommandClient implements RegionServerCommandClient {
         private static final CommonProto.Status OK =
             CommonProto.Status.newBuilder().setCode(0).setSuccess(true).setMessage("OK").build();
 

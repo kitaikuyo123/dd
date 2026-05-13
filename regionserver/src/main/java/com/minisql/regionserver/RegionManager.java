@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Region 管理器
@@ -66,26 +67,33 @@ public class RegionManager {
     /**
      * Opens a region and creates its storage using the RegionServer shared pool.
      * If the region is already open, this is a no-op (idempotent).
+     *
+     * <p>Uses {@code compute()} on regionStates to make the check-and-act sequence
+     * atomic per regionId, preventing concurrent opens from leaking RocksDB instances.
      */
     public void openRegion(Region region) {
         String regionId = region.getRegionId();
+        AtomicReference<Exception> failure = new AtomicReference<>();
 
-        // Idempotent: skip if already open
-        if (regionStates.get(regionId) == RegionState.OPEN
-                && regionStorages.containsKey(regionId)) {
-            logger.info("Region {} is already open, skipping duplicate open", regionId);
-            return;
-        }
+        regionStates.compute(regionId, (id, currentState) -> {
+            if (currentState == RegionState.OPEN && regionStorages.containsKey(id)) {
+                logger.info("Region {} is already open, skipping duplicate open", id);
+                return RegionState.OPEN;
+            }
 
-        regionStates.put(regionId, RegionState.OPENING);
+            try {
+                RegionStorage storage = createRegionStorage(id);
+                storage.start();
+                doRegisterOpenedRegion(region, storage);
+                return RegionState.OPEN;
+            } catch (Exception e) {
+                failure.set(e);
+                return RegionState.CLOSED;
+            }
+        });
 
-        try {
-            RegionStorage storage = createRegionStorage(regionId);
-            storage.start();
-            registerOpenedRegion(region, storage);
-        } catch (Exception e) {
-            regionStates.put(regionId, RegionState.CLOSED);
-            throw new RuntimeException("Failed to open region: " + regionId, e);
+        if (failure.get() != null) {
+            throw new RuntimeException("Failed to open region: " + regionId, failure.get());
         }
     }
 
@@ -97,15 +105,15 @@ public class RegionManager {
     }
 
     /**
-     * Registers a region as OPEN using the same state initialization as the standard open path.
+     * Internal registration that populates all maps EXCEPT regionStates,
+     * so it is safe to call inside {@code regionStates.compute()}.
      */
-    public void registerOpenedRegion(Region region, RegionStorage storage) {
+    private void doRegisterOpenedRegion(Region region, RegionStorage storage) {
         String regionId = region.getRegionId();
         normalizeRegionTopology(region);
 
         regionStorages.put(regionId, storage);
         regions.put(regionId, region);
-        regionStates.put(regionId, RegionState.OPEN);
 
         boolean primaryOnThisServer = region.getPrimary().equals(regionServer.getServerId());
         regionPrimaryStatus.put(regionId, primaryOnThisServer);
@@ -117,51 +125,67 @@ public class RegionManager {
     }
 
     /**
+     * Registers a region as OPEN using the same state initialization as the standard open path.
+     */
+    public void registerOpenedRegion(Region region, RegionStorage storage) {
+        doRegisterOpenedRegion(region, storage);
+        regionStates.put(region.getRegionId(), RegionState.OPEN);
+    }
+
+    /**
      * Closes a region.
+     *
+     * <p>Uses {@code compute()} on regionStates to make the state transition atomic
+     * per regionId, preventing concurrent open from racing with cleanup.
      */
     public void closeRegion(String regionId, boolean abort, boolean dropTable) {
-        RegionState currentState = regionStates.get(regionId);
-        if (currentState == null || currentState == RegionState.CLOSED) {
-            return;
-        }
+        AtomicReference<Exception> failure = new AtomicReference<>();
 
-        regionStates.put(regionId, RegionState.CLOSING);
+        regionStates.compute(regionId, (id, currentState) -> {
+            if (currentState == null || currentState == RegionState.CLOSED) {
+                return currentState;
+            }
 
-        try {
-            if (!abort) {
-                RegionStorage storage = regionStorages.get(regionId);
-                if (storage != null) {
-                    storage.flush();
+            try {
+                if (!abort) {
+                    RegionStorage storage = regionStorages.get(id);
+                    if (storage != null) {
+                        storage.flush();
+                    }
                 }
-            }
 
-            if (dropTable) {
-                RegionStorage storage = regionStorages.get(regionId);
-                if (storage != null) {
-                    storage.dropData();
+                if (dropTable) {
+                    RegionStorage storage = regionStorages.get(id);
+                    if (storage != null) {
+                        storage.dropData();
+                    }
                 }
-            }
 
-            RegionStorage storage = regionStorages.remove(regionId);
-            if (storage != null) {
-                storage.close();
-            }
+                RegionStorage storage = regionStorages.remove(id);
+                if (storage != null) {
+                    storage.close();
+                }
 
-            regions.remove(regionId);
-            regionStates.put(regionId, RegionState.CLOSED);
-            regionPrimaryStatus.remove(regionId);
-            lastAppliedReplicationSequenceIds.remove(regionId);
-            regionWriteBlocked.remove(regionId);
-            regionFencingTokens.remove(regionId);
+                regions.remove(id);
+                regionPrimaryStatus.remove(id);
+                lastAppliedReplicationSequenceIds.remove(id);
+                regionWriteBlocked.remove(id);
+                regionFencingTokens.remove(id);
 
-            ReplicationCoordinator replicationCoordinator = regionServer.getReplicationCoordinator();
-            if (replicationCoordinator != null) {
-                replicationCoordinator.removeReplicaGroup(regionId);
+                ReplicationCoordinator replicationCoordinator = regionServer.getReplicationCoordinator();
+                if (replicationCoordinator != null) {
+                    replicationCoordinator.removeReplicaGroup(id);
+                }
+                logger.info("Region closed: {}{}", id, dropTable ? " and table dropped" : "");
+                return RegionState.CLOSED;
+            } catch (Exception e) {
+                failure.set(e);
+                return RegionState.OPEN;
             }
-            logger.info("Region closed: {}{}", regionId, dropTable ? " and table dropped" : "");
-        } catch (Exception e) {
-            regionStates.put(regionId, RegionState.OPEN);
-            throw new RuntimeException("Failed to close region: " + regionId, e);
+        });
+
+        if (failure.get() != null) {
+            throw new RuntimeException("Failed to close region: " + regionId, failure.get());
         }
     }
 
@@ -244,8 +268,11 @@ public class RegionManager {
     }
 
     public boolean verifyFencingToken(String regionId, long token) {
-        long currentToken = getFencingToken(regionId);
-        return token >= currentToken;
+        AtomicLong current = regionFencingTokens.get(regionId);
+        if (current == null) {
+            return token >= 0;
+        }
+        return token >= current.get();
     }
 
     public long getLastAppliedReplicationSequenceId(String regionId) {
@@ -283,7 +310,9 @@ public class RegionManager {
             region.setReplicas(replicas);
         }
         if (!replicas.contains(region.getPrimary())) {
-            replicas.add(region.getPrimary());
+            List<ServerId> updated = new ArrayList<>(replicas);
+            updated.add(region.getPrimary());
+            region.setReplicas(updated);
         }
     }
 

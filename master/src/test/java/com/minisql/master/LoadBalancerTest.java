@@ -70,7 +70,7 @@ class LoadBalancerTest {
         for (int i = 0; i < 100; i++) {
             ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
             load.setRegionId("hot-region-" + i);
-            overloadedInfo.getRegionLoads().put(load.getRegionId(), load);
+            overloadedInfo.updateRegionLoad(load.getRegionId(), load);
         }
         Region region = new Region("region-random", "users", "a".getBytes(), "z".getBytes());
 
@@ -95,7 +95,7 @@ class LoadBalancerTest {
         regionLoad.setStoreFileSize(512L * 1024 * 1024);
         regionLoad.setReadRequests(100);
         regionLoad.setWriteRequests(100);
-        sourceInfo.getRegionLoads().put("region-1", regionLoad);
+        sourceInfo.updateRegionLoad("region-1", regionLoad);
 
         List<LoadBalancer.BalanceAction> actions = balancer.computeBalanceActions(Arrays.asList(sourceInfo, targetInfo));
 

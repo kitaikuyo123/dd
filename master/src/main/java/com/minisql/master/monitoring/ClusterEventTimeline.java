@@ -6,6 +6,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 
 public class ClusterEventTimeline {
 
@@ -48,6 +50,7 @@ public class ClusterEventTimeline {
 
     private final long retentionMs;
     private final ConcurrentLinkedDeque<ClusterEvent> events = new ConcurrentLinkedDeque<>();
+    private final CopyOnWriteArrayList<Consumer<ClusterEvent>> subscribers = new CopyOnWriteArrayList<>();
 
     public ClusterEventTimeline() {
         this(DEFAULT_RETENTION_MS);
@@ -60,8 +63,23 @@ public class ClusterEventTimeline {
     public void record(String type, String severity, String regionId, String tableName,
                        String sourceServer, String targetServer, String message, String details) {
         purgeExpired();
-        events.addLast(new ClusterEvent(System.currentTimeMillis(), type, severity, regionId, tableName,
-            sourceServer, targetServer, message, details));
+        ClusterEvent event = new ClusterEvent(System.currentTimeMillis(), type, severity, regionId, tableName,
+            sourceServer, targetServer, message, details);
+        events.addLast(event);
+        for (Consumer<ClusterEvent> subscriber : subscribers) {
+            try {
+                subscriber.accept(event);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    public void subscribe(Consumer<ClusterEvent> subscriber) {
+        subscribers.add(subscriber);
+    }
+
+    public void unsubscribe(Consumer<ClusterEvent> subscriber) {
+        subscribers.remove(subscriber);
     }
 
     public List<ClusterEvent> query(Set<String> types, int limit) {

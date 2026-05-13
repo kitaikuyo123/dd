@@ -42,6 +42,7 @@ public class RegionServer {
 
     private volatile boolean running = false;
     private volatile boolean draining = false;
+    private volatile boolean shutdownHookRegistered = false;
     private static final long DRAIN_TIMEOUT_MS = 30_000L;
     private ManagedChannel masterChannel;
     private MasterServiceGrpc.MasterServiceBlockingStub masterStub;
@@ -78,15 +79,18 @@ public class RegionServer {
         logger.info("RegionServer started on {}:{}", serverId.getHost(), serverId.getPort());
         logger.info("Using storage engine: {}", engineFactory.getClass().getSimpleName().replace("EngineFactory", ""));
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            logger.info("*** Shutting down gRPC server since JVM is shutting down");
-            try {
-                stop();
-            } catch (Exception e) {
-                logger.error("Error stopping server", e);
-            }
-            logger.info("*** Server shut down");
-        }));
+        if (!shutdownHookRegistered) {
+            shutdownHookRegistered = true;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                logger.info("*** Shutting down gRPC server since JVM is shutting down");
+                try {
+                    stop();
+                } catch (Exception e) {
+                    logger.error("Error stopping server", e);
+                }
+                logger.info("*** Server shut down");
+            }));
+        }
     }
 
     private void connectToMaster() {
@@ -205,7 +209,6 @@ public class RegionServer {
 
         // 3. Stop replication (stop accepting new write log entries)
         replicationCoordinator.stop();
-        wal.close();
 
         // 4. Close all regions
         for (Region region : regionManager.getAllRegions()) {

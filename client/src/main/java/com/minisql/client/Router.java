@@ -145,7 +145,7 @@ public class Router {
             }
 
             if (!regions.isEmpty()) {
-                routeCache.put(tableName, regions);
+                routeCache.put(tableName, Collections.unmodifiableList(regions));
                 return;
             }
 
@@ -204,7 +204,7 @@ public class Router {
             }
 
             if (!regions.isEmpty()) {
-                routeCache.put(tableName, regions);
+                routeCache.put(tableName, Collections.unmodifiableList(regions));
                 return true;
             }
         } catch (Exception e) {
@@ -212,6 +212,14 @@ public class Router {
         } finally {
             if (channel != null) {
                 channel.shutdown();
+                try {
+                    if (!channel.awaitTermination(3, TimeUnit.SECONDS)) {
+                        channel.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    channel.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
             }
         }
 
@@ -286,7 +294,14 @@ public class Router {
 
         String[] parts = address.split(":");
         String host = parts[0];
-        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16020;
+        int port = 16020;
+        if (parts.length > 1) {
+            try {
+                port = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException e) {
+                logger.warn("Invalid port in address '{}', using default {}", address, port);
+            }
+        }
         return new ServerAddress(host, port);
     }
 
@@ -302,7 +317,7 @@ public class Router {
                 : new ArrayList<>(existing);
             updated.removeIf(route -> route.getRegionId().equals(newRoute.getRegionId()));
             updated.add(newRoute);
-            return updated;
+            return Collections.unmodifiableList(updated);
         });
     }
 

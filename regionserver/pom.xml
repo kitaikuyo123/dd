@@ -18,27 +18,22 @@
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>common</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>sql</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>replication</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>storage</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>zookeeper</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>

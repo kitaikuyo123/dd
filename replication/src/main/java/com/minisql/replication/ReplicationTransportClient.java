@@ -29,4 +29,10 @@ public interface ReplicationTransportClient extends AutoCloseable {
 
     @Override
     void close();
+
+    /**
+     * Remove and shut down the cached channel for the given server.
+     * Default no-op for implementations that don't cache channels.
+     */
+    default void removeChannel(ServerId serverId) {}
 }

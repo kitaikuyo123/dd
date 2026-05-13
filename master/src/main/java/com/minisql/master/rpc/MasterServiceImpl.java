@@ -51,6 +51,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     private final RecoveryCoordinator recoveryCoordinator;
     private final ReplicaLifecycleManager lifecycleManager;
     private final RegionMigrationCoordinator migrationCoordinator;
+    private final Properties config;
     private final RegionServerCommandClient commandClient;
     private final java.util.concurrent.ExecutorService serverFailureRecoveryExecutor;
     private final java.util.Set<String> recoveringRegions = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -171,6 +172,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             t.setDaemon(true);
             return t;
         });
+        this.config = config;
         applyCoordinatorThresholds(config);
         this.clusterId = UUID.randomUUID().toString();
         logger.info(
@@ -284,6 +286,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     public void setLeader(boolean leader) {
         this.leader = leader;
+    }
+
+    public RegionMigrationCoordinator getMigrationCoordinator() {
+        return migrationCoordinator;
     }
 
     public void setLoadBalanceConfig(boolean enabled, long intervalMs) {
@@ -882,6 +888,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             if (activeServers.isEmpty()) {
                 throw new IllegalStateException("No active RegionServer available for table " + tableName);
             }
+            // 将配置中的 replication.factor 持久化到 Table 元数据
+            if (table.getProperties() == null) {
+                table.setProperties(new com.minisql.common.model.Table.TableProperties());
+            }
+            table.getProperties().setReplicationFactor(
+                Integer.parseInt(config.getProperty("replication.factor", "3")));
+
             metadataManager.createTable(table);
             tablePersisted = true;
             logger.info("[CREATE TABLE] Table metadata created successfully");
@@ -890,10 +903,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             List<CommonProto.RegionInfo> regionInfos = new ArrayList<>();
             for (Region region : regions) {
                 // 根据 replicationFactor 选择多个 RegionServer
-                // replicationFactor 默认为 3（1 个 Primary + 2 个 Secondary）
-                int replicationFactor = table.getProperties() != null
-                    ? table.getProperties().getReplicationFactor()
-                    : 3;
+                int replicationFactor = Integer.parseInt(
+                    config.getProperty("replication.factor", "3"));
                 List<ServerId> selectedServers = selectServersForReplication(
                     region, new ArrayList<>(activeServers), replicationFactor);
 
@@ -935,28 +946,12 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
                     // Wait for all secondary replicas to reach SECONDARY_READY before
                     // returning success, so immediate INSERTs don't fail replication.
-                    long readyDeadline = System.currentTimeMillis() + 30_000L;
-                    for (int i = 1; i < selectedServers.size(); i++) {
-                        ServerId replicaServer = selectedServers.get(i);
-                        boolean ready = false;
-                        while (System.currentTimeMillis() < readyDeadline) {
-                            ReplicaLifecycleManager.ReplicaLifecycleStatus status =
-                                lifecycleManager.getStatus(region.getRegionId(), replicaServer);
-                            if (status != null && status.getState() == ReplicaLifecycleManager.ReplicaLifecycleState.SECONDARY_READY) {
-                                ready = true;
-                                break;
-                            }
-                            try {
-                                Thread.sleep(200);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                break;
-                            }
-                        }
-                        if (!ready) {
-                            logger.warn("[CREATE TABLE] Replica {} for region {} did not reach SECONDARY_READY within timeout",
-                                replicaServer, region.getRegionId());
-                        }
+                    List<ServerId> secondaryServers = selectedServers.subList(1, selectedServers.size());
+                    boolean allReady = lifecycleManager.awaitReplicasReady(
+                        region.getRegionId(), secondaryServers, 30_000L);
+                    if (!allReady) {
+                        logger.warn("[CREATE TABLE] Not all replicas reached SECONDARY_READY within 30s for region {}",
+                            region.getRegionId());
                     }
 
                     if (selectedServers.size() == 1) {

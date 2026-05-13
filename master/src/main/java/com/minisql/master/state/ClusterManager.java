@@ -146,13 +146,15 @@ public class ClusterManager {
         }
 
         if (tableName != null) {
-            Set<String> regions = tableRegions.get(tableName);
-            if (regions != null) {
-                regions.remove(regionId);
-                if (regions.isEmpty()) {
-                    tableRegions.remove(tableName);
+            tableRegions.compute(tableName, (key, regions) -> {
+                if (regions != null) {
+                    regions.remove(regionId);
+                    if (regions.isEmpty()) {
+                        return null;
+                    }
                 }
-            }
+                return regions;
+            });
         }
     }
 
@@ -218,9 +220,10 @@ public class ClusterManager {
             return null;
         }
 
-        // 从故障节点移除
-        Region region = new Region();  // 需要查询实际 Region 信息
+        String tableName = findTableNameForRegion(regionId);
+        Region region = new Region();
         region.setRegionId(regionId);
+        region.setTableName(tableName);
 
         ServerId newServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
         if (newServer != null) {
@@ -229,6 +232,15 @@ public class ClusterManager {
         }
 
         return newServer;
+    }
+
+    private String findTableNameForRegion(String regionId) {
+        for (Map.Entry<String, Set<String>> entry : tableRegions.entrySet()) {
+            if (entry.getValue().contains(regionId)) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     /**
@@ -319,7 +331,7 @@ public class ClusterManager {
      * 获取所有活跃的 RegionServer
      */
     public Collection<ServerInfo> getActiveServers() {
-        return activeServers.values();
+        return new ArrayList<>(activeServers.values());
     }
 
     /**
@@ -433,7 +445,7 @@ public class ClusterManager {
         }
 
         public Map<String, RegionLoad> getRegionLoads() {
-            return regionLoads;
+            return Collections.unmodifiableMap(regionLoads);
         }
 
         public void updateRegionLoad(String regionId, RegionLoad load) {

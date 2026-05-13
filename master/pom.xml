@@ -18,29 +18,24 @@
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>common</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>storage</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>zookeeper</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>replication</artifactId>
-            <version>${project.version}</version>
         </dependency>
         <!-- Client JDBC driver (runtime only — SPI auto-discovery for SqlConsoleService).
              Using runtime scope to avoid compile-time circular dependency (master → client → regionserver → ... → master). -->
         <dependency>
             <groupId>com.minisql</groupId>
             <artifactId>client</artifactId>
-            <version>${project.version}</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>
@@ -97,13 +92,6 @@
 
     <build>
         <plugins>
-            <!-- Surefire plugin for running tests -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version>
-            </plugin>
-
             <!-- 添加主类配置 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import com.minisql.master.rebalance.RegionMigrationCoordinator;
 
 /**
@@ -22,7 +23,6 @@ public class LoadBalancer {
     private static final double DEFAULT_MAX_TARGET_QPS = 5000.0;
 
     private final LoadCalculator loadCalculator = new LoadCalculator();
-    private final Random random = new Random();
     private volatile Strategy strategy = Strategy.LOAD_BASED;
     private int roundRobinIndex = 0; // guarded by this
     private volatile double balanceThreshold = DEFAULT_BALANCE_THRESHOLD;
@@ -75,44 +75,10 @@ public class LoadBalancer {
 
         /**
          * 计算服务器综合负载分数（0-100，越小越空闲）
+         * 基于 Region 数量：每个 Region 贡献 10 分
          */
         public double calculateLoadScore(ClusterManager.ServerInfo server) {
-            ClusterManager.ServerMetrics metrics = server.getMetrics();
-            Map<String, ClusterManager.RegionLoad> regionLoads = server.getRegionLoads();
-
-            if (metrics == null) {
-                // 没有指标数据时，只根据 Region 数量估算
-                return regionLoads.size() * 10.0;
-            }
-
-            // 1. CPU 使用率（0-100）
-            double cpuScore = metrics.getCpuUsage();
-
-            // 2. 内存使用率（0-100）
-            double memoryScore = metrics.getMemoryUsage();
-
-            // 3. 磁盘使用率（0-100）
-            double diskScore = 0;
-            if (metrics.getTotalSpace() > 0) {
-                diskScore = 100.0 * (metrics.getTotalSpace() - metrics.getAvailableSpace()) / metrics.getTotalSpace();
-            }
-
-            // 4. Region 数量分数（假设最大承载 100 个 Region）
-            double regionScore = Math.min(100, regionLoads.size() * 100.0 / 100);
-
-            // 5. 请求负载分数
-            double requestScore = calculateRequestScore(server);
-
-            // 加权计算综合分数（自动归一化）
-            double totalWeight = cpuWeight + memoryWeight + diskWeight + regionCountWeight + requestWeight;
-            if (totalWeight <= 0) {
-                totalWeight = 100;
-            }
-            return (cpuScore * cpuWeight +
-                    memoryScore * memoryWeight +
-                    diskScore * diskWeight +
-                    regionScore * regionCountWeight +
-                    requestScore * requestWeight) / totalWeight;
+            return server.getRegionLoads().size() * 10.0;
         }
 
         /**
@@ -449,15 +415,20 @@ public class LoadBalancer {
             BalanceAction simpleAction = computeSimpleStrategyAction(servers);
             if (simpleAction != null) {
                 actions.add(simpleAction);
-                lastBalanceTime = System.currentTimeMillis();
+                synchronized (this) {
+                    lastBalanceTime = System.currentTimeMillis();
+                }
             }
             return actions;
         }
 
-        // 检查迁移冷却时间
-        long now = System.currentTimeMillis();
-        if (now - lastBalanceTime < minMigrationIntervalMs) {
-            return actions; // 冷却期内不迁移
+        // 检查迁移冷却时间（synchronized 与 computeSimpleStrategyAction 共用同一把锁）
+        long now;
+        synchronized (this) {
+            now = System.currentTimeMillis();
+            if (now - lastBalanceTime < minMigrationIntervalMs) {
+                return actions; // 冷却期内不迁移
+            }
         }
 
         // 检查迁移预算
@@ -545,7 +516,9 @@ public class LoadBalancer {
                     ongoingCount, maxMigrationsPerRound, actions.size(), budget);
                 actions = new ArrayList<>(actions.subList(0, budget));
             }
-            lastBalanceTime = now;
+            synchronized (this) {
+                lastBalanceTime = now;
+            }
         }
 
         return actions;
@@ -683,7 +656,7 @@ public class LoadBalancer {
         List<ClusterManager.ServerInfo> candidates = new ArrayList<>(servers);
         candidates.removeIf(loadCalculator::isOverloaded);
         List<ClusterManager.ServerInfo> effective = candidates.isEmpty() ? servers : candidates;
-        return effective.get(random.nextInt(effective.size())).getServerId();
+        return effective.get(ThreadLocalRandom.current().nextInt(effective.size())).getServerId();
     }
 
     private synchronized ServerId selectRoundRobinServer(List<ClusterManager.ServerInfo> servers) {
@@ -715,7 +688,7 @@ public class LoadBalancer {
 
         ClusterManager.ServerInfo target;
         if (strategy == Strategy.RANDOM) {
-            target = targets.get(random.nextInt(targets.size()));
+            target = targets.get(ThreadLocalRandom.current().nextInt(targets.size()));
         } else {
             int index = Math.floorMod(roundRobinIndex++, targets.size());
             target = targets.get(index);

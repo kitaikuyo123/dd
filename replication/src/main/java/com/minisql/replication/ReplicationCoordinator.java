@@ -224,6 +224,9 @@ public class ReplicationCoordinator {
     public boolean replicateSync(String regionId, List<KeyValue> mutations) {
         try {
             return replicate(regionId, mutations).get(config.getReplicationTimeoutMs(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         } catch (Exception e) {
             logger.warn("Synchronous replication failed for region {}: {}", regionId, e.getMessage());
             return false;
@@ -233,6 +236,9 @@ public class ReplicationCoordinator {
     public boolean replicateSync(String regionId, ReplicationLogEntry entry) {
         try {
             return replicate(regionId, entry).get(config.getReplicationTimeoutMs(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         } catch (Exception e) {
             logger.warn("Synchronous replication failed for region {}: {}", regionId, e.getMessage());
             return false;
@@ -292,9 +298,16 @@ public class ReplicationCoordinator {
             failover(regionId);
         }
         registry.removeReplica(regionId, replica);
+        transportClient.removeChannel(replica);
     }
 
     public void removeReplicaGroup(String regionId) {
+        ReplicaGroup group = registry.getReplicaGroup(regionId);
+        if (group != null) {
+            for (ServerId replica : group.getReplicas()) {
+                transportClient.removeChannel(replica);
+            }
+        }
         registry.removeReplicaGroup(regionId);
         replicationQueues.remove(regionId);
         if (wal != null) {
@@ -350,6 +363,11 @@ public class ReplicationCoordinator {
             }
 
             while (running.get()) {
+                if (!replicationQueues.containsKey(regionId)) {
+                    logger.info("Replication worker for region {} stopped: queue removed", regionId);
+                    break;
+                }
+
                 try {
                     ReplicationTask firstTask = queue.poll(100, TimeUnit.MILLISECONDS);
                     if (firstTask == null) {
@@ -442,8 +460,8 @@ public class ReplicationCoordinator {
                         }
                     }
                 }
-            } catch (Exception ignored) {
-                // timeout/transport failure counts as no ack
+            } catch (Exception e) {
+                logger.warn("Replication ACK future failed for region {}: {}", regionId, e.getMessage());
             }
         }
 

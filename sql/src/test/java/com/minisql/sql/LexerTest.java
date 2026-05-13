@@ -88,7 +88,7 @@ class LexerTest {
 
         List<Token> numberTokens = tokens.stream()
                 .filter(t -> t.type == TokenType.INTEGER || t.type == TokenType.FLOAT)
-                .toList();
+                .collect(java.util.stream.Collectors.toList());
 
         assertEquals(2, numberTokens.size());
         assertEquals("25", numberTokens.get(0).value);

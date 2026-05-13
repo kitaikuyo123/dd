@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -135,6 +136,7 @@ public class MonitoringService {
             }
             row.put("readRequests", readRequests);
             row.put("writeRequests", writeRequests);
+            row.put("loadScore", displayLoadCalculator.calculateLoadScore(info));
             result.add(row);
         }
         result.sort(Comparator.comparing(row -> String.valueOf(row.get("serverId"))));
@@ -447,5 +449,24 @@ public class MonitoringService {
     private String tableName(String regionId) {
         Region region = metadataManager.getRegion(regionId);
         return region != null ? region.getTableName() : null;
+    }
+
+    /** 合并快照，用于 SSE 推送 */
+    public Map<String, Object> snapshot() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("overview", overview());
+        result.put("servers", servers());
+        result.put("timestamp", System.currentTimeMillis());
+        return result;
+    }
+
+    /** 桥接事件订阅到 ClusterEventTimeline */
+    public void setEventSubscriber(Consumer<ClusterEventTimeline.ClusterEvent> subscriber) {
+        eventTimeline.subscribe(subscriber);
+    }
+
+    /** 移除事件订阅 */
+    public void removeEventSubscriber(Consumer<ClusterEventTimeline.ClusterEvent> subscriber) {
+        eventTimeline.unsubscribe(subscriber);
     }
 }

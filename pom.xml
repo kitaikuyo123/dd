@@ -32,12 +32,11 @@
         <zookeeper.version>3.8.2</zookeeper.version>
         <curator.version>5.6.0</curator.version>
         <grpc.version>1.76.1</grpc.version>
-        <protobuf.version>3.24.0</protobuf.version>
+        <protobuf.version>3.25.5</protobuf.version>
         <rocksdb.version>8.5.3</rocksdb.version>
         <slf4j.version>2.0.9</slf4j.version>
         <log4j2.version>2.20.0</log4j2.version>
         <junit.version>5.10.0</junit.version>
-        <netty.version>4.1.100.Final</netty.version>
         <jacoco.version>0.8.12</jacoco.version>
     </properties>
 
@@ -104,13 +103,6 @@
                 <version>${rocksdb.version}</version>
             </dependency>
 
-            <!-- Netty -->
-            <dependency>
-                <groupId>io.netty</groupId>
-                <artifactId>netty-all</artifactId>
-                <version>${netty.version}</version>
-            </dependency>
-
             <!-- Logging -->
             <dependency>
                 <groupId>org.slf4j</groupId>
@@ -153,6 +145,36 @@
                 <artifactId>zookeeper</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>storage</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>sql</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>replication</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>regionserver</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>master</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.minisql</groupId>
+                <artifactId>client</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -167,6 +189,12 @@
                         <source>11</source>
                         <target>11</target>
                     </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.2.5</version>
                 </plugin>
 
                 <plugin>

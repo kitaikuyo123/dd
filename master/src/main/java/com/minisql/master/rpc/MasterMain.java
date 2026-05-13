@@ -394,6 +394,10 @@ public class MasterMain {
         int monitorPort = Integer.parseInt(System.getProperty("minisql.monitor.port", "16010"));
         SqlConsoleService sqlConsoleService = zkClient == null ? null : new SqlConsoleService(zkClient.getConnectString());
         monitorHttpServer = new MonitorHttpServer(monitoringService, sqlConsoleService);
+        monitorHttpServer.setDemoService(new com.minisql.master.monitoring.DemoService(
+            monitoringService, clusterManager, metadataManager, loadBalancer,
+            serviceImpl != null ? serviceImpl.getMigrationCoordinator() : null,
+            sqlConsoleService));
         monitorHttpServer.start(monitorHost, monitorPort);
         logger.info("Monitor HTTP server started on {}:{}", monitorHost, monitorPort);
     }
@@ -433,6 +437,19 @@ public class MasterMain {
                 ServerId serverId = parseServerIdFromPath(path);
                 if (serverId == null) {
                     return;
+                }
+                // 防竞态：RS 快速重启后旧 ZK session 过期触发 remove，
+                // 但此时 ZK 里已有新的 ephemeral node，检查 ZK 确认是否仍在线
+                try {
+                    String serverKey = serverId.getHost() + ":" + serverId.getPort();
+                    for (String active : zkManager.getActiveRegionServers()) {
+                        if (active.startsWith(serverKey + "@") || active.equals(serverKey)) {
+                            logger.info("Skipping stale ZK removal for re-registered RS: {} (new node exists)", serverId);
+                            return;
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to verify ZK state for {}, proceeding with removal", serverId, e);
                 }
                 LinkedHashSet<String> affected = new LinkedHashSet<>(clusterManager.getRegionsAssignedToServer(serverId));
                 affected.addAll(clusterManager.getRegionsReplicatedOnServer(serverId));

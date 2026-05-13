@@ -35,6 +35,8 @@ public class ReplicationWAL implements AutoCloseable {
     private static final byte[] PROGRESS_SEP = new byte[]{0x01};
 
     private RocksDB db;
+    private Options dbOptions;
+    private WriteOptions writeOptions;
     private final String dbPath;
     private final Map<String, AtomicLong> sequenceIdCache = new ConcurrentHashMap<>();
 
@@ -77,6 +79,8 @@ public class ReplicationWAL implements AutoCloseable {
                 .setCreateIfMissing(true)
                 .setWriteBufferSize(4 * 1024 * 1024)  // 4 MB
                 .setMaxWriteBufferNumber(2);
+            this.dbOptions = options;
+            this.writeOptions = new WriteOptions();
             db = RocksDB.open(options, dbPath);
             logger.info("ReplicationWAL opened at {}", dbPath);
         } catch (RocksDBException e) {
@@ -118,7 +122,7 @@ public class ReplicationWAL implements AutoCloseable {
                 batch.put(key, value);
                 entries.add(new ReplicationLogEntry(seqId, timestamp, mutations));
             }
-            db.write(new WriteOptions(), batch);
+            db.write(writeOptions, batch);
         } catch (RocksDBException e) {
             throw new RuntimeException("WAL batch append failed for region " + regionId, e);
         }
@@ -218,7 +222,7 @@ public class ReplicationWAL implements AutoCloseable {
                     it.next();
                 }
                 if (deleteCount > 0) {
-                    db.write(new WriteOptions(), batch);
+                    db.write(writeOptions, batch);
                 }
             }
         } catch (RocksDBException e) {
@@ -268,7 +272,7 @@ public class ReplicationWAL implements AutoCloseable {
             }
 
             if (wcount > 0 || pcount > 0) {
-                db.write(new WriteOptions(), batch);
+                db.write(writeOptions, batch);
             }
         } catch (RocksDBException e) {
             logger.warn("WAL deleteRegion failed for region {}: {}", regionId, e.getMessage());
@@ -282,8 +286,16 @@ public class ReplicationWAL implements AutoCloseable {
         if (db != null) {
             db.close();
             db = null;
-            logger.info("ReplicationWAL closed");
         }
+        if (writeOptions != null) {
+            writeOptions.close();
+            writeOptions = null;
+        }
+        if (dbOptions != null) {
+            dbOptions.close();
+            dbOptions = null;
+        }
+        logger.info("ReplicationWAL closed");
     }
 
     // --- Key Encoding ---
