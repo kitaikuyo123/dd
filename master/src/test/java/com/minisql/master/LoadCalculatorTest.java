@@ -7,12 +7,8 @@ import org.junit.jupiter.api.DisplayName;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-// 导入静态内部类
 import static com.minisql.master.rebalance.LoadBalancer.LoadCalculator;
 
-/**
- * LoadCalculator 单元测试
- */
 @DisplayName("LoadCalculator 测试")
 class LoadCalculatorTest {
 
@@ -24,27 +20,21 @@ class LoadCalculatorTest {
     }
 
     @Test
-    @DisplayName("测试计算服务器负载分数")
+    @DisplayName("测试计算服务器负载分数 — 每个 Region 贡献 10 分")
     void testCalculateLoadScore() {
         LoadCalculator calculator = new LoadCalculator();
 
         ServerId server = new ServerId("host1", 8080);
         ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(server, System.currentTimeMillis());
 
-        // 测试空指标
-        double load = calculator.calculateLoadScore(info);
-        assertTrue(load >= 0.0);
+        // 0 个 Region → 0 分
+        assertEquals(0.0, calculator.calculateLoadScore(info));
 
-        // 测试正常指标
-        ClusterManager.ServerMetrics metrics = new ClusterManager.ServerMetrics();
-        metrics.setCpuUsage(50.0);
-        metrics.setMemoryUsage(60.0);
-        metrics.setTotalSpace(1000L);
-        metrics.setAvailableSpace(900L);
-        info.setMetrics(metrics);
-
-        load = calculator.calculateLoadScore(info);
-        assertTrue(load >= 0.0 && load <= 100.0);
+        // 添加 5 个 Region → 50 分
+        for (int i = 0; i < 5; i++) {
+            info.updateRegionLoad("region-" + i, new ClusterManager.RegionLoad());
+        }
+        assertEquals(50.0, calculator.calculateLoadScore(info));
     }
 
     @Test
@@ -55,86 +45,53 @@ class LoadCalculatorTest {
         ServerId server = new ServerId("host1", 8080);
         ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(server, System.currentTimeMillis());
 
-        ClusterManager.ServerMetrics metrics = new ClusterManager.ServerMetrics();
-        metrics.setCpuUsage(30.0);
-        metrics.setMemoryUsage(30.0);
-        metrics.setTotalSpace(1000L);
-        metrics.setAvailableSpace(700L);
-        info.setMetrics(metrics);
+        // 0 个 Region → 剩余容量 100
+        assertEquals(100.0, calculator.getRemainingCapacity(info));
 
-        double remaining = calculator.getRemainingCapacity(info);
-        assertTrue(remaining > 0);
+        // 3 个 Region → 剩余容量 70
+        for (int i = 0; i < 3; i++) {
+            info.updateRegionLoad("region-" + i, new ClusterManager.RegionLoad());
+        }
+        assertEquals(70.0, calculator.getRemainingCapacity(info));
     }
 
     @Test
-    @DisplayName("测试判断服务器是否过载")
-    void testIsOverloaded() throws Exception {
+    @DisplayName("测试判断服务器是否过载 — Region > 7 时过载")
+    void testIsOverloaded() {
         LoadCalculator calculator = new LoadCalculator();
 
-        ServerId idleServer = new ServerId("host1", 8080);
-        ServerId busyServer = new ServerId("host2", 8080);
+        ServerId server = new ServerId("host1", 8080);
+        ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(server, System.currentTimeMillis());
 
-        ClusterManager.ServerInfo idleInfo = new ClusterManager.ServerInfo(idleServer, System.currentTimeMillis());
-        ClusterManager.ServerInfo busyInfo = new ClusterManager.ServerInfo(busyServer, System.currentTimeMillis());
-
-        ClusterManager.ServerMetrics idleMetrics = new ClusterManager.ServerMetrics();
-        idleMetrics.setCpuUsage(10.0);
-        idleMetrics.setMemoryUsage(10.0);
-        idleMetrics.setTotalSpace(1000L);
-        idleMetrics.setAvailableSpace(900L);
-        idleInfo.setMetrics(idleMetrics);
-
-        // 设置高负载指标使服务器过载（需要超过 80 分）
-        ClusterManager.ServerMetrics busyMetrics = new ClusterManager.ServerMetrics();
-        busyMetrics.setCpuUsage(90.0);
-        busyMetrics.setMemoryUsage(95.0);
-        busyMetrics.setTotalSpace(1000L);
-        busyMetrics.setAvailableSpace(5L);  // 99.5% 磁盘使用率
-        busyInfo.setMetrics(busyMetrics);
-
-        // 添加 Region 负载增加分数（每个 Region 约 1 分）
-        for (int i = 0; i < 10; i++) {
-            ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
-            load.setRegionId("region-" + i);
-            load.setReadRequests(10000);
-            load.setWriteRequests(5000);
-            load.setStoreFileSize(100 * 1024 * 1024); // 100MB
-            busyInfo.updateRegionLoad("region-" + i, load);
+        // 7 个 Region → 70 分 → 不过载（需要 > 70）
+        for (int i = 0; i < 7; i++) {
+            info.updateRegionLoad("region-" + i, new ClusterManager.RegionLoad());
         }
+        assertFalse(calculator.isOverloaded(info));
 
-        // 第一次调用建立请求基线（requestScore 为 0，因为无历史数据算不出 QPS）
-        assertFalse(calculator.isOverloaded(idleInfo));
-        assertFalse(calculator.isOverloaded(busyInfo));
-
-        // 模拟请求增长，使 requestScore 贡献足够分数以触发过载
-        Thread.sleep(50);
-        for (int i = 0; i < 10; i++) {
-            ClusterManager.RegionLoad load = new ClusterManager.RegionLoad();
-            load.setRegionId("region-" + i);
-            load.setReadRequests(20000);
-            load.setWriteRequests(10000);
-            load.setStoreFileSize(100 * 1024 * 1024);
-            busyInfo.updateRegionLoad("region-" + i, load);
-        }
-
-        assertTrue(calculator.isOverloaded(busyInfo));
+        // 8 个 Region → 80 分 → 过载
+        info.updateRegionLoad("region-7", new ClusterManager.RegionLoad());
+        assertTrue(calculator.isOverloaded(info));
     }
 
     @Test
-    @DisplayName("测试判断服务器是否空闲")
+    @DisplayName("测试判断服务器是否空闲 — Region < 3 时空闲")
     void testIsIdle() {
         LoadCalculator calculator = new LoadCalculator();
 
-        ServerId idleServer = new ServerId("host1", 8080);
-        ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(idleServer, System.currentTimeMillis());
+        ServerId server = new ServerId("host1", 8080);
+        ClusterManager.ServerInfo info = new ClusterManager.ServerInfo(server, System.currentTimeMillis());
 
-        ClusterManager.ServerMetrics metrics = new ClusterManager.ServerMetrics();
-        metrics.setCpuUsage(10.0);
-        metrics.setMemoryUsage(10.0);
-        metrics.setTotalSpace(1000L);
-        metrics.setAvailableSpace(900L);
-        info.setMetrics(metrics);
-
+        // 0 个 Region → 空闲
         assertTrue(calculator.isIdle(info));
+
+        // 2 个 Region → 20 分 → 空闲（需要 < 30）
+        info.updateRegionLoad("region-0", new ClusterManager.RegionLoad());
+        info.updateRegionLoad("region-1", new ClusterManager.RegionLoad());
+        assertTrue(calculator.isIdle(info));
+
+        // 3 个 Region → 30 分 → 不空闲
+        info.updateRegionLoad("region-2", new ClusterManager.RegionLoad());
+        assertFalse(calculator.isIdle(info));
     }
 }

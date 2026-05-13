@@ -66,10 +66,6 @@ public class MonitoringService {
         this.hotSpotCoordinator = hotSpotCoordinator;
     }
 
-    public void setLoadBalanceRequestTargetQps(double maxTargetQps) {
-        displayLoadCalculator.setMaxTargetQps(maxTargetQps);
-    }
-
     public void recordSqlMetric(String sqlType, String tableName, boolean success, long latencyMs,
                                 List<String> regionIds, String errorMessage, String source) {
         sqlMetricsRegistry.record(sqlType, tableName, success, latencyMs);

@@ -199,42 +199,20 @@ public class MasterMain {
         double loadBalanceThreshold = parseDoubleProperty(config, "load.balance.threshold", 20.0d);
         long minMigrationIntervalMs = Math.max(0L,
             parseLongProperty(config, "load.balance.min.migration.interval.ms", TimeUnit.MINUTES.toMillis(5)));
-        double loadBalanceMaxTargetQps = parseDoubleProperty(config, "load.balance.request.max.target.qps", 5000.0d);
         loadBalancer.setStrategy(strategy);
         loadBalancer.setBalanceThreshold(loadBalanceThreshold);
         loadBalancer.setMinMigrationIntervalMs(minMigrationIntervalMs);
-        loadBalancer.setMaxTargetQps(loadBalanceMaxTargetQps);
-        // 权重配置
-        int weightCpu = parseIntProperty(config, "load.balance.weight.cpu", 25);
-        int weightMemory = parseIntProperty(config, "load.balance.weight.memory", 25);
-        int weightDisk = parseIntProperty(config, "load.balance.weight.disk", 20);
-        int weightRegionCount = parseIntProperty(config, "load.balance.weight.region.count", 15);
-        int weightRequest = parseIntProperty(config, "load.balance.weight.request", 15);
-        loadBalancer.configureWeights(weightCpu, weightMemory, weightDisk, weightRegionCount, weightRequest);
         int maxMigrationsPerRound = parseIntProperty(config, "load.balance.max.migrations.per.round", 3);
         loadBalancer.setMaxMigrationsPerRound(maxMigrationsPerRound);
-        double ewmaAlpha = parseDoubleProperty(config, "load.balance.ewma.alpha", 0.3);
-        double ewmaTrendThreshold = parseDoubleProperty(config, "load.balance.ewma.trend.threshold", 5.0);
-        int ewmaPredictionSteps = parseIntProperty(config, "load.balance.ewma.prediction.steps", 2);
-        loadBalancer.configureEwma(ewmaAlpha, ewmaTrendThreshold, ewmaPredictionSteps);
-        double regionBenefitW = parseDoubleProperty(config, "load.balance.region.weight.benefit", 1.0);
-        double regionCostW = parseDoubleProperty(config, "load.balance.region.weight.cost", 0.5);
-        double regionWriteW = parseDoubleProperty(config, "load.balance.region.weight.write.penalty", 0.8);
-        double regionFitW = parseDoubleProperty(config, "load.balance.region.weight.fit", 0.3);
-        loadBalancer.configureRegionSelectionWeights(regionBenefitW, regionCostW, regionWriteW, regionFitW);
         double hotSpotPenalty = parseDoubleProperty(config, "load.balance.hotspot.penalty.weight", 15.0);
         loadBalancer.setHotSpotPenaltyWeight(hotSpotPenalty);
         loadBalanceEnabled = parseBooleanProperty(config, "load.balance.enabled", true);
         loadBalanceIntervalMs = Math.max(1_000L,
             parseLongProperty(config, "load.balance.interval.ms", TimeUnit.MINUTES.toMillis(5)));
         logger.info(
-            "Configured load balance properties: enabled={} interval={}ms strategy={} threshold={} minMigrationInterval={}ms maxTargetQps={}",
-            loadBalanceEnabled,
-            loadBalanceIntervalMs,
-            strategy,
-            loadBalancer.getBalanceThreshold(),
-            loadBalancer.getMinMigrationIntervalMs(),
-            loadBalanceMaxTargetQps);
+            "Configured load balance: enabled={} interval={}ms strategy={} threshold={} minMigration={}ms maxMigrations={}",
+            loadBalanceEnabled, loadBalanceIntervalMs, strategy,
+            loadBalancer.getBalanceThreshold(), loadBalancer.getMinMigrationIntervalMs(), maxMigrationsPerRound);
         hotSpotDetectorIntervalMs = parseLongProperty(config, "hotspot.detector.interval.ms", 10_000L);
         long hotSpotReadThreshold = parseLongProperty(config, "hotspot.read.threshold.per.interval", 200L);
         long hotSpotWriteThreshold = parseLongProperty(config, "hotspot.write.threshold.per.interval", 100L);
@@ -287,7 +265,6 @@ public class MasterMain {
         recoveryCoordinator.start();
 
         monitoringService = new MonitoringService(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
-        monitoringService.setLoadBalanceRequestTargetQps(loadBalanceMaxTargetQps);
         replicaMonitor.registerCallback(monitoringService.replicaEventCallback());
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
@@ -621,23 +598,8 @@ public class MasterMain {
             double threshold = parseDoubleProperty(newConfig, "load.balance.threshold", loadBalancer.getBalanceThreshold());
             loadBalancer.setStrategy(strategy);
             loadBalancer.setBalanceThreshold(threshold);
-            int wCpu = parseIntProperty(newConfig, "load.balance.weight.cpu", 25);
-            int wMem = parseIntProperty(newConfig, "load.balance.weight.memory", 25);
-            int wDisk = parseIntProperty(newConfig, "load.balance.weight.disk", 20);
-            int wRc = parseIntProperty(newConfig, "load.balance.weight.region.count", 15);
-            int wReq = parseIntProperty(newConfig, "load.balance.weight.request", 15);
-            loadBalancer.configureWeights(wCpu, wMem, wDisk, wRc, wReq);
             int maxMigrations = parseIntProperty(newConfig, "load.balance.max.migrations.per.round", 3);
             loadBalancer.setMaxMigrationsPerRound(maxMigrations);
-            double eAlpha = parseDoubleProperty(newConfig, "load.balance.ewma.alpha", 0.3);
-            double eTrend = parseDoubleProperty(newConfig, "load.balance.ewma.trend.threshold", 5.0);
-            int eSteps = parseIntProperty(newConfig, "load.balance.ewma.prediction.steps", 2);
-            loadBalancer.configureEwma(eAlpha, eTrend, eSteps);
-            double rBenefit = parseDoubleProperty(newConfig, "load.balance.region.weight.benefit", 1.0);
-            double rCost = parseDoubleProperty(newConfig, "load.balance.region.weight.cost", 0.5);
-            double rWrite = parseDoubleProperty(newConfig, "load.balance.region.weight.write.penalty", 0.8);
-            double rFit = parseDoubleProperty(newConfig, "load.balance.region.weight.fit", 0.3);
-            loadBalancer.configureRegionSelectionWeights(rBenefit, rCost, rWrite, rFit);
             double hsPenalty = parseDoubleProperty(newConfig, "load.balance.hotspot.penalty.weight", 15.0);
             loadBalancer.setHotSpotPenaltyWeight(hsPenalty);
             loadBalanceEnabled = parseBooleanProperty(newConfig, "load.balance.enabled", loadBalanceEnabled);
@@ -669,13 +631,6 @@ public class MasterMain {
             }
             logger.info("Reloaded hotspot: readThresh={} writeThresh={} cooldown={}ms interval={}ms",
                 readThreshold, writeThreshold, hotSpotCooldown, hotSpotDetectorIntervalMs);
-        }
-
-        // Hot-reload monitoring target QPS
-        double targetQps = parseDoubleProperty(newConfig, "load.balance.request.max.target.qps",
-            newConfig.getProperty("load.balance.request.max.target.qps") != null ? 5000.0d : 5000.0d);
-        if (monitoringService != null) {
-            monitoringService.setLoadBalanceRequestTargetQps(targetQps);
         }
 
         this.config = newConfig;

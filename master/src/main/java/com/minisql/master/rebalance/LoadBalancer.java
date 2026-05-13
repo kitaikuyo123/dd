@@ -9,18 +9,16 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import com.minisql.master.rebalance.RegionMigrationCoordinator;
 
 /**
- * 负载均衡器（改进版）
- * 基于综合负载指标进行 Region 分配和迁移决策
+ * 负载均衡器
+ * 基于 Region 数量进行负载均衡决策，策略简单可预测（类 HBase 默认策略）。
  */
 public class LoadBalancer {
 
     private static final Logger logger = LoggerFactory.getLogger(LoadBalancer.class);
     private static final double DEFAULT_BALANCE_THRESHOLD = 20.0;
     private static final long DEFAULT_MIN_MIGRATION_INTERVAL_MS = 300000L;
-    private static final double DEFAULT_MAX_TARGET_QPS = 5000.0;
 
     private final LoadCalculator loadCalculator = new LoadCalculator();
     private volatile Strategy strategy = Strategy.LOAD_BASED;
@@ -46,217 +44,43 @@ public class LoadBalancer {
     }
 
     /**
-     * 负载计算器（内部类）
-     * 综合计算服务器的负载分数，用于负载均衡决策
-     *
-     * 五个指标权重可通过 configureWeights 调整，使用时自动归一化为百分比。
-     * 默认权重: CPU=25, 内存=25, 磁盘=20, Region数量=15, 请求负载=15
+     * 负载计算器
+     * 基于 Region 数量计算服务器负载分数
      */
     public static class LoadCalculator {
 
-        // 可配置权重（相对值，使用时自动归一化）
-        private volatile int cpuWeight = 25;
-        private volatile int memoryWeight = 25;
-        private volatile int diskWeight = 20;
-        private volatile int regionCountWeight = 15;
-        private volatile int requestWeight = 15;
-
-        // EWMA 跟踪器（用于负载预测）
-        private final Map<String, EwmaTracker> requestTrackers = new ConcurrentHashMap<>();
-        private volatile double maxTargetQps = DEFAULT_MAX_TARGET_QPS;
-
-        // EWMA 参数
-        private volatile double ewmaAlpha = 0.3;
-        private volatile double ewmaTrendThreshold = 5.0;
-        private volatile int ewmaPredictionSteps = 2;
+        private static final double SCORE_PER_REGION = 10.0;
 
         public LoadCalculator() {
         }
 
         /**
-         * 计算服务器综合负载分数（0-100，越小越空闲）
-         * 基于 Region 数量：每个 Region 贡献 10 分
+         * 计算服务器负载分数（每个 Region 贡献 10 分）
          */
         public double calculateLoadScore(ClusterManager.ServerInfo server) {
-            return server.getRegionLoads().size() * 10.0;
+            return server.getRegionLoads().size() * SCORE_PER_REGION;
         }
 
         /**
-         * 计算请求负载分数
-         * 使用 EWMA 预测的 QPS 替代简单均值，提供趋势感知
-         */
-        private double calculateRequestScore(ClusterManager.ServerInfo server) {
-            long totalRequests = 0;
-            for (ClusterManager.RegionLoad load : server.getRegionLoads().values()) {
-                totalRequests += load.getReadRequests() + load.getWriteRequests();
-            }
-
-            // 更新 EWMA 跟踪器
-            String serverId = server.getServerId().toString();
-            EwmaTracker tracker = requestTrackers.computeIfAbsent(serverId, k -> new EwmaTracker());
-            tracker.addSample(totalRequests);
-
-            // 使用预测 QPS（考虑趋势方向）
-            double predictedQps = tracker.getPredictedQps(ewmaPredictionSteps);
-
-            double effectiveMaxTargetQps = maxTargetQps > 0.0 ? maxTargetQps : DEFAULT_MAX_TARGET_QPS;
-            double baseScore = Math.min(100, (predictedQps / effectiveMaxTargetQps) * 100.0);
-
-            // QPS 超过阈值时加惩罚，防止突发倾斜
-            double penaltyThreshold = effectiveMaxTargetQps * 0.1;
-            if (predictedQps > penaltyThreshold) {
-                baseScore += 10;
-            }
-
-            return Math.min(100, baseScore);
-        }
-
-        /**
-         * 获取服务器剩余容量估计（0-100，越大越能承载更多负载）
+         * 获取服务器剩余容量（100 - 负载分数）
          */
         public double getRemainingCapacity(ClusterManager.ServerInfo server) {
-            double loadScore = calculateLoadScore(server);
-            return Math.max(0, 100 - loadScore);
+            return Math.max(0, 100 - calculateLoadScore(server));
         }
 
         /**
-         * 判断服务器是否过载
+         * 判断服务器是否过载（负载 > 70）
          */
         public boolean isOverloaded(ClusterManager.ServerInfo server) {
             return calculateLoadScore(server) > 70;
         }
 
         /**
-         * 判断服务器是否空闲
+         * 判断服务器是否空闲（负载 < 30）
          */
         public boolean isIdle(ClusterManager.ServerInfo server) {
             return calculateLoadScore(server) < 30;
         }
-
-        /**
-         * EWMA（指数加权移动平均）跟踪器
-         * 通过指数平滑计算 QPS 趋势，并预测未来负载。
-         *
-         * 算法：
-         *   ewma_new = alpha * current_qps + (1 - alpha) * ewma_old
-         *   trend = ewma_new - ewma_old
-         *   predicted = ewma + trend * steps
-         */
-        private class EwmaTracker {
-            private double ewma = 0;
-            private double previousEwma = 0;
-            private long lastTimestamp = 0;
-            private long lastRequestCount = -1;
-            private boolean initialized = false;
-
-            synchronized void addSample(long totalRequests) {
-                long now = System.currentTimeMillis();
-
-                if (lastRequestCount >= 0 && lastTimestamp > 0) {
-                    long timeDelta = now - lastTimestamp;
-                    if (timeDelta > 0) {
-                        long requestDelta = totalRequests - lastRequestCount;
-                        double currentQps = (requestDelta * 1000.0) / timeDelta;
-
-                        previousEwma = ewma;
-                        double alpha = ewmaAlpha;
-                        ewma = alpha * currentQps + (1 - alpha) * ewma;
-                        initialized = true;
-                    }
-                }
-
-                lastTimestamp = now;
-                lastRequestCount = totalRequests;
-            }
-
-            synchronized double getPredictedQps(int steps) {
-                if (!initialized) {
-                    return 0;
-                }
-                double trend = ewma - previousEwma;
-                double predicted = ewma + trend * steps;
-                return Math.max(0, predicted);
-            }
-
-            synchronized double getTrend() {
-                if (!initialized) {
-                    return 0;
-                }
-                return ewma - previousEwma;
-            }
-
-            synchronized double getEwma() {
-                return ewma;
-            }
-        }
-
-        public void setMaxTargetQps(double maxTargetQps) {
-            if (maxTargetQps <= 0.0) {
-                return;
-            }
-            this.maxTargetQps = maxTargetQps;
-        }
-
-        /**
-         * 配置 EWMA 参数
-         *
-         * @param alpha          平滑系数（0-1），越大越重视最新数据
-         * @param trendThreshold 趋势判定阈值
-         * @param predictionSteps 预测步数
-         */
-        public void configureEwma(double alpha, double trendThreshold, int predictionSteps) {
-            if (alpha > 0 && alpha < 1) {
-                this.ewmaAlpha = alpha;
-            }
-            if (trendThreshold > 0) {
-                this.ewmaTrendThreshold = trendThreshold;
-            }
-            if (predictionSteps > 0 && predictionSteps <= 10) {
-                this.ewmaPredictionSteps = predictionSteps;
-            }
-        }
-
-        /**
-         * 配置五个指标的权重（相对值，使用时自动归一化为百分比）
-         *
-         * @param cpu        CPU 使用率权重
-         * @param memory     内存使用率权重
-         * @param disk       磁盘使用率权重
-         * @param regionCount Region 数量权重
-         * @param request    请求负载权重
-         */
-        public void configureWeights(int cpu, int memory, int disk, int regionCount, int request) {
-            if (cpu < 0 || memory < 0 || disk < 0 || regionCount < 0 || request < 0) {
-                return;
-            }
-            if (cpu + memory + disk + regionCount + request == 0) {
-                return;
-            }
-            this.cpuWeight = cpu;
-            this.memoryWeight = memory;
-            this.diskWeight = disk;
-            this.regionCountWeight = regionCount;
-            this.requestWeight = request;
-        }
-    }
-
-    /** 获取负载计算器实例 */
-    public LoadCalculator getLoadCalculator() {
-        return loadCalculator;
-    }
-
-    /**
-     * 配置负载计算器权重
-     */
-    public void configureWeights(int cpu, int memory, int disk, int regionCount, int request) {
-        loadCalculator.configureWeights(cpu, memory, disk, regionCount, request);
-    }
-
-    /**
-     * 配置 EWMA 负载预测参数
-     */
-    public void configureEwma(double alpha, double trendThreshold, int predictionSteps) {
-        loadCalculator.configureEwma(alpha, trendThreshold, predictionSteps);
     }
 
     // 上次迁移时间
@@ -265,12 +89,6 @@ public class LoadBalancer {
     // 迁移预算控制
     private volatile int maxMigrationsPerRound = 3;
     private volatile RegionMigrationCoordinator migrationCoordinator;
-
-    // Region 选择成本模型权重
-    private volatile double regionBenefitWeight = 1.0;
-    private volatile double regionCostWeight = 0.5;
-    private volatile double regionWritePenaltyWeight = 0.8;
-    private volatile double regionFitWeight = 0.3;
 
     // 热点感知
     private final HotSpotRegistry hotSpotRegistry = new HotSpotRegistry();
@@ -327,28 +145,9 @@ public class LoadBalancer {
         return minMigrationIntervalMs;
     }
 
-    public void setMaxTargetQps(double maxTargetQps) {
-        loadCalculator.setMaxTargetQps(maxTargetQps);
-    }
-
-    /**
-     * 配置 Region 选择成本模型的四个权重
-     *
-     * @param benefit      负载降低收益权重（默认 1.0）
-     * @param cost         迁移传输成本权重（默认 0.5）
-     * @param writePenalty 写密集惩罚权重（默认 0.8）
-     * @param fit          目标服务器适配度权重（默认 0.3）
-     */
-    public void configureRegionSelectionWeights(double benefit, double cost, double writePenalty, double fit) {
-        if (benefit >= 0) this.regionBenefitWeight = benefit;
-        if (cost >= 0) this.regionCostWeight = cost;
-        if (writePenalty >= 0) this.regionWritePenaltyWeight = writePenalty;
-        if (fit >= 0) this.regionFitWeight = fit;
-    }
-
     /**
      * 为 Region 选择最优的 RegionServer
-     * 基于综合负载分数和热点感知选择最合适的服务器
+     * 基于负载分数和热点感知选择最合适的服务器
      */
     public ServerId selectServerForRegion(Region region, List<ClusterManager.ServerInfo> servers) {
         if (servers.isEmpty()) {
@@ -383,11 +182,10 @@ public class LoadBalancer {
         // 获取 Region 所属表名用于热点惩罚计算
         String tableName = region != null ? region.getTableName() : null;
 
-        // 选择调整后剩余容量最大的服务器（扣除热点惩罚）
+        // 选择剩余容量最大的服务器（扣除热点惩罚）
         ClusterManager.ServerInfo bestServer = candidates.stream()
             .max(Comparator.comparingDouble(server -> {
                 double remainingCapacity = loadCalculator.getRemainingCapacity(server);
-                // 热点惩罚：如果目标服务器已有同表的热点 Region，降低其优先级
                 if (tableName != null) {
                     int hotCount = hotSpotRegistry.countHotRegionsForTableOnServer(
                         tableName, server.getRegionLoads().keySet());
@@ -401,8 +199,7 @@ public class LoadBalancer {
     }
 
     /**
-     * 计算需要迁移的 Region（改进版）
-     * 基于综合负载分数而非简单的 Region 数量
+     * 计算需要迁移的 Region
      */
     public List<BalanceAction> computeBalanceActions(List<ClusterManager.ServerInfo> servers) {
         List<BalanceAction> actions = new ArrayList<>();
@@ -422,12 +219,12 @@ public class LoadBalancer {
             return actions;
         }
 
-        // 检查迁移冷却时间（synchronized 与 computeSimpleStrategyAction 共用同一把锁）
+        // 检查迁移冷却时间
         long now;
         synchronized (this) {
             now = System.currentTimeMillis();
             if (now - lastBalanceTime < minMigrationIntervalMs) {
-                return actions; // 冷却期内不迁移
+                return actions;
             }
         }
 
@@ -436,7 +233,7 @@ public class LoadBalancer {
             ? migrationCoordinator.getOngoingMigrationCount() : 0;
         int budget = Math.max(0, maxMigrationsPerRound - ongoingCount);
         if (budget <= 0) {
-            return actions; // 已达到最大并发迁移数
+            return actions;
         }
 
         // 计算每个服务器的负载分数
@@ -464,22 +261,19 @@ public class LoadBalancer {
             }
         }
 
-        // 按负载降序排列过载服务器（先处理负载最高的）
+        // 按负载降序排列过载服务器
         overloadedServers.sort((a, b) -> Double.compare(loadScores.get(b), loadScores.get(a)));
 
-        // 按剩余容量降序排列低载服务器（优先选择容量最大的）
+        // 按剩余容量降序排列低载服务器
         underloadedServers.sort((a, b) -> Double.compare(
             loadCalculator.getRemainingCapacity(b),
-            loadCalculator.getRemainingCapacity(a)
-        ));
+            loadCalculator.getRemainingCapacity(a)));
 
         // 生成迁移动作
         Set<String> scheduledRegions = new HashSet<>();
 
         for (ClusterManager.ServerInfo overloaded : overloadedServers) {
             double currentLoad = loadScores.get(overloaded);
-
-            // 需要降低到的目标负载
             double targetLoad = avgLoad;
 
             for (ClusterManager.ServerInfo underloaded : underloadedServers) {
@@ -488,8 +282,7 @@ public class LoadBalancer {
                 }
 
                 // 选择要迁移的 Region
-                String regionId = selectBestRegionToMove(overloaded, underloaded, scheduledRegions,
-                    loadScores.get(overloaded), avgLoad);
+                String regionId = selectBestRegionToMove(overloaded, underloaded, scheduledRegions);
 
                 if (regionId != null) {
                     actions.add(new BalanceAction(
@@ -498,19 +291,12 @@ public class LoadBalancer {
                         underloaded.getServerId()
                     ));
                     scheduledRegions.add(regionId);
-
-                    // 估算迁移后的负载变化
-                    ClusterManager.RegionLoad regionLoad = overloaded.getRegionLoads().get(regionId);
-                    if (regionLoad != null) {
-                        double regionWeight = estimateRegionWeight(regionLoad);
-                        currentLoad -= regionWeight;
-                    }
+                    currentLoad -= 10.0; // 每个 Region 固定贡献 10 分
                 }
             }
         }
 
         if (!actions.isEmpty()) {
-            // 按预算截断迁移动作
             if (actions.size() > budget) {
                 logger.info("Migration budget: {}/{} used, truncating {} actions to {}",
                     ongoingCount, maxMigrationsPerRound, actions.size(), budget);
@@ -525,131 +311,18 @@ public class LoadBalancer {
     }
 
     /**
-     * 选择最佳的 Region 进行迁移（多因子成本模型）
-     *
-     * 评分公式：
-     *   score = W_benefit * load_reduction
-     *         - W_cost * migration_cost
-     *         - W_write * write_penalty
-     *         + W_fit * target_fit
-     *
-     * @param source           源服务器
-     * @param target           目标服务器
-     * @param excludedRegions  已调度或不可迁移的 Region 集合
-     * @param sourceScore      源服务器当前负载分数
-     * @param avgLoad          集群平均负载分数
+     * 选择要迁移的 Region（排除已调度和目标已有的）
      */
     private String selectBestRegionToMove(ClusterManager.ServerInfo source,
                                           ClusterManager.ServerInfo target,
-                                          Set<String> excludedRegions,
-                                          double sourceScore,
-                                          double avgLoad) {
-        Map<String, ClusterManager.RegionLoad> regionLoads = source.getRegionLoads();
-
-        // 计算源服务器总 QPS（用于 load_reduction 计算）
-        long sourceTotalRequests = 0;
-        for (ClusterManager.RegionLoad load : regionLoads.values()) {
-            sourceTotalRequests += load.getReadRequests() + load.getWriteRequests();
-        }
-
-        String bestRegion = null;
-        double bestScore = Double.NEGATIVE_INFINITY;
-
-        for (Map.Entry<String, ClusterManager.RegionLoad> entry : regionLoads.entrySet()) {
-            String regionId = entry.getKey();
-
-            if (excludedRegions.contains(regionId)) {
-                continue;
-            }
-            if (target != null && target.getRegionLoads().containsKey(regionId)) {
-                continue;
-            }
-
-            ClusterManager.RegionLoad load = entry.getValue();
-
-            // 因子1：负载降低收益 — 该 Region 对源服务器过载的贡献度
-            double loadReduction = computeLoadReduction(load, sourceTotalRequests, sourceScore, avgLoad);
-
-            // 因子2：迁移传输成本
-            double migrationCost = computeMigrationCost(load);
-
-            // 因子3：写密集惩罚
-            double writePenalty = computeWritePenalty(load);
-
-            // 因子4：目标服务器适配度
-            double targetFit = computeTargetFit(load, target);
-
-            double score = regionBenefitWeight * loadReduction
-                         - regionCostWeight * migrationCost
-                         - regionWritePenaltyWeight * writePenalty
-                         + regionFitWeight * targetFit;
-
-            if (score > bestScore) {
-                bestScore = score;
-                bestRegion = regionId;
+                                          Set<String> excludedRegions) {
+        for (String regionId : source.getRegionLoads().keySet()) {
+            if (!excludedRegions.contains(regionId)
+                && !target.getRegionLoads().containsKey(regionId)) {
+                return regionId;
             }
         }
-
-        return bestRegion;
-    }
-
-    /**
-     * 计算迁移该 Region 能降低的负载
-     * 贡献度 = (regionQPS / serverQPS) * (sourceScore - avgLoad)
-     */
-    private double computeLoadReduction(ClusterManager.RegionLoad regionLoad,
-                                         long sourceTotalRequests,
-                                         double sourceScore,
-                                         double avgLoad) {
-        long regionRequests = regionLoad.getReadRequests() + regionLoad.getWriteRequests();
-        double contribution = sourceTotalRequests > 0
-            ? (double) regionRequests / sourceTotalRequests : 0;
-        return contribution * Math.max(0, sourceScore - avgLoad);
-    }
-
-    /**
-     * 计算迁移传输成本（以 100MB 为单位）
-     */
-    private double computeMigrationCost(ClusterManager.RegionLoad load) {
-        return load.getStoreFileSize() / (100.0 * 1024 * 1024);
-    }
-
-    /**
-     * 计算写密集惩罚
-     * 写比例越高惩罚越大（二次方增长）
-     */
-    private double computeWritePenalty(ClusterManager.RegionLoad load) {
-        long reads = load.getReadRequests();
-        long writes = load.getWriteRequests();
-        long total = reads + writes;
-        if (total == 0) {
-            return 0;
-        }
-        double writeRatio = (double) writes / total;
-        return writeRatio * writeRatio * 10.0; // 惩罚因子
-    }
-
-    /**
-     * 计算目标服务器接收 Region 后的容量余量
-     * 余量 = 1 - (targetScore + regionWeight) / 100
-     */
-    private double computeTargetFit(ClusterManager.RegionLoad load, ClusterManager.ServerInfo target) {
-        if (target == null) {
-            return 0;
-        }
-        double targetScore = loadCalculator.calculateLoadScore(target);
-        double regionWeight = estimateRegionWeight(load);
-        return Math.max(0, 1.0 - (targetScore + regionWeight) / 100.0);
-    }
-
-    /**
-     * 估算 Region 的负载权重
-     */
-    private double estimateRegionWeight(ClusterManager.RegionLoad load) {
-        // 基于大小和请求量估算
-        double sizeWeight = load.getStoreFileSize() / (100 * 1024 * 1024.0); // 每 100MB = 1 分
-        double requestWeight = (load.getReadRequests() + load.getWriteRequests()) / 10000.0; // 每 10000 请求 = 1 分
-        return sizeWeight + requestWeight;
+        return null;
     }
 
     private ServerId selectRandomServer(List<ClusterManager.ServerInfo> servers) {
@@ -720,20 +393,13 @@ public class LoadBalancer {
 
     /**
      * 热点注册表
-     * 维护热点 Region 与其所属表的映射关系，供负载均衡放置决策时参考。
+     * 维护热点 Region 与其所属表的映射关系，供放置决策参考
      */
     public static class HotSpotRegistry {
         private final Map<String, String> regionToTable = new ConcurrentHashMap<>();
 
-        /**
-         * 更新热点信息
-         * @param hotSpots    当前热点 Region 映射（regionId -> HotSpotInfo）
-         * @param tableResolver 通过 regionId 解析 tableName 的函数
-         */
         public void updateHotSpots(Map<String, ?> hotSpots, java.util.function.Function<String, String> tableResolver) {
-            // 清除已消失的热点
             regionToTable.keySet().retainAll(hotSpots.keySet());
-            // 更新或新增热点映射
             for (String regionId : hotSpots.keySet()) {
                 String tableName = tableResolver != null ? tableResolver.apply(regionId) : null;
                 if (tableName != null) {
@@ -742,19 +408,10 @@ public class LoadBalancer {
             }
         }
 
-        /**
-         * 清除指定 Region 的热点标记
-         */
         public void clearHotSpot(String regionId) {
             regionToTable.remove(regionId);
         }
 
-        /**
-         * 统计指定服务器上同表热点 Region 的数量
-         * @param tableName     表名
-         * @param regionIdsOnServer 服务器上的所有 Region ID 集合
-         * @return 同表热点 Region 数量
-         */
         public int countHotRegionsForTableOnServer(String tableName, Set<String> regionIdsOnServer) {
             if (tableName == null || regionIdsOnServer == null) {
                 return 0;
@@ -768,9 +425,6 @@ public class LoadBalancer {
             return count;
         }
 
-        /**
-         * 判断指定 Region 是否为热点
-         */
         public boolean isHotSpot(String regionId) {
             return regionToTable.containsKey(regionId);
         }
