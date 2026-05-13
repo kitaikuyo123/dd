@@ -162,7 +162,13 @@ public class ReplicationCoordinator {
     }
 
     public void createReplicaGroup(Region region, List<ServerId> replicaServers) {
-        ReplicaGroup group = registry.createReplicaGroup(region, replicaServers, config.getReplicationFactor());
+        createReplicaGroup(region, replicaServers, null);
+    }
+
+    public void createReplicaGroup(Region region, List<ServerId> replicaServers,
+                                   TopologyProvider topologyProvider) {
+        ReplicaGroup group = registry.createReplicaGroup(region, replicaServers,
+            config.getReplicationFactor(), topologyProvider);
         replicationQueues.put(region.getRegionId(), new LinkedBlockingQueue<>());
         startReplicationWorker(region.getRegionId());
         registry.recordPrimaryProgress(region.getRegionId(), currentSequenceId(region.getRegionId()));

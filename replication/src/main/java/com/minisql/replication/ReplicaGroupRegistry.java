@@ -14,14 +14,25 @@ public class ReplicaGroupRegistry {
     private final Map<String, ReplicaGroup> replicaGroups = new ConcurrentHashMap<>();
 
     public ReplicaGroup createReplicaGroup(Region region, List<ServerId> replicaServers, int replicationFactor) {
+        return createReplicaGroup(region, replicaServers, replicationFactor, null);
+    }
+
+    public ReplicaGroup createReplicaGroup(Region region, List<ServerId> replicaServers,
+                                           int replicationFactor, TopologyProvider topologyProvider) {
         if (replicaServers == null || replicaServers.isEmpty()) {
             throw new IllegalArgumentException("At least one server is required for replication group creation");
         }
 
         String regionId = region.getRegionId();
-        ReplicaGroup group = new ReplicaGroup(regionId);
-        group.setPrimary(replicaServers.get(0));
-        for (int i = 0; i < replicationFactor && i < replicaServers.size(); i++) {
+        int effectiveCount = Math.min(replicationFactor, replicaServers.size());
+
+        TopologyProvider provider = topologyProvider != null
+            ? topologyProvider
+            : new LocalTopologyProvider(replicaServers.get(0),
+                replicaServers.subList(0, effectiveCount));
+
+        ReplicaGroup group = new ReplicaGroup(regionId, provider);
+        for (int i = 0; i < effectiveCount; i++) {
             ServerId serverId = replicaServers.get(i);
             group.addReplica(serverId, i == 0 ? ReplicaRole.PRIMARY : ReplicaRole.SECONDARY);
             group.updateReplicaState(serverId, 0L, 0L);

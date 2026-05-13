@@ -176,6 +176,8 @@ public class RegionMigrationCoordinator {
                 ReplicaLifecycleManager.ReplicaLifecycleState.REMOVED,
                 "Source replica closed after balance");
 
+            support.syncReplicaMonitor(regionId, sourceServer);
+
             migrationStatus.setState(MigrationState.COMPLETED);
             updateMigrationState(migrationStatus, MigrationState.COMPLETED, "Migration completed");
             logger.info("Migration completed for region: {}", regionId);

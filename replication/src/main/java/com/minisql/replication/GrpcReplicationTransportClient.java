@@ -195,6 +195,7 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
     @Override
     public boolean streamSnapshotDirect(ServerId primary, ServerId replica, String regionId,
                                          int batchSize, long timeoutMs, long finalSequenceId) {
+        io.grpc.stub.StreamObserver<RegionServerProto.StreamSnapshotRequest> requestObserver = null;
         try {
             // Open server-streaming fetch from primary
             RegionServerServiceGrpc.RegionServerServiceBlockingStub primaryStub =
@@ -210,7 +211,7 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
             java.util.concurrent.CompletableFuture<RegionServerProto.StreamSnapshotResponse> resultFuture =
                 new java.util.concurrent.CompletableFuture<>();
 
-            io.grpc.stub.StreamObserver<RegionServerProto.StreamSnapshotRequest> requestObserver =
+            requestObserver =
                 replicaAsyncStub.streamSnapshot(new io.grpc.stub.StreamObserver<>() {
                     @Override
                     public void onNext(RegionServerProto.StreamSnapshotResponse response) {
@@ -257,6 +258,9 @@ public class GrpcReplicationTransportClient implements ReplicationTransportClien
                 batchCount, primary, replica, regionId);
             return result.getStatus().getSuccess();
         } catch (Exception e) {
+            if (requestObserver != null) {
+                requestObserver.onError(e);
+            }
             logger.warn("Direct snapshot streaming from {} to {} failed: {}", primary, replica, e.getMessage());
             return false;
         }

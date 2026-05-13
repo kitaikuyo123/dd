@@ -39,6 +39,7 @@ public class MonitoringService {
 
     private static final long FIVE_MINUTES_MS = 5L * 60L * 1000L;
     private static final long DAY_MS = 24L * 60L * 60L * 1000L;
+    private static final long HEARTBEAT_STALE_THRESHOLD_MS = 10_000L;
 
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
@@ -92,7 +93,8 @@ public class MonitoringService {
         List<Map<String, Object>> serverList = servers();
         List<Map<String, Object>> regionList = regions();
         SqlMetricsRegistry.SqlMetricSummary summary = sqlMetricsRegistry.summarize(FIVE_MINUTES_MS);
-        long offlineServers = serverList.stream().filter(server -> !Boolean.TRUE.equals(server.get("online"))).count();
+        long offlineServers = serverList.stream().filter(server -> "offline".equals(server.get("status"))).count();
+        long warningServers = serverList.stream().filter(server -> "warning".equals(server.get("status"))).count();
         long replicaAlerts = regionList.stream().filter(region ->
             ((Number) region.getOrDefault("replicationLag", 0L)).longValue() > 0L
         ).count();
@@ -100,6 +102,7 @@ public class MonitoringService {
         Map<String, Object> result = new HashMap<>();
         result.put("activeServers", serverList.size());
         result.put("offlineServers", offlineServers);
+        result.put("warningServers", warningServers);
         result.put("regionCount", regionList.size());
         result.put("tableCount", metadataManager.getAllTables().size());
         result.put("replicaAlerts", replicaAlerts);
@@ -112,11 +115,21 @@ public class MonitoringService {
     public List<Map<String, Object>> servers() {
         Collection<ClusterManager.ServerInfo> activeServers = clusterManager.getActiveServers();
         List<Map<String, Object>> result = new ArrayList<>();
+        long now = System.currentTimeMillis();
+
         for (ClusterManager.ServerInfo info : activeServers) {
             Map<String, Object> row = new HashMap<>();
             row.put("serverId", toServerName(info.getServerId()));
             row.put("lastHeartbeat", info.getLastHeartbeat());
             row.put("online", true);
+
+            long staleMs = now - info.getLastHeartbeat();
+            if (info.getLastHeartbeat() > 0 && staleMs > HEARTBEAT_STALE_THRESHOLD_MS) {
+                row.put("status", "warning");
+            } else {
+                row.put("status", "online");
+            }
+
             ClusterManager.ServerMetrics metrics = info.getMetrics();
             row.put("cpuUsage", metrics != null ? metrics.getCpuUsage() : 0.0);
             row.put("memoryUsage", metrics != null ? metrics.getMemoryUsage() : 0.0);
@@ -135,8 +148,37 @@ public class MonitoringService {
             row.put("loadScore", displayLoadCalculator.calculateLoadScore(info));
             result.add(row);
         }
-        result.sort(Comparator.comparing(row -> String.valueOf(row.get("serverId"))));
+
+        for (ClusterManager.GraveyardEntry entry : clusterManager.getRemovedServers()) {
+            Map<String, Object> row = new HashMap<>();
+            row.put("serverId", toServerName(entry.getServerId()));
+            row.put("lastHeartbeat", entry.getLastHeartbeat());
+            row.put("online", false);
+            row.put("status", "offline");
+            row.put("removedAt", entry.getRemovedAt());
+            ClusterManager.ServerMetrics metrics = entry.getLastMetrics();
+            row.put("cpuUsage", metrics != null ? metrics.getCpuUsage() : 0.0);
+            row.put("memoryUsage", metrics != null ? metrics.getMemoryUsage() : 0.0);
+            row.put("availableSpace", metrics != null ? metrics.getAvailableSpace() : 0L);
+            row.put("totalSpace", metrics != null ? metrics.getTotalSpace() : 0L);
+            row.put("regionCount", entry.getRegionCount());
+            row.put("readRequests", 0L);
+            row.put("writeRequests", 0L);
+            row.put("loadScore", 0.0);
+            result.add(row);
+        }
+
+        result.sort(Comparator
+            .comparingInt((Map<String, Object> row) -> statusOrder(String.valueOf(row.getOrDefault("status", "online"))))
+            .thenComparing(row -> String.valueOf(row.get("serverId"))));
         return result;
+    }
+
+    private int statusOrder(String status) {
+        if ("online".equals(status)) return 0;
+        if ("warning".equals(status)) return 1;
+        if ("offline".equals(status)) return 2;
+        return 3;
     }
 
     public List<Map<String, Object>> regions() {

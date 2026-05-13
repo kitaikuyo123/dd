@@ -15,6 +15,7 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.master.RegionTopologyProvider;
 import com.minisql.replication.ReplicationConfig;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.ZkClient;
@@ -293,7 +294,8 @@ public class MasterMain {
             }
 
             List<ServerId> orderedServers = new ArrayList<>(replicaServers);
-            replicationCoordinator.createReplicaGroup(region, orderedServers);
+            replicationCoordinator.createReplicaGroup(region, orderedServers,
+                new RegionTopologyProvider(metadataManager, region.getRegionId()));
         }
     }
 
@@ -433,6 +435,12 @@ public class MasterMain {
                 List<String> affectedRegions = new ArrayList<>(affected);
                 clusterManager.removeServer(serverId);
                 logger.warn("RegionServer removed from ZooKeeper: {} affectedRegions={}", serverId, affectedRegions);
+                if (monitoringService != null) {
+                    monitoringService.recordEvent("SERVER_OFFLINE", "WARN", null, null,
+                        serverId.getHost() + ":" + serverId.getPort(), null,
+                        "RegionServer confirmed offline (ZK session expired)",
+                        "affectedRegions=" + affectedRegions.size());
+                }
                 if (serviceImpl != null && !affectedRegions.isEmpty()) {
                     // 处理每个受影响的 Region
                     for (String regionId : affectedRegions) {

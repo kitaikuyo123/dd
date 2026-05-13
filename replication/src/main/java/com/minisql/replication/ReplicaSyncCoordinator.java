@@ -49,8 +49,9 @@ public class ReplicaSyncCoordinator {
                                                          ServerId replica,
                                                          boolean newReplica,
                                                          LongSupplier currentSequenceSupplier) {
+        long defaultTimeout = Math.max(config.getReplicationTimeoutMs(), config.getAckTimeoutMs() * 2);
         return CompletableFuture.supplyAsync(() ->
-            doSynchronize(regionId, replica, newReplica, currentSequenceSupplier), syncExecutor);
+            doSynchronize(regionId, replica, newReplica, currentSequenceSupplier, defaultTimeout), syncExecutor);
     }
 
     public boolean synchronizeReplicaSync(String regionId,
@@ -59,7 +60,8 @@ public class ReplicaSyncCoordinator {
                                           LongSupplier currentSequenceSupplier,
                                           long timeoutMs) {
         try {
-            return synchronizeReplica(regionId, replica, newReplica, currentSequenceSupplier)
+            return CompletableFuture.supplyAsync(() ->
+                doSynchronize(regionId, replica, newReplica, currentSequenceSupplier, timeoutMs), syncExecutor)
                 .get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             throw new IllegalStateException("Timed out waiting for full sync for region " + regionId + " on " + replica, e);
@@ -71,7 +73,8 @@ public class ReplicaSyncCoordinator {
     private boolean doSynchronize(String regionId,
                                   ServerId replica,
                                   boolean newReplica,
-                                  LongSupplier currentSequenceSupplier) {
+                                  LongSupplier currentSequenceSupplier,
+                                  long timeoutMs) {
         ReplicaGroup group = registry.getReplicaGroup(regionId);
         if (group == null) {
             throw new IllegalArgumentException("Replica group not found: " + regionId);
@@ -98,7 +101,7 @@ public class ReplicaSyncCoordinator {
             replica,
             regionId,
             1000,
-            Math.max(config.getReplicationTimeoutMs(), config.getAckTimeoutMs() * 2),
+            timeoutMs,
             currentSequence
         );
         if (!success) {

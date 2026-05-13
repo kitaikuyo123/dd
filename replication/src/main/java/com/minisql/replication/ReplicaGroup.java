@@ -4,42 +4,48 @@ import com.minisql.common.model.ServerId;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 副本组
- * 管理一个Region的所有副本
- * 负责模块: 开发者C
+ *
+ * 管理一个 Region 的副本运行时状态（同步位点、角色、lag 等）。
+ * 拓扑信息（primary、replica 列表）委托给 TopologyProvider，
+ * 不再独立存储，避免与 Region 元数据不一致。
  */
 public class ReplicaGroup {
 
     private final String regionId;
-    private volatile ServerId primary;
-    private final List<ServerId> replicas;
+    private final TopologyProvider topology;
+
     private final Map<ServerId, ReplicaState> replicaStates;
     private final Map<ServerId, ReplicaRole> replicaRoles;
 
-    public ReplicaGroup(String regionId) {
+    public ReplicaGroup(String regionId, TopologyProvider topology) {
         this.regionId = regionId;
-        this.replicas = new CopyOnWriteArrayList<>();
+        this.topology = topology;
         this.replicaStates = new ConcurrentHashMap<>();
         this.replicaRoles = new ConcurrentHashMap<>();
     }
 
+    /** 向后兼容：创建使用 LocalTopologyProvider 的实例 */
+    public ReplicaGroup(String regionId) {
+        this(regionId, new LocalTopologyProvider());
+    }
+
     public void setPrimary(ServerId primary) {
-        ServerId previousPrimary = this.primary;
-        this.primary = primary;
+        ServerId previousPrimary = this.topology.getPrimary();
+        this.topology.setPrimary(primary);
         if (previousPrimary != null && !previousPrimary.equals(primary)) {
             replicaRoles.put(previousPrimary, ReplicaRole.SECONDARY);
         }
         if (primary != null) {
-            addReplica(primary, ReplicaRole.PRIMARY);
+            ensureRuntimeState(primary);
             replicaRoles.put(primary, ReplicaRole.PRIMARY);
         }
     }
 
     public ServerId getPrimary() {
-        return primary;
+        return topology.getPrimary();
     }
 
     public void addReplica(ServerId replica) {
@@ -47,12 +53,10 @@ public class ReplicaGroup {
     }
 
     public void addReplica(ServerId replica, ReplicaRole role) {
-        if (!replicas.contains(replica)) {
-            replicas.add(replica);
-            replicaStates.put(replica, new ReplicaState());
-        }
+        this.topology.addReplica(replica);
+        ensureRuntimeState(replica);
         replicaRoles.put(replica, role);
-        ReplicaState state = replicaStates.computeIfAbsent(replica, ignored -> new ReplicaState());
+        ReplicaState state = replicaStates.get(replica);
         state.setRole(role);
         if (state.getLastUpdateTime() == 0) {
             state.setLastUpdateTime(System.currentTimeMillis());
@@ -60,16 +64,13 @@ public class ReplicaGroup {
     }
 
     public void removeReplica(ServerId replica) {
-        replicas.remove(replica);
+        this.topology.removeReplica(replica);
         replicaStates.remove(replica);
         replicaRoles.remove(replica);
-        if (replica.equals(primary)) {
-            primary = null;
-        }
     }
 
     public List<ServerId> getReplicas() {
-        return Collections.unmodifiableList(replicas);
+        return topology.getReplicas();
     }
 
     public String getRegionId() {
@@ -97,21 +98,23 @@ public class ReplicaGroup {
     }
 
     public void setReplicaRole(ServerId replica, ReplicaRole role) {
-        if (!replicas.contains(replica)) {
-            addReplica(replica, role);
-            return;
-        }
+        topology.addReplica(replica);
+        ensureRuntimeState(replica);
         replicaRoles.put(replica, role);
         ReplicaState state = replicaStates.computeIfAbsent(replica, ignored -> new ReplicaState());
         state.setRole(role);
         state.setLastUpdateTime(System.currentTimeMillis());
         if (role == ReplicaRole.PRIMARY) {
-            primary = replica;
+            topology.setPrimary(replica);
         }
     }
 
     public Map<ServerId, ReplicaRole> getReplicaRoles() {
         return Collections.unmodifiableMap(replicaRoles);
+    }
+
+    private void ensureRuntimeState(ServerId replica) {
+        replicaStates.computeIfAbsent(replica, ignored -> new ReplicaState());
     }
 
     /**

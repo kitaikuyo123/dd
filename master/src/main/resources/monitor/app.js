@@ -27,6 +27,10 @@ async function postJson(url, body) {
   return r.json();
 }
 
+function resolveStatus(s) {
+  return s.status || (s.online !== false ? 'online' : 'offline');
+}
+
 /* ========== Animated Counter Directive ========== */
 
 const vCounter = {
@@ -83,6 +87,15 @@ function createSseConnection(state) {
         const ev = JSON.parse(e.data);
         state.events.unshift(ev);
         if (state.events.length > 100) state.events.length = 100;
+
+        // Optimistic update: immediately show offline state in topology
+        if (ev.type === "SERVER_OFFLINE" && ev.sourceServer) {
+          const server = state.servers.find(s => s.serverId === ev.sourceServer);
+          if (server) {
+            server.status = "offline";
+            server.online = false;
+          }
+        }
       } catch (_) {}
     });
 
@@ -120,6 +133,7 @@ const OverviewCards = {
       const o = this.overview || {};
       return [
         { label: "Active Nodes", value: Number(o.activeServers || 0) },
+        { label: "Warning", value: Number(o.warningServers || 0) },
         { label: "Offline", value: Number(o.offlineServers || 0) },
         { label: "Regions", value: Number(o.regionCount || 0) },
         { label: "Tables", value: Number(o.tableCount || 0) },
@@ -142,16 +156,17 @@ const ClusterTopology = {
           <text text-anchor="middle" y="5" class="node-text">Master</text>
         </g>
         <line v-for="(s, i) in positions" :key="'l'+i"
-              :x1="width/2" y1="72" :x2="s.x" :y2="s.y - 22" class="topology-link" />
+              :x1="width/2" y1="72" :x2="s.x" :y2="s.y - 22" :class="['topology-link', s.status || 'online']" />
         <g v-for="(s, i) in positions" :key="'s'+i" :transform="'translate(' + s.x + ',' + s.y + ')'">
-          <rect x="-65" y="-22" width="130" height="44" rx="10" :class="['node-rect', s.online ? 'online' : 'offline']" />
-          <circle cx="-45" cy="0" r="5" :class="['status-dot', s.online ? 'online' : 'offline']" />
-          <text x="8" text-anchor="middle" y="5" class="node-text">{{ s.name }}</text>
+          <rect x="-65" y="-22" width="130" height="44" rx="10" :class="['node-rect', s.status || 'online']" />
+          <circle cx="-45" cy="0" r="5" :class="['status-dot', s.status || 'online']" />
+          <text x="8" text-anchor="middle" y="5" :class="['node-text', s.status === 'offline' ? 'offline-text' : '']">{{ s.name }}</text>
         </g>
       </svg>
       <div class="topology-stats">
         <span>Total: <b>{{ (servers || []).length }}</b></span>
         <span>Online: <b>{{ onlineCount }}</b></span>
+        <span>Warning: <b>{{ warningCount }}</b></span>
         <span>Offline: <b>{{ offlineCount }}</b></span>
       </div>
     </section>
@@ -165,6 +180,7 @@ const ClusterTopology = {
     positions() {
       const list = (this.servers || []).map(s => ({
         name: (s.serverId || "").split(":").pop(),
+        status: s.status || (s.online !== false ? 'online' : 'offline'),
         online: s.online !== false,
       }));
       const cols = Math.min(3, list.length || 1);
@@ -174,8 +190,9 @@ const ClusterTopology = {
         y: 150 + Math.floor(i / cols) * 80,
       }));
     },
-    onlineCount() { return (this.servers || []).filter(s => s.online !== false).length; },
-    offlineCount() { return (this.servers || []).filter(s => s.online === false).length; },
+    onlineCount() { return (this.servers || []).filter(s => resolveStatus(s) === 'online').length; },
+    warningCount() { return (this.servers || []).filter(s => resolveStatus(s) === 'warning').length; },
+    offlineCount() { return (this.servers || []).filter(s => resolveStatus(s) === 'offline').length; },
   },
 };
 
@@ -564,8 +581,10 @@ createApp({
       if (timer) clearInterval(timer);
     });
 
+    const activeServers = computed(() => state.servers.filter(s => resolveStatus(s) !== 'offline'));
+
     return {
-      state, demoOpen, serverColumns, tableColumns, regionColumns, regionReplicaColumns,
+      state, demoOpen, activeServers, serverColumns, tableColumns, regionColumns, regionReplicaColumns,
       changeSqlWindow, toggleDemo, fillSql, formatTime,
     };
   },
@@ -589,7 +608,7 @@ createApp({
         <sql-panel :summary="state.sqlSummary" :sql-window="state.sqlWindow" @change-window="changeSqlWindow" />
         <sql-console ref="sqlConsole" />
         <section class="grid two">
-          <data-table title="Nodes" :rows="state.servers" :columns="serverColumns" />
+          <data-table title="Nodes" :rows="activeServers" :columns="serverColumns" />
           <data-table title="Region Distribution" :rows="state.regionReplicas" :columns="regionReplicaColumns" />
         </section>
         <section class="grid two">

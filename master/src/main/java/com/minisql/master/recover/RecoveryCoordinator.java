@@ -10,6 +10,7 @@ import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
+import com.minisql.master.RegionTopologyProvider;
 import com.minisql.replication.ReplicaGroup;
 import com.minisql.replication.ReplicationCoordinator;
 import org.slf4j.Logger;
@@ -493,7 +494,8 @@ public class RecoveryCoordinator {
             throw new IllegalStateException("Replica group not found and no replicas in metadata for region " + regionId);
         }
 
-        replicationCoordinator.createReplicaGroup(region, orderedReplicas);
+        replicationCoordinator.createReplicaGroup(region, orderedReplicas,
+                new RegionTopologyProvider(metadataManager, regionId));
         logger.warn("[RECOVERY-RECONCILE] Rebuilt missing replica group for region {} from metadata replicas={}",
             regionId, orderedReplicas);
 
@@ -594,7 +596,6 @@ public class RecoveryCoordinator {
                 clusterManager.removeReplica(regionId, replica);
                 clusterManager.removeRegionLoad(replica, regionId);
                 replicaMonitor.removeReplica(regionId, replica);
-                replicationCoordinator.removeReplica(regionId, replica);
                 lifecycleManager.transition(regionId, replica,
                     ReplicaLifecycleManager.ReplicaLifecycleState.REMOVED,
                     "Trimmed excess secondary replica to match target replica count");

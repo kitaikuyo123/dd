@@ -7,6 +7,7 @@ import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.rebalance.*;
 import com.minisql.master.recover.*;
 import com.minisql.master.state.*;
+import com.minisql.master.RegionTopologyProvider;
 import com.minisql.replication.ReplicationCoordinator;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
@@ -930,7 +931,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     }
 
                     // 无论当前有多少可用节点，都先创建副本组，避免后续恢复阶段找不到 group。
-                    replicationCoordinator.createReplicaGroup(region, selectedServers);
+                    replicationCoordinator.createReplicaGroup(region, selectedServers,
+                        new RegionTopologyProvider(metadataManager, region.getRegionId()));
                     logger.info("[CREATE TABLE] Replica group created for region {} with {} servers",
                         region.getRegionId(), selectedServers.size());
                     if (selectedServers.size() < replicationFactor) {
@@ -1319,14 +1321,6 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
             clusterManager.promoteReplicaToPrimary(regionId, newPrimary);
             clusterManager.addReplica(regionId, newPrimary);
-            if (replicationCoordinator != null) {
-                try {
-                    replicationCoordinator.promoteToPrimary(regionId, newPrimary);
-                } catch (Exception e) {
-                    logger.warn("Failed to sync replication primary for region {} to {} during reportPrimaryChange: {}",
-                        regionId, newPrimary, e.getMessage());
-                }
-            }
             region.setPrimary(newPrimary);
             if (!region.getReplicas().contains(newPrimary)) {
                 region.addReplica(newPrimary);

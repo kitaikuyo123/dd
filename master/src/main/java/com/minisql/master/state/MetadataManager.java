@@ -419,6 +419,10 @@ public class MetadataManager {
                 builder.addAllClusteringKeys(table.getClusteringKeys());
             }
 
+            if (table.getProperties() != null) {
+                builder.setReplicationFactor(table.getProperties().getReplicationFactor());
+            }
+
             return builder.build().toByteArray();
         } catch (Exception e) {
             logger.warn("Failed to serialize table: {}", e.getMessage(), e);
@@ -460,6 +464,13 @@ public class MetadataManager {
             if (schema.getClusteringKeysCount() > 0) {
                 table.setClusteringKeys(new java.util.ArrayList<>(schema.getClusteringKeysList()));
             }
+
+            if (schema.getReplicationFactor() > 0) {
+                Table.TableProperties props = new Table.TableProperties();
+                props.setReplicationFactor(schema.getReplicationFactor());
+                table.setProperties(props);
+            }
+
             return table;
         } catch (Exception e) {
             logger.warn("Failed to deserialize table: {}", e.getMessage(), e);

@@ -25,6 +25,10 @@ public class ClusterManager {
     // 活跃的 RegionServer: serverId -> 服务器信息
     private final Map<String, ServerInfo> activeServers = new ConcurrentHashMap<>();
 
+    // 已下线的 RegionServer（墓地）: serverKey -> GraveyardEntry，保留 5 分钟用于前端展示
+    private final Map<String, GraveyardEntry> removedServers = new ConcurrentHashMap<>();
+    private static final long GRAVEYARD_TTL_MS = 5L * 60L * 1000L;
+
     // Region 分配信息：regionId -> 分配的 server
     private final Map<String, RegionAssignment> regionAssignments = new ConcurrentHashMap<>();
 
@@ -79,6 +83,7 @@ public class ClusterManager {
      * 注册 RegionServer（带时间戳）
      */
     public void registerServer(ServerId serverId, long timestamp) {
+        removedServers.remove(serverKey(serverId));
         ServerInfo info = new ServerInfo(serverId, timestamp);
         activeServers.put(serverKey(serverId), info);
         logger.info("RegionServer registered: {}", serverId);
@@ -176,6 +181,7 @@ public class ClusterManager {
      * 注册 RegionServer
      */
     public void registerServer(ServerId serverId) {
+        removedServers.remove(serverKey(serverId));
         ServerInfo info = new ServerInfo(serverId, System.currentTimeMillis());
         activeServers.put(serverKey(serverId), info);
         logger.info("RegionServer registered: {}", serverId);
@@ -247,8 +253,29 @@ public class ClusterManager {
      * 移除故障服务器
      */
     public void removeServer(ServerId serverId) {
-        activeServers.remove(serverKey(serverId));
+        String key = serverKey(serverId);
+        ServerInfo removed = activeServers.remove(key);
+        if (removed != null) {
+            removedServers.put(key, new GraveyardEntry(
+                removed.getServerId(),
+                System.currentTimeMillis(),
+                removed.getLastHeartbeat(),
+                removed.getMetrics(),
+                removed.getRegionLoads().size()
+            ));
+        }
+        purgeGraveyard();
         logger.info("RegionServer removed: {}", serverId);
+    }
+
+    private void purgeGraveyard() {
+        long cutoff = System.currentTimeMillis() - GRAVEYARD_TTL_MS;
+        removedServers.entrySet().removeIf(e -> e.getValue().getRemovedAt() < cutoff);
+    }
+
+    public List<GraveyardEntry> getRemovedServers() {
+        purgeGraveyard();
+        return new ArrayList<>(removedServers.values());
     }
 
     /**
@@ -529,5 +556,31 @@ public class ClusterManager {
         public void setServerId(ServerId serverId) {
             this.serverId = serverId;
         }
+    }
+
+    /**
+     * 已下线服务器的快照信息（墓地条目），用于前端拓扑图展示
+     */
+    public static class GraveyardEntry {
+        private final ServerId serverId;
+        private final long removedAt;
+        private final long lastHeartbeat;
+        private final ServerMetrics lastMetrics;
+        private final int regionCount;
+
+        public GraveyardEntry(ServerId serverId, long removedAt, long lastHeartbeat,
+                              ServerMetrics lastMetrics, int regionCount) {
+            this.serverId = serverId;
+            this.removedAt = removedAt;
+            this.lastHeartbeat = lastHeartbeat;
+            this.lastMetrics = lastMetrics;
+            this.regionCount = regionCount;
+        }
+
+        public ServerId getServerId() { return serverId; }
+        public long getRemovedAt() { return removedAt; }
+        public long getLastHeartbeat() { return lastHeartbeat; }
+        public ServerMetrics getLastMetrics() { return lastMetrics; }
+        public int getRegionCount() { return regionCount; }
     }
 }

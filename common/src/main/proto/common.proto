@@ -57,6 +57,7 @@ message TableSchema {
     // 复合主键支持
     repeated string partitionKeys = 4;    // 分区键列表
     repeated string clusteringKeys = 5;   // 聚类键列表
+    int32 replication_factor = 6;
 }
 
 message ColumnSchema {

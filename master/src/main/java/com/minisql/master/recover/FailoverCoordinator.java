@@ -311,7 +311,6 @@ public class FailoverCoordinator {
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, newPrimary.getServerId());
-            syncReplicationPrimary(regionId, newPrimary.getServerId());
             recordEvent("PRIMARY_PROMOTED", "INFO", regionId, null, null, toServerName(newPrimary.getServerId()),
                 "Primary promoted during failover", null);
             lifecycleManager.transition(regionId, newPrimary.getServerId(),
@@ -481,7 +480,6 @@ public class FailoverCoordinator {
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, targetPrimary);
-            syncReplicationPrimary(regionId, targetPrimary);
             clusterManager.updateRegionAssignment(regionId, targetPrimary);
             updateMetadataPrimary(regionId, targetPrimary);
             updateZooKeeper(regionId, targetPrimary);
@@ -559,19 +557,6 @@ public class FailoverCoordinator {
         } catch (Exception e) {
             logger.error("Failed to promote replica {} for region {}: {}", targetServer, regionId, e.getMessage(), e);
             return false;
-        }
-    }
-
-    private void syncReplicationPrimary(String regionId, ServerId newPrimary) {
-        if (replicationCoordinator == null) {
-            return;
-        }
-        try {
-            replicationCoordinator.promoteToPrimary(regionId, newPrimary);
-            logger.info("Replication primary updated for region {} -> {}", regionId, newPrimary);
-        } catch (Exception e) {
-            logger.warn("Failed to sync replication primary for region {} to {}: {}",
-                regionId, newPrimary, e.getMessage());
         }
     }
 
