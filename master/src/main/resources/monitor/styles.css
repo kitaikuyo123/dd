@@ -164,8 +164,11 @@ h1, h2, h3 { text-wrap: balance; }
 
 /* ========== Demo Sidebar ========== */
 .demo-sidebar {
+  position: sticky;
+  top: 56px;
   width: 280px;
   min-width: 280px;
+  height: calc(100vh - 56px);
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-subtle);
   padding: 20px;
