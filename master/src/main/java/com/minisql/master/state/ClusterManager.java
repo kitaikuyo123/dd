@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 集群管理器
- * 负责模块：开发者 A
+ * Region 放置数据（primary、replicas）统一委托给 MetadataManager 中的 Region 模型。
  */
 public class ClusterManager {
 
@@ -22,51 +22,47 @@ public class ClusterManager {
         return serverId.getHost() + ":" + serverId.getPort();
     }
 
-    // 活跃的 RegionServer: serverId -> 服务器信息
+    // 活跃的 RegionServer: serverKey -> 服务器信息
     private final Map<String, ServerInfo> activeServers = new ConcurrentHashMap<>();
 
-    // 已下线的 RegionServer（墓地）: serverKey -> GraveyardEntry，保留 5 分钟用于前端展示
+    // 已下线的 RegionServer（墓地），保留 5 分钟用于前端展示
     private final Map<String, GraveyardEntry> removedServers = new ConcurrentHashMap<>();
     private static final long GRAVEYARD_TTL_MS = 5L * 60L * 1000L;
 
-    // Region 分配信息：regionId -> 分配的 server
-    private final Map<String, RegionAssignment> regionAssignments = new ConcurrentHashMap<>();
-
-    // 表到 Region 的映射：tableName -> Set<regionId>
-    private final Map<String, Set<String>> tableRegions = new ConcurrentHashMap<>();
-
-    // Region 状态：regionId -> State
-    private final Map<String, Region.State> regionStates = new ConcurrentHashMap<>();
-
+    // 负载均衡器
     private final LoadBalancer loadBalancer;
+
+    // 元数据管理器 —— Region 放置数据的唯一真相源
+    private MetadataManager metadataManager;
 
     // ZooKeeper 客户端
     private ZkClient zkClient;
 
-    // 副本管理：regionId -> List<ServerId>
-    private final Map<String, List<ServerId>> regionReplicas = new ConcurrentHashMap<>();
-
     // 副本序列号跟踪：regionId -> Map<ServerId, sequenceId>
     private final Map<String, Map<ServerId, Long>> replicaSequenceIds = new ConcurrentHashMap<>();
 
-    // Fencing Token 管理：regionId -> fencingToken（用于防止脑裂）
+    // Fencing Token 管理：regionId -> fencingToken
     private final Map<String, Long> regionFencingTokens = new ConcurrentHashMap<>();
 
     public ClusterManager(LoadBalancer loadBalancer) {
         this.loadBalancer = loadBalancer;
+        this.metadataManager = new MetadataManager();
     }
 
-    /**
-     * 设置 ZooKeeper 客户端
-     */
+    public ClusterManager(LoadBalancer loadBalancer, MetadataManager metadataManager) {
+        this.loadBalancer = loadBalancer;
+        this.metadataManager = metadataManager;
+    }
+
+    public void setMetadataManager(MetadataManager metadataManager) {
+        this.metadataManager = metadataManager;
+    }
+
     public void setZkClient(ZkClient zkClient) {
         this.zkClient = zkClient;
         initializeZkPaths();
     }
 
-    /**
-     * 初始化 ZooKeeper 路径
-     */
     private void initializeZkPaths() {
         if (zkClient == null) return;
         try {
@@ -79,9 +75,8 @@ public class ClusterManager {
         }
     }
 
-    /**
-     * 注册 RegionServer（带时间戳）
-     */
+    // ==================== RegionServer 管理 ====================
+
     public void registerServer(ServerId serverId, long timestamp) {
         removedServers.remove(serverKey(serverId));
         ServerInfo info = new ServerInfo(serverId, timestamp);
@@ -89,97 +84,6 @@ public class ClusterManager {
         logger.info("RegionServer registered: {}", serverId);
     }
 
-    /**
-     * 更新 Region 负载信息
-     */
-    public void updateRegionLoad(ServerId serverId, String regionId, RegionLoad load) {
-        ServerInfo info = activeServers.get(serverKey(serverId));
-        if (info != null) {
-            info.updateRegionLoad(regionId, load);
-        }
-    }
-
-    public void removeRegionLoad(ServerId serverId, String regionId) {
-        ServerInfo info = activeServers.get(serverKey(serverId));
-        if (info != null) {
-            info.removeRegionLoad(regionId);
-        }
-    }
-
-    /**
-     * 更新服务器指标
-     */
-    public void updateServerMetrics(ServerId serverId, ServerMetrics metrics) {
-        ServerInfo info = activeServers.get(serverKey(serverId));
-        if (info != null) {
-            info.setMetrics(metrics);
-        }
-    }
-
-    /**
-     * 获取 Region 的主服务器
-     */
-    public ServerId getPrimaryServerForRegion(String regionId) {
-        RegionAssignment assignment = regionAssignments.get(regionId);
-        return assignment != null ? assignment.getServerId() : null;
-    }
-
-    /**
-     * 分配 Region 到指定服务器
-     */
-    public void assignRegionToServer(String regionId, ServerId serverId) {
-        RegionAssignment assignment = new RegionAssignment(regionId, serverId);
-        regionAssignments.put(regionId, assignment);
-    }
-
-    /**
-     * 取消 Region 分配
-     */
-    public void unassignRegion(String regionId) {
-        regionAssignments.remove(regionId);
-        regionStates.remove(regionId);
-    }
-
-    public void removeRegionMetadata(String tableName, String regionId) {
-        regionAssignments.remove(regionId);
-        regionStates.remove(regionId);
-        regionReplicas.remove(regionId);
-        replicaSequenceIds.remove(regionId);
-        regionFencingTokens.remove(regionId);
-        for (ServerInfo info : activeServers.values()) {
-            info.removeRegionLoad(regionId);
-        }
-
-        if (tableName != null) {
-            tableRegions.compute(tableName, (key, regions) -> {
-                if (regions != null) {
-                    regions.remove(regionId);
-                    if (regions.isEmpty()) {
-                        return null;
-                    }
-                }
-                return regions;
-            });
-        }
-    }
-
-    /**
-     * 更新 Region 状态
-     */
-    public void updateRegionState(String regionId, Region.State state) {
-        regionStates.put(regionId, state);
-    }
-
-    /**
-     * 获取活跃服务器列表
-     */
-    public List<ServerInfo> getActiveServersList() {
-        return new ArrayList<>(activeServers.values());
-    }
-
-    /**
-     * 注册 RegionServer
-     */
     public void registerServer(ServerId serverId) {
         removedServers.remove(serverKey(serverId));
         ServerInfo info = new ServerInfo(serverId, System.currentTimeMillis());
@@ -187,9 +91,6 @@ public class ClusterManager {
         logger.info("RegionServer registered: {}", serverId);
     }
 
-    /**
-     * 处理心跳
-     */
     public void handleHeartbeat(ServerId serverId, long timestamp) {
         ServerInfo info = activeServers.get(serverKey(serverId));
         if (info != null) {
@@ -197,61 +98,6 @@ public class ClusterManager {
         }
     }
 
-    /**
-     * 分配 Region 到 RegionServer
-     */
-    public ServerId assignRegion(Region region) {
-        // 使用负载均衡器选择最优服务器
-        ServerId targetServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
-
-        if (targetServer != null) {
-            RegionAssignment assignment = new RegionAssignment(region.getRegionId(), targetServer);
-            regionAssignments.put(region.getRegionId(), assignment);
-
-            Set<String> regions = tableRegions.computeIfAbsent(region.getTableName(), k -> ConcurrentHashMap.newKeySet());
-            regions.add(region.getRegionId());
-
-            logger.info("Region {} assigned to {}", region.getRegionId(), targetServer);
-        }
-
-        return targetServer;
-    }
-
-    /**
-     * 重新分配 Region（用于故障恢复）
-     */
-    public ServerId reassignRegion(String regionId) {
-        RegionAssignment oldAssignment = regionAssignments.get(regionId);
-        if (oldAssignment == null) {
-            return null;
-        }
-
-        String tableName = findTableNameForRegion(regionId);
-        Region region = new Region();
-        region.setRegionId(regionId);
-        region.setTableName(tableName);
-
-        ServerId newServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
-        if (newServer != null) {
-            oldAssignment.setServerId(newServer);
-            logger.info("Region {} reassigned to {}", regionId, newServer);
-        }
-
-        return newServer;
-    }
-
-    private String findTableNameForRegion(String regionId) {
-        for (Map.Entry<String, Set<String>> entry : tableRegions.entrySet()) {
-            if (entry.getValue().contains(regionId)) {
-                return entry.getKey();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 移除故障服务器
-     */
     public void removeServer(ServerId serverId) {
         String key = serverKey(serverId);
         ServerInfo removed = activeServers.remove(key);
@@ -278,22 +124,159 @@ public class ClusterManager {
         return new ArrayList<>(removedServers.values());
     }
 
+    public boolean isServerActive(ServerId serverId) {
+        return activeServers.containsKey(serverKey(serverId));
+    }
+
+    public Collection<ServerInfo> getActiveServers() {
+        return new ArrayList<>(activeServers.values());
+    }
+
+    public List<ServerInfo> getActiveServersList() {
+        return new ArrayList<>(activeServers.values());
+    }
+
+    // ==================== Region 放置 —— 委托给 Region 模型 ====================
+
+    private Region requireRegion(String regionId) {
+        if (metadataManager == null) {
+            logger.warn("MetadataManager not set, cannot access region {}", regionId);
+            return null;
+        }
+        return metadataManager.getRegion(regionId);
+    }
+
+    private Region ensureRegion(String regionId) {
+        Region region = requireRegion(regionId);
+        if (region == null) {
+            region = new Region();
+            region.setRegionId(regionId);
+            metadataManager.registerRegion(region);
+        }
+        return region;
+    }
+
+    public ServerId getPrimaryServerForRegion(String regionId) {
+        Region region = requireRegion(regionId);
+        return region != null ? region.getPrimary() : null;
+    }
+
     /**
-     * 获取所有 Region 分配信息
+     * 获取 Region 的所有副本服务器（包含 primary）。
+     * 这是拥有该 region 的完整服务器列表。
      */
-    public Map<String, RegionAssignment> getRegionAssignments() {
-        return new ConcurrentHashMap<>(regionAssignments);
+    public List<ServerId> getReplicaServers(String regionId) {
+        Region region = requireRegion(regionId);
+        if (region == null || region.getReplicas() == null) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(region.getReplicas());
+    }
+
+    /**
+     * 获取 Region 的次级副本服务器（不含 primary），用于前端展示等场景。
+     */
+    public List<ServerId> getSecondaryServers(String regionId) {
+        Region region = requireRegion(regionId);
+        if (region == null || region.getReplicas() == null) {
+            return Collections.emptyList();
+        }
+        ServerId primary = region.getPrimary();
+        List<ServerId> result = new ArrayList<>();
+        for (ServerId s : region.getReplicas()) {
+            if (!s.equals(primary)) {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+
+    public void assignRegionToServer(String regionId, ServerId serverId) {
+        Region region = ensureRegion(regionId);
+        region.setPrimary(serverId);
+        region.addReplica(serverId);
+    }
+
+    public void unassignRegion(String regionId) {
+        Region region = requireRegion(regionId);
+        if (region != null) {
+            region.setPrimary(null);
+            region.setState(Region.State.OFFLINE);
+        }
+    }
+
+    public void removeRegionMetadata(String tableName, String regionId) {
+        Region region = requireRegion(regionId);
+        if (region != null) {
+            region.setPrimary(null);
+            region.getReplicas().clear();
+            region.setState(Region.State.CLOSED);
+        }
+        replicaSequenceIds.remove(regionId);
+        regionFencingTokens.remove(regionId);
+        for (ServerInfo info : activeServers.values()) {
+            info.removeRegionLoad(regionId);
+        }
+        if (metadataManager != null) {
+            metadataManager.removeRegion(regionId);
+        }
+    }
+
+    public void updateRegionAssignment(String regionId, ServerId serverId) {
+        Region region = ensureRegion(regionId);
+        region.setPrimary(serverId);
+        region.addReplica(serverId);
+        logger.info("Region assignment updated: {} -> {}", regionId, serverId);
+    }
+
+    public ServerId assignRegion(Region region) {
+        if (metadataManager != null && metadataManager.getRegion(region.getRegionId()) == null) {
+            metadataManager.registerRegion(region);
+        }
+        ServerId targetServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
+        if (targetServer != null) {
+            region.setPrimary(targetServer);
+            region.addReplica(targetServer);
+            logger.info("Region {} assigned to {}", region.getRegionId(), targetServer);
+        }
+        return targetServer;
+    }
+
+    public ServerId reassignRegion(String regionId) {
+        Region region = requireRegion(regionId);
+        if (region == null) {
+            return null;
+        }
+        ServerId newServer = loadBalancer.selectServerForRegion(region, new ArrayList<>(activeServers.values()));
+        if (newServer != null) {
+            region.setPrimary(newServer);
+            region.addReplica(newServer);
+            logger.info("Region {} reassigned to {}", regionId, newServer);
+        }
+        return newServer;
+    }
+
+    public Map<String, ServerId> getRegionAssignments() {
+        Map<String, ServerId> result = new LinkedHashMap<>();
+        if (metadataManager == null) return result;
+        for (Region region : metadataManager.getAllRegions()) {
+            if (region.getPrimary() != null) {
+                result.put(region.getRegionId(), region.getPrimary());
+            }
+        }
+        return result;
+    }
+
+    public ServerId getRegionAssignment(String regionId) {
+        return getPrimaryServerForRegion(regionId);
     }
 
     public List<String> getRegionsAssignedToServer(ServerId serverId) {
         List<String> regionIds = new ArrayList<>();
-        if (serverId == null) {
-            return regionIds;
-        }
-        for (Map.Entry<String, RegionAssignment> entry : regionAssignments.entrySet()) {
-            RegionAssignment assignment = entry.getValue();
-            if (assignment != null && serverId.equals(assignment.getServerId())) {
-                regionIds.add(entry.getKey());
+        if (serverId == null || metadataManager == null) return regionIds;
+        for (Region region : metadataManager.getAllRegions()) {
+            if (serverId.equals(region.getPrimary())) {
+                regionIds.add(region.getRegionId());
             }
         }
         return regionIds;
@@ -301,153 +284,112 @@ public class ClusterManager {
 
     public List<String> getRegionsReplicatedOnServer(ServerId serverId) {
         List<String> regionIds = new ArrayList<>();
-        if (serverId == null) {
-            return regionIds;
-        }
-        for (Map.Entry<String, List<ServerId>> entry : regionReplicas.entrySet()) {
-            List<ServerId> replicas = entry.getValue();
-            if (replicas != null && replicas.contains(serverId)) {
-                regionIds.add(entry.getKey());
+        if (serverId == null || metadataManager == null) return regionIds;
+        for (Region region : metadataManager.getAllRegions()) {
+            if (region.getReplicas() != null && region.getReplicas().contains(serverId)) {
+                regionIds.add(region.getRegionId());
             }
         }
         return regionIds;
     }
 
-    /**
-     * 获取单个 Region 分配信息
-     */
-    public RegionAssignment getRegionAssignment(String regionId) {
-        return regionAssignments.get(regionId);
+    // ==================== Region 状态 ====================
+
+    public void updateRegionState(String regionId, Region.State state) {
+        Region region = ensureRegion(regionId);
+        region.setState(state);
     }
 
-    /**
-     * 检查服务器是否活跃。
-     * 由 ZooKeeper 临时节点事件驱动：
-     * - onServerAdded → registerServer() → true
-     * - onServerRemoved → removeServer() → false
-     * 心跳不参与存活判断，只更新 metrics。
-     */
-    public boolean isServerActive(com.minisql.common.model.ServerId serverId) {
-        return activeServers.containsKey(serverKey(serverId));
-    }
-
-    /**
-     * 更新 Region 分配
-     * 如果 assignment 不存在，则创建新的 assignment
-     */
-    public void updateRegionAssignment(String regionId, com.minisql.common.model.ServerId serverId) {
-        RegionAssignment assignment = regionAssignments.get(regionId);
-        if (assignment != null) {
-            assignment.setServerId(serverId);
-            logger.info("Region assignment updated: {} -> {}", regionId, serverId);
-        } else {
-            // assignment 不存在（可能在 failover 前被 unassignRegion 移除），创建新的
-            regionAssignments.put(regionId, new RegionAssignment(regionId, serverId));
-            logger.info("Region assignment created: {} -> {}", regionId, serverId);
-        }
-    }
-
-    /**
-     * 获取 Region 状态
-     */
     public Region.State getRegionState(String regionId) {
-        return regionStates.get(regionId);
+        Region region = requireRegion(regionId);
+        return region != null ? region.getState() : null;
     }
 
-    /**
-     * 获取所有活跃的 RegionServer
-     */
-    public Collection<ServerInfo> getActiveServers() {
-        return new ArrayList<>(activeServers.values());
-    }
+    // ==================== 表-Region 索引 ====================
 
-    /**
-     * 获取表的所有 Region
-     */
     public Set<String> getTableRegions(String tableName) {
-        return tableRegions.getOrDefault(tableName, Collections.emptySet());
-    }
-
-    /**
-     * 获取 Region 的所有副本服务器
-     */
-    public List<ServerId> getReplicaServers(String regionId) {
-        return regionReplicas.getOrDefault(regionId, Collections.emptyList());
-    }
-
-    /**
-     * 获取副本的序列号
-     */
-    public long getReplicaSequenceId(String regionId, ServerId replica) {
-        Map<ServerId, Long> sequences = replicaSequenceIds.get(regionId);
-        return sequences != null ? sequences.getOrDefault(replica, 0L) : 0L;
-    }
-
-    /**
-     * 更新副本序列号
-     */
-    public void updateReplicaSequenceId(String regionId, ServerId replica, long sequenceId) {
-        replicaSequenceIds.computeIfAbsent(regionId, k -> new ConcurrentHashMap<>())
-                .put(replica, sequenceId);
-    }
-
-    /**
-     * 提升副本为主副本
-     */
-    public void promoteReplicaToPrimary(String regionId, ServerId newPrimary) {
-        RegionAssignment assignment = regionAssignments.get(regionId);
-        if (assignment != null) {
-            assignment.setServerId(newPrimary);
-            logger.info("Promoted {} to primary for region {}", newPrimary, regionId);
+        if (metadataManager == null) return Collections.emptySet();
+        Set<String> result = new LinkedHashSet<>();
+        for (Region region : metadataManager.getRegionsForTable(tableName)) {
+            result.add(region.getRegionId());
         }
+        return result;
     }
 
-    /**
-     * 添加副本到 Region
-     */
+    // ==================== 副本管理 ====================
+
     public void addReplica(String regionId, ServerId replica) {
-        List<ServerId> replicas = regionReplicas.computeIfAbsent(regionId, k -> Collections.synchronizedList(new ArrayList<>()));
-        if (!replicas.contains(replica)) {
-            replicas.add(replica);
-        }
+        Region region = ensureRegion(regionId);
+        region.addReplica(replica);
     }
 
-    /**
-     * 移除副本
-     */
     public void removeReplica(String regionId, ServerId replica) {
-        List<ServerId> replicas = regionReplicas.get(regionId);
-        if (replicas != null) {
-            replicas.remove(replica);
+        Region region = requireRegion(regionId);
+        if (region != null) {
+            region.removeReplica(replica);
         }
     }
 
-    /**
-     * 更新 Fencing Token（故障转移时调用）
-     */
+    public void promoteReplicaToPrimary(String regionId, ServerId newPrimary) {
+        Region region = ensureRegion(regionId);
+        region.setPrimary(newPrimary);
+        region.addReplica(newPrimary);
+        logger.info("Promoted {} to primary for region {}", newPrimary, regionId);
+    }
+
+    // ==================== Fencing Token ====================
+
     public void updateFencingToken(String regionId, long fencingToken) {
         regionFencingTokens.put(regionId, fencingToken);
         logger.info("Updated fencing token for region {} to {}", regionId, fencingToken);
     }
 
-    /**
-     * 获取当前 Fencing Token
-     */
     public long getFencingToken(String regionId) {
         return regionFencingTokens.getOrDefault(regionId, 0L);
     }
 
-    /**
-     * 验证 Fencing Token 是否有效
-     */
     public boolean validateFencingToken(String regionId, long token) {
         long currentToken = regionFencingTokens.getOrDefault(regionId, 0L);
         return token >= currentToken;
     }
 
-    /**
-     * 服务器信息
-     */
+    // ==================== 副本序列号 ====================
+
+    public long getReplicaSequenceId(String regionId, ServerId replica) {
+        Map<ServerId, Long> sequences = replicaSequenceIds.get(regionId);
+        return sequences != null ? sequences.getOrDefault(replica, 0L) : 0L;
+    }
+
+    public void updateReplicaSequenceId(String regionId, ServerId replica, long sequenceId) {
+        replicaSequenceIds.computeIfAbsent(regionId, k -> new ConcurrentHashMap<>())
+                .put(replica, sequenceId);
+    }
+
+    // ==================== 服务器负载信息 ====================
+
+    public void updateRegionLoad(ServerId serverId, String regionId, RegionLoad load) {
+        ServerInfo info = activeServers.get(serverKey(serverId));
+        if (info != null) {
+            info.updateRegionLoad(regionId, load);
+        }
+    }
+
+    public void removeRegionLoad(ServerId serverId, String regionId) {
+        ServerInfo info = activeServers.get(serverKey(serverId));
+        if (info != null) {
+            info.removeRegionLoad(regionId);
+        }
+    }
+
+    public void updateServerMetrics(ServerId serverId, ServerMetrics metrics) {
+        ServerInfo info = activeServers.get(serverKey(serverId));
+        if (info != null) {
+            info.setMetrics(metrics);
+        }
+    }
+
+    // ==================== 内部类 ====================
+
     public static class ServerInfo {
         private final ServerId serverId;
         private volatile long lastHeartbeat;
@@ -459,42 +401,16 @@ public class ClusterManager {
             this.lastHeartbeat = lastHeartbeat;
         }
 
-        public ServerId getServerId() {
-            return serverId;
-        }
-
-        public long getLastHeartbeat() {
-            return lastHeartbeat;
-        }
-
-        public void setLastHeartbeat(long lastHeartbeat) {
-            this.lastHeartbeat = lastHeartbeat;
-        }
-
-        public Map<String, RegionLoad> getRegionLoads() {
-            return Collections.unmodifiableMap(regionLoads);
-        }
-
-        public void updateRegionLoad(String regionId, RegionLoad load) {
-            regionLoads.put(regionId, load);
-        }
-
-        public void removeRegionLoad(String regionId) {
-            regionLoads.remove(regionId);
-        }
-
-        public ServerMetrics getMetrics() {
-            return metrics;
-        }
-
-        public void setMetrics(ServerMetrics metrics) {
-            this.metrics = metrics;
-        }
+        public ServerId getServerId() { return serverId; }
+        public long getLastHeartbeat() { return lastHeartbeat; }
+        public void setLastHeartbeat(long lastHeartbeat) { this.lastHeartbeat = lastHeartbeat; }
+        public Map<String, RegionLoad> getRegionLoads() { return Collections.unmodifiableMap(regionLoads); }
+        public void updateRegionLoad(String regionId, RegionLoad load) { regionLoads.put(regionId, load); }
+        public void removeRegionLoad(String regionId) { regionLoads.remove(regionId); }
+        public ServerMetrics getMetrics() { return metrics; }
+        public void setMetrics(ServerMetrics metrics) { this.metrics = metrics; }
     }
 
-    /**
-     * Region 负载信息
-     */
     public static class RegionLoad {
         private String regionId;
         private long readRequests;
@@ -514,9 +430,6 @@ public class ClusterManager {
         public void setMemStoreSize(long memStoreSize) { this.memStoreSize = memStoreSize; }
     }
 
-    /**
-     * 服务器指标
-     */
     public static class ServerMetrics {
         private double cpuUsage;
         private double memoryUsage;
@@ -533,34 +446,6 @@ public class ClusterManager {
         public void setTotalSpace(long totalSpace) { this.totalSpace = totalSpace; }
     }
 
-    /**
-     * Region 分配信息
-     */
-    public static class RegionAssignment {
-        private final String regionId;
-        private volatile ServerId serverId;
-
-        public RegionAssignment(String regionId, ServerId serverId) {
-            this.regionId = regionId;
-            this.serverId = serverId;
-        }
-
-        public String getRegionId() {
-            return regionId;
-        }
-
-        public ServerId getServerId() {
-            return serverId;
-        }
-
-        public void setServerId(ServerId serverId) {
-            this.serverId = serverId;
-        }
-    }
-
-    /**
-     * 已下线服务器的快照信息（墓地条目），用于前端拓扑图展示
-     */
     public static class GraveyardEntry {
         private final ServerId serverId;
         private final long removedAt;

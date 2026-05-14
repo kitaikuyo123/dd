@@ -383,8 +383,9 @@ public class RecoveryCoordinator {
             initializing ? ReplicaLifecycleManager.ReplicaLifecycleState.BOOTSTRAPPING
                 : ReplicaLifecycleManager.ReplicaLifecycleState.REBUILDING,
             initializing ? "Starting replica bootstrap" : "Starting replica recovery");
-        ensureReplicaRegistered(regionId, replica, initializing);
+        // 先打开 region，再写入拓扑 —— 避免 failover 选到未就绪的节点
         openReplicaRegion(regionId, replica);
+        ensureReplicaRegistered(regionId, replica, initializing);
         ensureReplicationCatchUp(regionId, replica);
         markReplicaReady(regionId, replica);
         recordEvent("RECOVERY_COMPLETED", "INFO", regionId, replica,
@@ -421,15 +422,16 @@ public class RecoveryCoordinator {
     }
 
     private void ensureReplicaRegistered(String regionId, ServerId replica, boolean initializing) {
-        clusterManager.addReplica(regionId, replica);
-
         Region region = metadataManager.getRegion(regionId);
-        if (region != null) {
-            region.addReplica(replica);
-            metadataManager.registerRegionForTable(region, region.getPrimary());
-            logger.info("[RECOVERY-BOOTSTRAP] ensureReplicaRegistered region={} replica={} initializing={} replicasAfterRegister={}",
-                regionId, replica, initializing, region.getReplicas());
+        if (region == null) {
+            logger.warn("[RECOVERY-BOOTSTRAP] Region {} not found in metadata, cannot register replica", regionId);
+            return;
         }
+        region.addReplica(replica);
+        metadataManager.registerRegionForTable(region, region.getPrimary());
+        clusterManager.addReplica(regionId, replica);
+        logger.info("[RECOVERY-BOOTSTRAP] ensureReplicaRegistered region={} replica={} initializing={} replicasAfterRegister={}",
+            regionId, replica, initializing, region.getReplicas());
 
         boolean exists = false;
         for (ReplicaInfo info : replicaMonitor.getReplicas(regionId)) {

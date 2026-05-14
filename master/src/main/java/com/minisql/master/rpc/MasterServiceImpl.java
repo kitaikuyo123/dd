@@ -292,6 +292,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     public RegionMigrationCoordinator getMigrationCoordinator() {
         return migrationCoordinator;
     }
+    public RegionSplitCoordinator getSplitCoordinator() {
+        return splitCoordinator;
+    }
 
     public void setLoadBalanceConfig(boolean enabled, long intervalMs) {
         this.loadBalanceEnabled = enabled;
@@ -565,6 +568,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         List<ClusterManager.ServerInfo> activeServers = new ArrayList<>(clusterManager.getActiveServers());
         List<ClusterManager.ServerInfo> candidates = new ArrayList<>();
 
+        Region region = metadataManager.getRegion(regionId);
+        ServerId primary = region != null ? region.getPrimary() : null;
+
         for (ClusterManager.ServerInfo server : activeServers) {
             boolean alreadyReplica = false;
             for (ServerId replica : currentReplicas) {
@@ -573,9 +579,11 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     break;
                 }
             }
-            if (!alreadyReplica && !server.getServerId().equals(excludeServer)) {
-                candidates.add(server);
+            if (alreadyReplica || server.getServerId().equals(excludeServer)
+                    || server.getServerId().equals(primary)) {
+                continue;
             }
+            candidates.add(server);
         }
 
         if (candidates.isEmpty()) {
@@ -775,6 +783,15 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                 return;
             }
 
+            if (region.getState() == Region.State.OFFLINE || region.getState() == Region.State.CLOSED
+                || region.getState() == Region.State.SPLIT || region.getState() == Region.State.FAILED) {
+                responseObserver.onNext(MasterProto.GetLocationResponse.newBuilder()
+                    .setStatus(createErrorStatus("Region " + region.getRegionId() + " is " + region.getState()))
+                    .build());
+                responseObserver.onCompleted();
+                return;
+            }
+
             ServerId primaryServer = clusterManager.getPrimaryServerForRegion(region.getRegionId());
 
             MasterProto.GetLocationResponse.Builder responseBuilder = MasterProto.GetLocationResponse.newBuilder()
@@ -920,11 +937,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         region.getRegionId(), primaryServer,
                         (selectedServers.size() > 1 ? selectedServers.subList(1, selectedServers.size()) : "none"));
 
-                    // 分配主副本到主服务器
-                    clusterManager.assignRegionToServer(region.getRegionId(), primaryServer);
-
-                    // 使用新的基于表的路径注册 Region，同时写入主副本信息
+                    // 先注册 Region 到 MetadataManager（含 ZK），再让 ClusterManager 分配
                     metadataManager.registerRegionForTable(region, primaryServer);
+                    clusterManager.assignRegionToServer(region.getRegionId(), primaryServer);
                     createdRegions.add(region);
 
                     // 同步通知主 RegionServer 打开 Region（等待完成后再继续）
@@ -1205,6 +1220,12 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                         .setTableName(region.getTableName())
                         .setStartKey(com.google.protobuf.ByteString.copyFrom(region.getStartKey()))
                         .setEndKey(com.google.protobuf.ByteString.copyFrom(region.getEndKey()));
+
+                // 只返回可服务的 Region，跳过 OFFLINE/CLOSED/SPLIT/FAILED 等不可用状态
+                if (region.getState() == Region.State.OFFLINE || region.getState() == Region.State.CLOSED
+                    || region.getState() == Region.State.SPLIT || region.getState() == Region.State.FAILED) {
+                    continue;
+                }
 
                 // 添加副本信息
                 if (region.getReplicas() != null) {

@@ -100,6 +100,7 @@ public class MonitorHttpServer {
         httpServer.createContext("/monitor/api/demo/kill-server", this::handleDemoKillServer);
         httpServer.createContext("/monitor/api/demo/restart-server", this::handleDemoRestartServer);
         httpServer.createContext("/monitor/api/demo/trigger-balance", this::handleDemoTriggerBalance);
+        httpServer.createContext("/monitor/api/demo/force-split", this::handleDemoForceSplit);
         httpServer.createContext("/monitor/api/demo/sql", this::handleDemoSql);
 
         httpServer.setExecutor(Executors.newCachedThreadPool());
@@ -270,6 +271,13 @@ public class MonitorHttpServer {
     private void handleDemoTriggerBalance(HttpExchange exchange) throws IOException {
         if (demoService == null) { writeJson(exchange, Map.of("success", false, "error", "Demo not available")); return; }
         writeJson(exchange, demoService.triggerBalance());
+    }
+
+    private void handleDemoForceSplit(HttpExchange exchange) throws IOException {
+        if (demoService == null) { writeJson(exchange, Map.of("success", false, "error", "Demo not available")); return; }
+        Map<String, Object> body = readJsonBody(exchange);
+        String tableName = String.valueOf(body.getOrDefault("tableName", "demo_users"));
+        writeJson(exchange, demoService.forceSplit(tableName));
     }
 
     private void handleDemoSql(HttpExchange exchange) throws IOException {

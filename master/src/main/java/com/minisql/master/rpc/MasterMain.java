@@ -233,10 +233,11 @@ public class MasterMain {
             hotSpotTargetReadReplicaCount,
             hotSpotCooldownMs);
 
-        clusterManager = new ClusterManager(loadBalancer);
-        clusterManager.setZkClient(zkClient);
-
         metadataManager = new MetadataManager(zkClient);
+
+        clusterManager = new ClusterManager(loadBalancer, metadataManager);
+        clusterManager.setZkClient(zkClient);
+        loadBalancer.setClusterManager(clusterManager);
 
         int replicationFactor = Integer.parseInt(config.getProperty("replication.factor", "3"));
         int replicationThreadPool = parseIntProperty(config, "replication.thread.pool.size", 0);
@@ -338,6 +339,7 @@ public class MasterMain {
         monitorHttpServer.setDemoService(new com.minisql.master.monitoring.DemoService(
             monitoringService, clusterManager, metadataManager, loadBalancer,
             serviceImpl != null ? serviceImpl.getMigrationCoordinator() : null,
+            serviceImpl != null ? serviceImpl.getSplitCoordinator() : null,
             sqlConsoleService));
         monitorHttpServer.start(monitorHost, monitorPort);
         logger.info("Monitor HTTP server started on {}:{}", monitorHost, monitorPort);

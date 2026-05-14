@@ -499,6 +499,11 @@ public class HotSpotCoordinator {
         if (recoveryCoordinator != null) {
             recoveryCoordinator.setDesiredReplicaCount(regionId, targetReadReplicaCount);
         }
+        Region region = metadataManager.getRegion(regionId);
+        if (region != null) {
+            region.addReplica(targetServerId);
+            metadataManager.registerRegionForTable(region, region.getPrimary());
+        }
         clusterManager.addReplica(regionId, targetServerId);
         recoveryCoordinator.bootstrapReplica(regionId, targetServerId);
     }

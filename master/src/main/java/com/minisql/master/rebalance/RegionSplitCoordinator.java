@@ -396,13 +396,13 @@ public class RegionSplitCoordinator {
         region.setPrimary(targetServer);
         region.addReplica(targetServer);
 
+        support.metadataManager.registerRegionForTable(region, targetServer);
         support.clusterManager.unassignRegion(regionId);
         support.clusterManager.assignRegionToServer(regionId, targetServer);
         support.clusterManager.removeReplica(regionId, sourceServer);
         support.clusterManager.addReplica(regionId, targetServer);
         support.clusterManager.removeRegionLoad(sourceServer, regionId);
         support.clusterManager.updateRegionState(regionId, Region.State.OPEN);
-        support.metadataManager.registerRegionForTable(region, targetServer);
 
         logger.info("Migration completed for region: {}", regionId);
     }

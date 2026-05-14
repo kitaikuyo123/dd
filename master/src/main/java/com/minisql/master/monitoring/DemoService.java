@@ -4,6 +4,7 @@ import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.rebalance.RegionMigrationCoordinator;
+import com.minisql.master.rebalance.RegionSplitCoordinator;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 
@@ -30,18 +31,28 @@ public class DemoService {
         "INSERT INTO demo_users (id, name, age) VALUES (3, 'carol', 28);\n" +
         "INSERT INTO demo_users (id, name, age) VALUES (4, 'dave', 35);\n" +
         "INSERT INTO demo_users (id, name, age) VALUES (5, 'eve', 22);\n" +
+        "INSERT INTO demo_users (id, name, age) VALUES (6, 'frank', 40);\n" +
+        "INSERT INTO demo_users (id, name, age) VALUES (7, 'grace', 27);\n" +
+        "INSERT INTO demo_users (id, name, age) VALUES (8, 'henry', 33);\n" +
         "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (1, 1, 100.0, 'paid');\n" +
         "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (2, 2, 200.0, 'pending');\n" +
         "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (3, 1, 50.0, 'paid');\n" +
         "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (4, 3, 150.0, 'paid');\n" +
         "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (5, 2, 80.0, 'paid');\n" +
-        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (6, 4, 300.0, 'pending');";
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (6, 4, 300.0, 'pending');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (7, 6, 250.0, 'shipped');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (8, 7, 90.0, 'paid');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (9, 1, 75.0, 'shipped');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (10, 3, 60.0, 'pending');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (11, 8, 180.0, 'cancelled');\n" +
+        "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (12, 4, 120.0, 'paid');";
 
     private final MonitoringService monitoringService;
     private final ClusterManager clusterManager;
     private final MetadataManager metadataManager;
     private final LoadBalancer loadBalancer;
     private final RegionMigrationCoordinator migrationCoordinator;
+    private final RegionSplitCoordinator splitCoordinator;
     private final SqlConsoleService sqlConsoleService;
     private final String projectRoot;
 
@@ -50,12 +61,14 @@ public class DemoService {
                        MetadataManager metadataManager,
                        LoadBalancer loadBalancer,
                        RegionMigrationCoordinator migrationCoordinator,
+                       RegionSplitCoordinator splitCoordinator,
                        SqlConsoleService sqlConsoleService) {
         this.monitoringService = monitoringService;
         this.clusterManager = clusterManager;
         this.metadataManager = metadataManager;
         this.loadBalancer = loadBalancer;
         this.migrationCoordinator = migrationCoordinator;
+        this.splitCoordinator = splitCoordinator;
         this.sqlConsoleService = sqlConsoleService;
         this.projectRoot = detectProjectRoot();
         System.out.println("[DemoService] projectRoot detected: " + this.projectRoot);
@@ -141,6 +154,36 @@ public class DemoService {
             result.put("success", false);
             result.put("error", e.getMessage());
         }
+        return result;
+    }
+
+    /** 强制分裂指定表的 region */
+    public Map<String, Object> forceSplit(String tableName) {
+        Map<String, Object> result = new HashMap<>();
+        if (splitCoordinator == null) {
+            result.put("success", false);
+            result.put("error", "Split coordinator not available");
+            return result;
+        }
+        for (Region region : getAllRegions()) {
+            if (region.getTableName() != null && region.getTableName().equals(tableName)) {
+                String regionId = region.getRegionId();
+                try {
+                    boolean accepted = splitCoordinator.checkAndSplitRegion(regionId);
+                    result.put("success", accepted);
+                    result.put("regionId", regionId);
+                    result.put("message", accepted
+                        ? "Split scheduled for region " + regionId
+                        : "Split rejected (already splitting or region not ready)");
+                } catch (Exception e) {
+                    result.put("success", false);
+                    result.put("error", e.getMessage());
+                }
+                return result;
+            }
+        }
+        result.put("success", false);
+        result.put("error", "No region found for table: " + tableName);
         return result;
     }
 

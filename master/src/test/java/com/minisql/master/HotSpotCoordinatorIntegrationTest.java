@@ -195,9 +195,10 @@ class HotSpotCoordinatorIntegrationTest {
 
             assertDoesNotThrow(() -> coordinator.executeAction(action));
 
-            // No replica should be added
+            // No extra replica should be added — only the primary holds the region
             List<ServerId> replicas = clusterManager.getReplicaServers(region.getRegionId());
-            assertTrue(replicas.isEmpty());
+            assertEquals(1, replicas.size());
+            assertEquals(primary, replicas.get(0));
         }
     }
 

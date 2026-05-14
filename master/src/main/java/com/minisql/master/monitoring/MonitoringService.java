@@ -61,6 +61,7 @@ public class MonitoringService {
         this.sqlMetricsRegistry = new SqlMetricsRegistry();
         this.eventTimeline = new ClusterEventTimeline();
         this.displayLoadCalculator = new LoadBalancer.LoadCalculator();
+        this.displayLoadCalculator.setClusterManager(clusterManager);
     }
 
     public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
@@ -231,7 +232,7 @@ public class MonitoringService {
             row.put("tableName", region.getTableName());
             ServerId primary = clusterManager.getPrimaryServerForRegion(region.getRegionId());
             row.put("primaryServer", primary != null ? toServerName(primary) : null);
-            List<ServerId> replicas = clusterManager.getReplicaServers(region.getRegionId());
+            List<ServerId> replicas = clusterManager.getSecondaryServers(region.getRegionId());
             row.put("replicas", replicas == null
                 ? Collections.emptyList()
                 : replicas.stream().map(this::toServerName).collect(Collectors.toList()));

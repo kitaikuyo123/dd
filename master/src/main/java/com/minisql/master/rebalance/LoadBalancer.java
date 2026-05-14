@@ -25,6 +25,12 @@ public class LoadBalancer {
     private int roundRobinIndex = 0; // guarded by this
     private volatile double balanceThreshold = DEFAULT_BALANCE_THRESHOLD;
     private volatile long minMigrationIntervalMs = DEFAULT_MIN_MIGRATION_INTERVAL_MS;
+    private ClusterManager clusterManager;
+
+    public void setClusterManager(ClusterManager clusterManager) {
+        this.clusterManager = clusterManager;
+        this.loadCalculator.setClusterManager(clusterManager);
+    }
 
     public enum Strategy {
         RANDOM,
@@ -45,20 +51,35 @@ public class LoadBalancer {
 
     /**
      * 负载计算器
-     * 基于 Region 数量计算服务器负载分数
+     * 只计算主 Region 数量，replica 不参与读写不贡献负载。
      */
     public static class LoadCalculator {
 
         private static final double SCORE_PER_REGION = 10.0;
+        private ClusterManager clusterManager;
 
         public LoadCalculator() {
         }
 
+        public void setClusterManager(ClusterManager clusterManager) {
+            this.clusterManager = clusterManager;
+        }
+
         /**
-         * 计算服务器负载分数（每个 Region 贡献 10 分）
+         * 计算服务器负载分数（每个主 Region 贡献 10 分，replica 不计）
          */
         public double calculateLoadScore(ClusterManager.ServerInfo server) {
-            return server.getRegionLoads().size() * SCORE_PER_REGION;
+            if (clusterManager == null) {
+                return server.getRegionLoads().size() * SCORE_PER_REGION;
+            }
+            int primaryCount = 0;
+            for (String regionId : server.getRegionLoads().keySet()) {
+                ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+                if (primary != null && primary.equals(server.getServerId())) {
+                    primaryCount++;
+                }
+            }
+            return primaryCount * SCORE_PER_REGION;
         }
 
         /**
@@ -296,14 +317,21 @@ public class LoadBalancer {
     }
 
     /**
-     * 选择要迁移的 Region（排除已调度和目标已有的）
+     * 选择要迁移的 Region —— 只选 source 是 primary 的，迁移 replica 无意义。
      */
     private String selectBestRegionToMove(ClusterManager.ServerInfo source,
                                           ClusterManager.ServerInfo target,
                                           Set<String> excludedRegions) {
         for (String regionId : source.getRegionLoads().keySet()) {
-            if (!excludedRegions.contains(regionId)
-                && !target.getRegionLoads().containsKey(regionId)) {
+            if (excludedRegions.contains(regionId)
+                || target.getRegionLoads().containsKey(regionId)) {
+                continue;
+            }
+            if (clusterManager == null) {
+                return regionId;
+            }
+            ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
+            if (primary != null && primary.equals(source.getServerId())) {
                 return regionId;
             }
         }

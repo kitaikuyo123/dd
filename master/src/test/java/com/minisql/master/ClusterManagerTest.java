@@ -78,8 +78,8 @@ class ClusterManagerTest {
         manager.registerServer(server);
         manager.assignRegion(region);
 
-        Map<String, ClusterManager.RegionAssignment> assignments = manager.getRegionAssignments();
+        Map<String, ServerId> assignments = manager.getRegionAssignments();
         assertEquals(1, assignments.size());
-        assertNotNull(assignments.get("region-1"));
+        assertEquals(server, assignments.get("region-1"));
     }
 }

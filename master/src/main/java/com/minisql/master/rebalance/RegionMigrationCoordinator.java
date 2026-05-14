@@ -160,15 +160,15 @@ public class RegionMigrationCoordinator {
             }
 
             updateMigrationState(migrationStatus, MigrationState.COMMITTING_METADATA, "Committing metadata switch");
-            support.clusterManager.unassignRegion(regionId);
-            support.clusterManager.assignRegionToServer(regionId, targetServer);
             region.setPrimary(targetServer);
             region.addReplica(targetServer);
             region.removeReplica(sourceServer);
+            support.metadataManager.registerRegionForTable(region, targetServer);
+            support.clusterManager.unassignRegion(regionId);
+            support.clusterManager.assignRegionToServer(regionId, targetServer);
             support.clusterManager.addReplica(regionId, targetServer);
             support.clusterManager.removeReplica(regionId, sourceServer);
             support.clusterManager.removeRegionLoad(sourceServer, regionId);
-            support.metadataManager.registerRegionForTable(region, targetServer);
             transition(regionId, targetServer,
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
                 "Balanced region now primary on target");

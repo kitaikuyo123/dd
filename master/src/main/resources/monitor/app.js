@@ -360,25 +360,60 @@ const SqlConsole = {
 /* ========== Demo Mode ========== */
 
 const DEMO_STEPS = [
-  { id: "setup", label: "Create Tables + Insert Data", tag: "DDL / DML" },
-  { id: "query", label: "SELECT + Aggregation + GROUP BY", tag: "Query" },
-  { id: "join", label: "JOIN (Broadcast Hash Join)", tag: "Complex Query" },
-  { id: "failover", label: "Kill Random RS -> Auto Failover", tag: "Fault Tolerance" },
-  { id: "recover", label: "Restart RS -> Data Catch-up", tag: "Recovery" },
+  { id: "setup", label: "CREATE TABLE + INSERT", tag: "DDL / DML" },
+  { id: "query", label: "SELECT · WHERE · ORDER BY · LIMIT · 聚合 · GROUP BY · UPDATE · DELETE", tag: "Query / DML" },
+  { id: "join", label: "JOIN (INNER + LEFT) · JOIN + 聚合 + 分组", tag: "Complex Query" },
+  { id: "split", label: "Force Split → New Regions → Auto Rebalance", tag: "Region Split" },
+  { id: "failover", label: "Kill Random RS → Auto Failover", tag: "Fault Tolerance" },
+  { id: "recover", label: "Restart RS → Data Catch-up", tag: "Recovery" },
   { id: "scaleout", label: "Add New RS-4 Node", tag: "Cluster Scaling" },
-  { id: "balance", label: "Trigger Load Balance", tag: "Load Balance" },
 ];
 
 const DEMO_SQL = {
+  setup: [
+    "CREATE TABLE demo_users (id INT PRIMARY KEY, name STRING, age INT);",
+    "CREATE TABLE demo_orders (id INT PRIMARY KEY, user_id INT, amount DOUBLE, status STRING);",
+    "INSERT INTO demo_users (id, name, age) VALUES (1, 'alice', 25);",
+    "INSERT INTO demo_users (id, name, age) VALUES (2, 'bob', 30);",
+    "INSERT INTO demo_users (id, name, age) VALUES (3, 'carol', 28);",
+    "INSERT INTO demo_users (id, name, age) VALUES (4, 'dave', 35);",
+    "INSERT INTO demo_users (id, name, age) VALUES (5, 'eve', 22);",
+    "INSERT INTO demo_users (id, name, age) VALUES (6, 'frank', 40);",
+    "INSERT INTO demo_users (id, name, age) VALUES (7, 'grace', 27);",
+    "INSERT INTO demo_users (id, name, age) VALUES (8, 'henry', 33);",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (1, 1, 100.0, 'paid');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (2, 2, 200.0, 'pending');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (3, 1, 50.0, 'paid');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (4, 3, 150.0, 'paid');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (5, 2, 80.0, 'paid');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (6, 4, 300.0, 'pending');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (7, 6, 250.0, 'shipped');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (8, 7, 90.0, 'paid');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (9, 1, 75.0, 'shipped');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (10, 3, 60.0, 'pending');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (11, 8, 180.0, 'cancelled');",
+    "INSERT INTO demo_orders (id, user_id, amount, status) VALUES (12, 4, 120.0, 'paid');",
+  ].join("\n"),
   query: [
+    "SHOW TABLES;",
     "SELECT * FROM demo_users;",
-    "SELECT id, name, age FROM demo_users WHERE age > 25;",
-    "SELECT COUNT(*), SUM(amount), AVG(amount) FROM demo_orders;",
-    "SELECT user_id, SUM(amount) AS total FROM demo_orders GROUP BY user_id HAVING total > 100;",
+    "SELECT id, name, age FROM demo_users WHERE age > 25 ORDER BY age DESC;",
+    "SELECT id, name, age FROM demo_users ORDER BY age LIMIT 3 OFFSET 2;",
+    "SELECT COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM demo_orders;",
+    "SELECT status, COUNT(*) AS cnt, SUM(amount) AS total FROM demo_orders GROUP BY status ORDER BY total DESC;",
+    "SELECT user_id, SUM(amount) AS total FROM demo_orders GROUP BY user_id HAVING total > 100 ORDER BY total DESC;",
+    "UPDATE demo_users SET age = 31 WHERE id = 2;",
+    "SELECT * FROM demo_users WHERE id = 2;",
+    "DELETE FROM demo_orders WHERE status = 'cancelled';",
+    "SELECT * FROM demo_orders ORDER BY id;",
+    "INSERT INTO demo_users (id, name, age) VALUES (9, 'iris', 24);",
+    "SELECT id, name, age FROM demo_users ORDER BY id;",
   ].join("\n"),
   join: [
-    "SELECT u.name, o.amount FROM demo_users u JOIN demo_orders o ON u.id = o.user_id;",
-    "SELECT u.name, SUM(o.amount) AS total FROM demo_users u JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total DESC;",
+    "SELECT u.name, o.amount, o.status FROM demo_users u JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
+    "SELECT u.name, o.amount, o.status FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
+    "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total DESC;",
+    "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY orders DESC, total DESC;",
   ].join("\n"),
   verify: "SELECT * FROM demo_users;",
 };
@@ -418,11 +453,14 @@ const DemoMode = {
       try {
         const step = DEMO_STEPS[idx];
         if (step.id === "setup") {
-          await postJson("/monitor/api/demo/setup", "");
+          emit("fill-sql", DEMO_SQL.setup);
         } else if (step.id === "query") {
           emit("fill-sql", DEMO_SQL.query);
         } else if (step.id === "join") {
           emit("fill-sql", DEMO_SQL.join);
+        } else if (step.id === "split") {
+          await postJson("/monitor/api/demo/force-split", { tableName: "demo_users" });
+          setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 3000);
         } else if (step.id === "failover") {
           // 随机选一个 RS 实例杀掉
           const instance = Math.floor(Math.random() * 3) + 1;
@@ -433,12 +471,9 @@ const DemoMode = {
         } else if (step.id === "recover") {
           // 重启被杀的 RS
           await postJson("/monitor/api/demo/restart-server", { instance: killedInstance.value || 1 });
+          setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 2000);
         } else if (step.id === "scaleout") {
-          // 启动新的 RS-4 节点
           await postJson("/monitor/api/demo/restart-server", { instance: 4 });
-        } else if (step.id === "balance") {
-          await postJson("/monitor/api/demo/trigger-balance", "");
-          emit("fill-sql", DEMO_SQL.verify);
         }
         statuses[idx] = "done";
         current.value = idx + 1 < DEMO_STEPS.length ? idx + 1 : -1;

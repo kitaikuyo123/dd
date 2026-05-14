@@ -317,9 +317,9 @@ public class FailoverCoordinator {
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
                 "Failover completed");
 
-            // 4. 更新 ClusterManager 的路由信息
-            clusterManager.updateRegionAssignment(regionId, newPrimary.getServerId());
+            // 4. 更新路由信息：先更新 MetadataManager 再更新 ClusterManager
             updateMetadataPrimary(regionId, newPrimary.getServerId());
+            clusterManager.updateRegionAssignment(regionId, newPrimary.getServerId());
 
             // 5. 更新 ZooKeeper
             updateZooKeeper(regionId, newPrimary.getServerId());
@@ -480,8 +480,8 @@ public class FailoverCoordinator {
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, targetPrimary);
-            clusterManager.updateRegionAssignment(regionId, targetPrimary);
             updateMetadataPrimary(regionId, targetPrimary);
+            clusterManager.updateRegionAssignment(regionId, targetPrimary);
             updateZooKeeper(regionId, targetPrimary);
 
             FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
