@@ -90,3 +90,6 @@ surefire-reports/
 *.exec
 *.ec
 jacoco.exec
+
+# Claude Code
+.claude/
