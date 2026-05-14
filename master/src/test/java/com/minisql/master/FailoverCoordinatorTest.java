@@ -44,7 +44,7 @@ class FailoverCoordinatorTest {
     void triggerFailoverPromotesHealthiestSecondary() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -110,7 +110,7 @@ class FailoverCoordinatorTest {
     void cooldownPreventsRapidFailover() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -168,7 +168,7 @@ class FailoverCoordinatorTest {
     void emergencyFailoverBypassesCooldown() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -232,7 +232,7 @@ class FailoverCoordinatorTest {
     void normalFailoverBlockedWhenMaxRetriesExceeded() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -263,7 +263,7 @@ class FailoverCoordinatorTest {
     void shutdownTerminatesCleanly() {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         coordinator = new FailoverCoordinator(
@@ -284,7 +284,7 @@ class FailoverCoordinatorTest {
     void callbackTriggersFailoverOnPrimaryFailure() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -348,7 +348,7 @@ class FailoverCoordinatorTest {
     void metadataPrimaryUpdatedAfterFailover() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);
@@ -411,7 +411,7 @@ class FailoverCoordinatorTest {
     void failoverWithNoSuitableReplicaDoesNotPromote() throws Exception {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("host-a", 16020, 1L);

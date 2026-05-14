@@ -22,7 +22,7 @@ class MonitoringServiceTest {
     void buildsSnapshotsFromClusterState() {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         MonitoringService service = new MonitoringService(clusterManager, metadataManager, replicaMonitor, lifecycleManager);
 

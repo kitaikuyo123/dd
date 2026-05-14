@@ -27,7 +27,7 @@ class RecoveryManagerIntegrationTest {
     void reconcileRecoveredServerRecoversExistingReplicaMember() {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("localhost", 16022, 1000L);
@@ -60,7 +60,7 @@ class RecoveryManagerIntegrationTest {
     void reconcileRecoveredServerBootstrapsWhenReplicaCountIsLow() {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
 
         ServerId primary = new ServerId("localhost", 16022, 1000L);

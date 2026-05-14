@@ -269,20 +269,10 @@ public class LoadBalancer {
             loadCalculator.getRemainingCapacity(b),
             loadCalculator.getRemainingCapacity(a)));
 
-        // 生成迁移动作
-        Set<String> scheduledRegions = new HashSet<>();
-
+        // 每轮只生成 1 个迁移动作，迁移完成后立即重评估，避免过度迁移
         for (ClusterManager.ServerInfo overloaded : overloadedServers) {
-            double currentLoad = loadScores.get(overloaded);
-            double targetLoad = avgLoad;
-
             for (ClusterManager.ServerInfo underloaded : underloadedServers) {
-                if (currentLoad <= targetLoad) {
-                    break;
-                }
-
-                // 选择要迁移的 Region
-                String regionId = selectBestRegionToMove(overloaded, underloaded, scheduledRegions);
+                String regionId = selectBestRegionToMove(overloaded, underloaded, Collections.emptySet());
 
                 if (regionId != null) {
                     actions.add(new BalanceAction(
@@ -290,18 +280,13 @@ public class LoadBalancer {
                         overloaded.getServerId(),
                         underloaded.getServerId()
                     ));
-                    scheduledRegions.add(regionId);
-                    currentLoad -= 10.0; // 每个 Region 固定贡献 10 分
+                    break; // 每轮最多 1 个动作
                 }
             }
+            if (!actions.isEmpty()) break;
         }
 
         if (!actions.isEmpty()) {
-            if (actions.size() > budget) {
-                logger.info("Migration budget: {}/{} used, truncating {} actions to {}",
-                    ongoingCount, maxMigrationsPerRound, actions.size(), budget);
-                actions = new ArrayList<>(actions.subList(0, budget));
-            }
             synchronized (this) {
                 lastBalanceTime = now;
             }

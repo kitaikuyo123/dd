@@ -1,7 +1,6 @@
 package com.minisql.master.rpc;
 
 import com.minisql.common.model.Region;
-import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.monitoring.MonitorHttpServer;
 import com.minisql.master.monitoring.MonitoringService;
@@ -249,9 +248,8 @@ public class MasterMain {
         replicationCoordinator.start();
         rebuildReplicationGroups();
 
-        replicaMonitor = new ReplicaMonitor(clusterManager);
+        replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         replicaLifecycleManager = new ReplicaLifecycleManager();
-        rebuildReplicaRuntimeState();
 
         int failoverThreadPool = parseIntProperty(config, "failover.thread.pool.size", 3);
         int recoveryThreadPool = parseIntProperty(config, "recovery.thread.pool.size", 2);
@@ -297,42 +295,6 @@ public class MasterMain {
             replicationCoordinator.createReplicaGroup(region, orderedServers,
                 new RegionTopologyProvider(metadataManager, region.getRegionId()));
         }
-    }
-
-    private void rebuildReplicaRuntimeState() {
-        for (Region region : metadataManager.getAllRegions()) {
-            if (region == null || region.getRegionId() == null) {
-                continue;
-            }
-
-            if (region.getPrimary() != null) {
-                clusterManager.assignRegionToServer(region.getRegionId(), region.getPrimary());
-                clusterManager.addReplica(region.getRegionId(), region.getPrimary());
-                replicaMonitor.registerReplica(region.getRegionId(),
-                    createReplicaInfo(region.getRegionId(), region.getPrimary(), ReplicaInfo.ReplicaState.PRIMARY));
-            }
-
-            for (ServerId replica : region.getReplicas()) {
-                if (replica == null) {
-                    continue;
-                }
-                clusterManager.addReplica(region.getRegionId(), replica);
-                ReplicaInfo.ReplicaState state = replica.equals(region.getPrimary())
-                    ? ReplicaInfo.ReplicaState.PRIMARY
-                    : ReplicaInfo.ReplicaState.SECONDARY;
-                replicaMonitor.registerReplica(region.getRegionId(), createReplicaInfo(region.getRegionId(), replica, state));
-            }
-        }
-    }
-
-    private ReplicaInfo createReplicaInfo(String regionId, ServerId serverId, ReplicaInfo.ReplicaState state) {
-        ReplicaInfo replicaInfo = new ReplicaInfo();
-        replicaInfo.setRegionId(regionId);
-        replicaInfo.setServerId(serverId);
-        replicaInfo.setState(state);
-        replicaInfo.setLastHeartbeat(System.currentTimeMillis());
-        replicaInfo.setReplicationLag(0L);
-        return replicaInfo;
     }
 
     private void startGrpcServer(String host, int port) throws IOException {

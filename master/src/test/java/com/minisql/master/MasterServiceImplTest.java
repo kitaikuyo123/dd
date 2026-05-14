@@ -33,7 +33,7 @@ class MasterServiceImplTest {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
         ReplicationCoordinator replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(3).build());
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         MasterServiceImpl service = new MasterServiceImpl(
             clusterManager,
@@ -100,7 +100,7 @@ class MasterServiceImplTest {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
         ReplicationCoordinator replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(3).build());
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         MasterServiceImpl service = new MasterServiceImpl(
             clusterManager,
@@ -152,7 +152,7 @@ class MasterServiceImplTest {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
         ReplicationCoordinator replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(3).build());
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         RecordingFailoverCoordinator failoverCoordinator =
             new RecordingFailoverCoordinator(clusterManager, metadataManager, replicaMonitor, lifecycleManager);
@@ -188,7 +188,7 @@ class MasterServiceImplTest {
         ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
         MetadataManager metadataManager = new MetadataManager();
         ReplicationCoordinator replicationCoordinator = new ReplicationCoordinator(ReplicationConfig.builder(3).build());
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         RecordingFailoverCoordinator failoverCoordinator =
             new RecordingFailoverCoordinator(clusterManager, metadataManager, replicaMonitor, lifecycleManager);

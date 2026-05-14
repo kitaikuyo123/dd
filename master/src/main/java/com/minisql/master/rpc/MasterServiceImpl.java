@@ -466,6 +466,8 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             serverFailureRecoveryExecutor.submit(() -> {
                 try {
                     migrationCoordinator.execute(action);
+                    // 迁移完成后立即重评估，判断是否需要继续均衡
+                    runLoadBalance();
                 } catch (Exception e) {
                     logger.warn("Error executing balance action for {}: {}", action.getRegionId(), e.getMessage());
                 }

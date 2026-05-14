@@ -1,7 +1,6 @@
 package com.minisql.master.rebalance;
 
 import com.minisql.common.model.Region;
-import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.recover.RecoveryCoordinator;
@@ -111,32 +110,13 @@ class RebalanceSupport {
     // --- ReplicaMonitor sync ---
 
     /**
-     * Remove stale servers from ReplicaMonitor and register any servers
-     * present in Region metadata but missing from ReplicaMonitor.
-     * Must be called after Region metadata has been updated.
+     * Remove stale health entries from ReplicaMonitor after topology changes.
+     * Topology is now derived from Region metadata, so only cleanup is needed.
      */
     void syncReplicaMonitor(String regionId, ServerId... removeServers) {
         if (replicaMonitor == null) return;
-
         for (ServerId server : removeServers) {
             replicaMonitor.removeReplica(regionId, server);
-        }
-
-        Region region = metadataManager.getRegion(regionId);
-        if (region == null || region.getReplicas() == null) return;
-
-        LinkedHashSet<ServerId> tracked = new LinkedHashSet<>();
-        for (ReplicaInfo ri : replicaMonitor.getReplicas(regionId)) {
-            tracked.add(ri.getServerId());
-        }
-
-        for (ServerId server : region.getReplicas()) {
-            if (!tracked.contains(server)) {
-                boolean isPrimary = server.equals(region.getPrimary());
-                replicaMonitor.registerReplica(regionId, new ReplicaInfo(
-                    regionId, server, null, null, null,
-                    isPrimary ? ReplicaInfo.ReplicaState.PRIMARY : ReplicaInfo.ReplicaState.SECONDARY));
-            }
         }
     }
 

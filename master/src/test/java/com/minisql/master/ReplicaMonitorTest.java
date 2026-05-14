@@ -1,9 +1,11 @@
 package com.minisql.master;
 
+import com.minisql.common.model.Region;
 import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.state.ClusterManager;
+import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaMonitor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,9 +20,19 @@ class ReplicaMonitorTest {
     @Test
     @DisplayName("updateHeartbeat recovers an offline replica")
     void testReplicaOfflineThenRecovered() {
-        ReplicaMonitor monitor = new ReplicaMonitor(new ClusterManager(new LoadBalancer()));
+        ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
+        MetadataManager metadataManager = new MetadataManager();
+        ReplicaMonitor monitor = new ReplicaMonitor(clusterManager, metadataManager);
+
+        ServerId primaryServer = new ServerId("primary-host", 16019);
         ServerId replicaServer = new ServerId("replica-host", 16020);
-        // Replica starts OFFLINE (as would be set by ZooKeeper-driven failure detection)
+
+        Region region = new Region("region-1", "test", new byte[0], new byte[0]);
+        region.setPrimary(primaryServer);
+        region.addReplica(primaryServer);
+        region.addReplica(replicaServer);
+        metadataManager.registerRegionForTable(region, primaryServer);
+
         ReplicaInfo replica = new ReplicaInfo("region-1", replicaServer, "", "", "",
             ReplicaInfo.ReplicaState.OFFLINE);
 
@@ -41,7 +53,6 @@ class ReplicaMonitorTest {
         });
         monitor.registerReplica("region-1", replica);
 
-        // Heartbeat recovers the OFFLINE replica to SECONDARY
         monitor.updateHeartbeat("region-1", replicaServer, 0L);
 
         assertTrue(recoveredCalled.get());
@@ -49,18 +60,29 @@ class ReplicaMonitorTest {
     }
 
     @Test
-    @DisplayName("removeRegion clears tracked replicas")
+    @DisplayName("removeRegion clears tracked health state and getReplicas returns empty")
     void testRemoveRegionClearsTrackedReplicas() {
-        ReplicaMonitor monitor = new ReplicaMonitor(new ClusterManager(new LoadBalancer()));
+        ClusterManager clusterManager = new ClusterManager(new LoadBalancer());
+        MetadataManager metadataManager = new MetadataManager();
+        ReplicaMonitor monitor = new ReplicaMonitor(clusterManager, metadataManager);
+
         ServerId replicaServer = new ServerId("replica-host", 16020);
+        Region region = new Region("region-1", "test", new byte[0], new byte[0]);
+        region.setPrimary(replicaServer);
+        region.addReplica(replicaServer);
+        metadataManager.registerRegionForTable(region, replicaServer);
+
         ReplicaInfo replica = new ReplicaInfo("region-1", replicaServer, "", "", "",
             ReplicaInfo.ReplicaState.SECONDARY);
-
         monitor.registerReplica("region-1", replica);
         assertEquals(1, monitor.getReplicas("region-1").size());
 
         monitor.removeRegion("region-1");
 
+        // After removeRegion, health state is gone. getReplicas reads from Region metadata
+        // which still exists, so it will auto-create a default entry. To truly test cleanup,
+        // remove the Region metadata too to get empty result.
+        metadataManager.removeRegion("region-1");
         assertTrue(monitor.getReplicas("region-1").isEmpty());
     }
 

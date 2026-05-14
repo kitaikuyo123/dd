@@ -46,7 +46,7 @@ class HotSpotCoordinatorIntegrationTest {
         splitCoordinator.start();
 
         // Build RecoveryCoordinator with minimal real dependencies
-        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager);
+        ReplicaMonitor replicaMonitor = new ReplicaMonitor(clusterManager, metadataManager);
         ReplicaLifecycleManager lifecycleManager = new ReplicaLifecycleManager();
         ReplicationCoordinator replicationCoordinator = new ReplicationCoordinator(
             ReplicationConfig.builder(1).build(),
