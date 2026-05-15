@@ -16,6 +16,7 @@ import com.minisql.replication.ReplicationCoordinator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -300,10 +301,28 @@ public class RecoveryCoordinator {
         }
 
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
-        if (!commandClient.openRegion(primary, region, false).getStatus().getSuccess()) {
-            throw new IllegalStateException("Failed to reopen primary region on " + primary +
-                " for region " + region.getRegionId());
+
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            try {
+                if (commandClient.openRegion(primary, region, false).getStatus().getSuccess()) {
+                    return;
+                }
+                lastException = new IOException("openRegion returned failure status");
+            } catch (Exception e) {
+                lastException = new IOException("openRegion call failed: " + e.getMessage(), e);
+            }
+            if (attempt < 5) {
+                try {
+                    Thread.sleep(200L * attempt);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
+        throw new IllegalStateException("Failed to reopen primary region on " + primary +
+            " for region " + region.getRegionId(), lastException);
     }
 
     private boolean isPrimaryReady(Region region) {

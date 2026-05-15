@@ -633,11 +633,15 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
-            recoveryCoordinator.reconcileRecoveredServer(serverId);
-
             logger.info("RegionServer registered: {}", serverId);
             recordEvent("SERVER_REGISTERED", "INFO", null, null, serverId, null,
                 "RegionServer registered", null);
+
+            try {
+                recoveryCoordinator.reconcileRecoveredServer(serverId);
+            } catch (Exception reconcileErr) {
+                logger.warn("Post-registration reconciliation failed for {}: {}", serverId, reconcileErr.getMessage());
+            }
         } catch (Exception e) {
             logger.warn("Error registering RegionServer: {}", e.getMessage(), e);
             responseObserver.onNext(MasterProto.RegisterResponse.newBuilder()
