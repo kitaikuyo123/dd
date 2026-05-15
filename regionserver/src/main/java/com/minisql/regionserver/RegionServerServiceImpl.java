@@ -679,7 +679,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             // 执行分裂
             RegionSplitService.RegionSplitResult result =
-                regionServer.getSplitService().splitRegion(regionId, splitKey);
+                regionServer.getSplitService().splitRegion(regionId, splitKey,
+                    request.getLeftRegionId(), request.getRightRegionId());
 
             // 构建响应
             CommonProto.RegionInfo leftRegion = CommonProto.RegionInfo.newBuilder()
@@ -742,7 +743,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             // 执行合并
             RegionMergeService.RegionMergeResult result =
-                mergeService.mergeRegions(leftRegionId, rightRegionId);
+                mergeService.mergeRegions(leftRegionId, rightRegionId, request.getMergedRegionId());
 
             // 构建响应
             CommonProto.RegionInfo mergedRegion = CommonProto.RegionInfo.newBuilder()
@@ -1157,10 +1158,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
             return;
         }
 
-        io.grpc.ManagedChannel channel = io.grpc.ManagedChannelBuilder
-            .forAddress(targetServer.getHost(), targetServer.getPort())
-            .usePlaintext()
-            .build();
+        io.grpc.ManagedChannel channel = com.minisql.common.rpc.GrpcChannelFactory
+            .forAddress(targetServer.getHost(), targetServer.getPort());
 
         try {
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
@@ -1177,7 +1176,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 throw new RuntimeException("Incremental replication failed: " + response.getStatus().getMessage());
             }
         } finally {
-            channel.shutdown();
+            channel = null;
         }
     }
 
@@ -1186,10 +1185,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
      */
     private void performFullSync(String regionId, ServerId targetServer) {
         try {
-            io.grpc.ManagedChannel channel = io.grpc.ManagedChannelBuilder
-                .forAddress(targetServer.getHost(), targetServer.getPort())
-                .usePlaintext()
-                .build();
+            io.grpc.ManagedChannel channel = com.minisql.common.rpc.GrpcChannelFactory
+                .forAddress(targetServer.getHost(), targetServer.getPort());
 
             try {
                 RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
@@ -1222,7 +1219,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 logger.info("Full sync completed for region {}, sent {} entries to {}", regionId, totalSent, targetServer);
 
             } finally {
-                channel.shutdown();
+                channel = null;
             }
         } catch (Exception e) {
             logger.error("Error performing full sync", e);

@@ -7,8 +7,8 @@ import com.minisql.common.utils.BytesUtil;
 import com.minisql.sql.SQLParser;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +50,6 @@ public class MiniSQLConnection implements Connection {
     private java.util.List<String> transactionOperations = new java.util.ArrayList<>();
 
     // RegionServer 连接缓存
-    private final Map<String, ManagedChannel> regionServerChannels = new HashMap<>();
     private final Map<String, RegionServerServiceGrpc.RegionServerServiceBlockingStub> regionServerStubs = new HashMap<>();
 
     // 并行查询执行器
@@ -76,7 +75,7 @@ public class MiniSQLConnection implements Connection {
         initialize();
 
         // 初始化并行查询执行器
-        this.parallelQueryExecutor = new ParallelQueryExecutor(masterStub, 30);
+        this.parallelQueryExecutor = new ParallelQueryExecutor(masterStub, 30, router);
     }
 
     private void parseUrl(String url) throws SQLException {
@@ -168,30 +167,14 @@ public class MiniSQLConnection implements Connection {
      * 连接到 Master
      */
     private void connectToMaster(String address) {
-        // 关闭旧连接
-        if (masterChannel != null) {
-            masterChannel.shutdown();
-            try {
-                if (!masterChannel.awaitTermination(5, TimeUnit.SECONDS)) {
-                    masterChannel.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                masterChannel.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
-
         // 解析地址
         String[] parts = address.split(":");
         String host = parts[0];
-        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16000;
+        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
 
-        // 创建新连接
-        masterChannel = ManagedChannelBuilder.forAddress(host, port)
-                .usePlaintext()
-                .build();
+        // 使用 GrpcChannelFactory 获取复用的 channel
+        masterChannel = GrpcChannelFactory.forAddress(host, port);
         masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
-        router.setMasterAddress(new Router.ServerAddress(host, port));
 
         logger.info("Connected to Master: {}", address);
     }
@@ -203,13 +186,10 @@ public class MiniSQLConnection implements Connection {
         return regionServerStubs.computeIfAbsent(address, addr -> {
             String[] parts = addr.split(":");
             String host = parts[0];
-            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16020;
+            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_REGIONSERVER_PORT;
 
             logger.debug("Creating RegionServer stub for: {} (host={}, port={})", addr, host, port);
-            ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port)
-                    .usePlaintext()
-                    .build();
-            regionServerChannels.put(addr, channel);
+            ManagedChannel channel = GrpcChannelFactory.forAddress(host, port);
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub = RegionServerServiceGrpc.newBlockingStub(channel);
             logger.debug("Stub created successfully, channel state: {}", channel.getState(true));
             return stub;
@@ -914,31 +894,12 @@ public class MiniSQLConnection implements Connection {
 
         // 清理资源
         try {
-            // 关闭所有 RegionServer 连接
-            for (ManagedChannel channel : regionServerChannels.values()) {
-                channel.shutdown();
-                try {
-                    if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
-                        channel.shutdownNow();
-                    }
-                } catch (InterruptedException e) {
-                    channel.shutdownNow();
-                }
-            }
-            regionServerChannels.clear();
+            // 清理 RegionServer 连接引用（channel 由 GrpcChannelFactory 管理）
             regionServerStubs.clear();
 
-            // 关闭 Master 连接
-            if (masterChannel != null) {
-                masterChannel.shutdown();
-                try {
-                    masterChannel.awaitTermination(5, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                masterChannel = null;
-                masterStub = null;
-            }
+            // 清理 Master 连接引用（channel 由 GrpcChannelFactory 管理）
+            masterChannel = null;
+            masterStub = null;
 
             // 关闭 ZooKeeper 连接
             if (zkClient != null) {
@@ -1241,15 +1202,6 @@ public class MiniSQLConnection implements Connection {
     @Override
     public boolean isWrapperFor(Class<?> iface) throws SQLException {
         return false;
-    }
-
-    // Getter methods
-    public Router getRouter() {
-        return router;
-    }
-
-    public MasterServiceGrpc.MasterServiceBlockingStub getMasterStub() {
-        return masterStub;
     }
 
     /**

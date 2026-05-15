@@ -3,37 +3,29 @@ package com.minisql.client;
 import com.minisql.common.Constants;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
-import com.minisql.common.proto.CommonProto;
-import com.minisql.common.proto.MasterProto;
-import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.utils.BytesUtil;
 import com.minisql.zookeeper.ZkClient;
-import com.minisql.zookeeper.ZkPayloads;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 请求路由器，负责根据 rowKey 路由到正确的 RegionServer。
  *
- * <p>所有读写请求均路由到 Primary。副本仅用于故障转移，不参与读请求分发。
+ * <p>ZK 是唯一的路由数据源。缓存通过 ZK watcher 失效 + TTL 双重保障。
  */
 public class Router {
 
     private static final Logger logger = LoggerFactory.getLogger(Router.class);
 
-    // 本地路由缓存: tableName -> List<RegionRouteInfo>
-    private final Map<String, List<RegionRouteInfo>> routeCache = new ConcurrentHashMap<>();
+    static final long ROUTE_CACHE_TTL_NANOS = 30_000_000_000L; // 30 seconds
 
-    // Master 地址缓存
-    private volatile ServerAddress masterAddress;
+    // 本地路由缓存: tableName -> CachedRouteEntry
+    private final Map<String, CachedRouteEntry> routeCache = new ConcurrentHashMap<>();
 
-    // ZooKeeper 客户端（用于获取最新路由信息）
+    // ZooKeeper 客户端
     private volatile ZkClient zkClient;
     private final Set<String> watchedTables = ConcurrentHashMap.newKeySet();
     private final Set<String> watchedRegionPaths = ConcurrentHashMap.newKeySet();
@@ -55,41 +47,95 @@ public class Router {
      * 根据表名和 rowKey 定位 RegionServer 的 Primary。
      */
     public ServerAddress route(String tableName, byte[] rowKey) {
-        // 1. 从缓存获取该表的所有 Region
-        List<RegionRouteInfo> regions = routeCache.get(tableName);
+        List<RegionRouteInfo> regions = getOrRefreshRegions(tableName);
         if (regions == null || regions.isEmpty()) {
-            refreshRouteCache(tableName);
-            regions = routeCache.get(tableName);
+            return null;
         }
 
-        if (regions == null || regions.isEmpty()) {
-            return getMaster();
-        }
-
-        // 2. 根据 rowKey 找到对应的 Region
         RegionRouteInfo targetRegion = findRegionByKey(regions, rowKey);
         if (targetRegion != null) {
             return targetRegion.getPrimaryServer();
         }
 
-        // 3. 没找到，返回 Master
-        return getMaster();
+        return null;
     }
 
     /**
-     * 根据 rowKey 查找对应的 Region
+     * 获取表的所有 region 路由信息。
      */
-    private RegionRouteInfo findRegionByKey(List<RegionRouteInfo> regions, byte[] rowKey) {
-        for (RegionRouteInfo region : regions) {
-            if (BytesUtil.isKeyInRange(rowKey, region.getStartKey(), region.getEndKey())) {
-                return region;
-            }
+    public List<RegionRouteInfo> getAllRegionLocations(String tableName) {
+        return getOrRefreshRegions(tableName);
+    }
+
+    /**
+     * 获取表的单个 region 路由信息（按 rowKey 定位）。
+     */
+    public RegionRouteInfo getTargetRegionLocation(String tableName, byte[] rowKey) {
+        List<RegionRouteInfo> regions = getOrRefreshRegions(tableName);
+        if (regions == null || regions.isEmpty()) {
+            return null;
+        }
+        return findRegionByKey(regions, rowKey);
+    }
+
+    /**
+     * 获取缓存或从 ZK 刷新。
+     */
+    private List<RegionRouteInfo> getOrRefreshRegions(String tableName) {
+        CachedRouteEntry entry = routeCache.get(tableName);
+        if (entry != null && !entry.isExpired()) {
+            return entry.regions;
+        }
+
+        // TTL 过期或缓存 miss，同步刷新
+        refreshRouteCache(tableName);
+
+        entry = routeCache.get(tableName);
+        if (entry != null && !entry.isExpired()) {
+            return entry.regions;
+        }
+        // 退回 stale 数据（如果有）
+        if (entry != null) {
+            return entry.regions;
         }
         return null;
     }
 
     /**
-     * 刷新路由缓存
+     * 根据 rowKey 用二分查找定位 Region。
+     */
+    private RegionRouteInfo findRegionByKey(List<RegionRouteInfo> regions, byte[] rowKey) {
+        if (rowKey == null) {
+            return null;
+        }
+        int lo = 0, hi = regions.size() - 1;
+        RegionRouteInfo result = null;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            RegionRouteInfo candidate = regions.get(mid);
+            byte[] startKey = candidate.getStartKey();
+            int cmp = (startKey == null || startKey.length == 0)
+                ? 1  // empty startKey = negative infinity, rowKey >= it
+                : BytesUtil.compareTo(rowKey, startKey);
+            if (cmp >= 0) {
+                result = candidate;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        // Verify rowKey < endKey
+        if (result != null) {
+            byte[] endKey = result.getEndKey();
+            if (endKey != null && endKey.length > 0 && BytesUtil.compareTo(rowKey, endKey) >= 0) {
+                return null;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 从 ZK 刷新路由缓存。
      */
     public void refreshRouteCache(String tableName) {
         if (!isZkUsable()) {
@@ -145,85 +191,24 @@ public class Router {
             }
 
             if (!regions.isEmpty()) {
-                routeCache.put(tableName, Collections.unmodifiableList(regions));
-                return;
+                // Sort by startKey for binary search
+                regions.sort(Comparator.comparing(
+                    RegionRouteInfo::getStartKey,
+                    (a, b) -> {
+                        if (a == null || a.length == 0) return -1;
+                        if (b == null || b.length == 0) return 1;
+                        return BytesUtil.compareTo(a, b);
+                    }
+                ));
+                routeCache.put(tableName, new CachedRouteEntry(
+                    Collections.unmodifiableList(regions), System.nanoTime()));
             }
-
-            if (refreshRouteCacheFromMaster(tableName)) {
-                return;
-            }
-
         } catch (Exception e) {
             if (isZkStoppedError(e)) {
                 return;
             }
             logger.warn("Failed to refresh route cache: {}", e.getMessage(), e);
         }
-    }
-
-    private boolean refreshRouteCacheFromMaster(String tableName) {
-        ServerAddress master = getMaster();
-        if (master == null) {
-            return false;
-        }
-
-        ManagedChannel channel = null;
-        try {
-            channel = ManagedChannelBuilder.forAddress(master.getHost(), master.getPort())
-                .usePlaintext()
-                .build();
-
-            MasterServiceGrpc.MasterServiceBlockingStub stub = MasterServiceGrpc.newBlockingStub(channel)
-                .withDeadlineAfter(3, TimeUnit.SECONDS);
-
-            MasterProto.GetTableRegionsResponse response = stub.getTableRegions(
-                MasterProto.GetTableRegionsRequest.newBuilder()
-                    .setTableName(tableName)
-                    .build()
-            );
-
-            if (!response.getStatus().getSuccess()) {
-                return false;
-            }
-
-            List<RegionRouteInfo> regions = new ArrayList<>();
-            for (CommonProto.RegionInfo regionInfo : response.getRegionsList()) {
-                Region region = new Region();
-                region.setRegionId(regionInfo.getRegionId());
-                region.setTableName(regionInfo.getTableName());
-                region.setStartKey(regionInfo.getStartKey().toByteArray());
-                region.setEndKey(regionInfo.getEndKey().toByteArray());
-
-                ServerAddress primary = regionInfo.hasPrimary()
-                    ? new ServerAddress(regionInfo.getPrimary().getHost(), regionInfo.getPrimary().getPort())
-                    : null;
-
-                if (primary != null) {
-                    regions.add(new RegionRouteInfo(region, primary));
-                }
-            }
-
-            if (!regions.isEmpty()) {
-                routeCache.put(tableName, Collections.unmodifiableList(regions));
-                return true;
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to refresh route cache from Master: {}", e.getMessage());
-        } finally {
-            if (channel != null) {
-                channel.shutdown();
-                try {
-                    if (!channel.awaitTermination(3, TimeUnit.SECONDS)) {
-                        channel.shutdownNow();
-                    }
-                } catch (InterruptedException e) {
-                    channel.shutdownNow();
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-
-        return false;
     }
 
     private Region parseRegionData(String regionId, String tableName, byte[] data) {
@@ -259,42 +244,17 @@ public class Router {
         }
     }
 
-    /**
-     * 获取 Master 地址
-     */
-    public ServerAddress getMaster() {
-        if (masterAddress != null) {
-            return masterAddress;
-        }
-
-        if (isZkUsable()) {
-            try {
-                String masterPath = Constants.ZK_MASTER_LEADER_PATH;
-                if (zkClient.exists(masterPath)) {
-                    byte[] masterData = zkClient.getData(masterPath);
-                    String masterInfo = ZkPayloads.decodeLeaderAddress(masterData);
-                    masterAddress = parseServerAddress(masterInfo);
-                    return masterAddress;
-                }
-            } catch (Exception e) {
-                if (isZkStoppedError(e)) {
-                    return masterAddress;
-                }
-                logger.warn("Failed to get master from ZooKeeper: {}", e.getMessage());
-            }
-        }
-
-        return new ServerAddress("localhost", 16000);
-    }
-
     private ServerAddress parseServerAddress(String address) {
         if (address == null || address.isEmpty()) {
             return null;
         }
 
         String[] parts = address.split(":");
+        if (parts[0].isEmpty()) {
+            return null;
+        }
         String host = parts[0];
-        int port = 16020;
+        int port = Constants.DEFAULT_REGIONSERVER_PORT;
         if (parts.length > 1) {
             try {
                 port = Integer.parseInt(parts[1]);
@@ -305,24 +265,29 @@ public class Router {
         return new ServerAddress(host, port);
     }
 
-    public void setMasterAddress(ServerAddress masterAddress) {
-        this.masterAddress = masterAddress;
-    }
-
     public void addRoute(String tableName, Region region, ServerId primaryServer) {
         RegionRouteInfo newRoute = new RegionRouteInfo(region, primaryServer);
         routeCache.compute(tableName, (key, existing) -> {
             List<RegionRouteInfo> updated = existing == null
                 ? new ArrayList<>()
-                : new ArrayList<>(existing);
+                : new ArrayList<>(existing.regions);
             updated.removeIf(route -> route.getRegionId().equals(newRoute.getRegionId()));
             updated.add(newRoute);
-            return Collections.unmodifiableList(updated);
+            updated.sort(Comparator.comparing(
+                RegionRouteInfo::getStartKey,
+                (a, b) -> {
+                    if (a == null || a.length == 0) return -1;
+                    if (b == null || b.length == 0) return 1;
+                    return BytesUtil.compareTo(a, b);
+                }
+            ));
+            return new CachedRouteEntry(Collections.unmodifiableList(updated), System.nanoTime());
         });
     }
 
     List<RegionRouteInfo> getRouteCache(String tableName) {
-        return routeCache.get(tableName);
+        CachedRouteEntry entry = routeCache.get(tableName);
+        return entry != null ? entry.regions : null;
     }
 
     public void clearCache() {
@@ -426,6 +391,20 @@ public class Router {
     }
 
     // --- Inner types ---
+
+    private static class CachedRouteEntry {
+        final List<RegionRouteInfo> regions;
+        final long cachedAtNanos;
+
+        CachedRouteEntry(List<RegionRouteInfo> regions, long cachedAtNanos) {
+            this.regions = regions;
+            this.cachedAtNanos = cachedAtNanos;
+        }
+
+        boolean isExpired() {
+            return System.nanoTime() - cachedAtNanos > ROUTE_CACHE_TTL_NANOS;
+        }
+    }
 
     /**
      * 路由信息

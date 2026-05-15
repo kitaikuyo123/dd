@@ -10,6 +10,7 @@ import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.CompoundCondition;
 import com.minisql.sql.ast.ConditionSplitter;
@@ -18,7 +19,6 @@ import com.minisql.sql.ast.SimpleCondition;
 import com.minisql.sql.execution.QueryPlan.JoinType;
 import com.minisql.sql.execution.Row;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,13 +48,22 @@ public class ParallelQueryExecutor {
 
     private final ExecutorService executor;
     private final MasterServiceGrpc.MasterServiceBlockingStub masterStub;
+    private final Router router;
     private final long queryTimeoutSeconds;
 
     public ParallelQueryExecutor(MasterServiceGrpc.MasterServiceBlockingStub masterStub,
-                                 long queryTimeoutSeconds) {
+                                 long queryTimeoutSeconds,
+                                 Router router) {
         this.masterStub = masterStub;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
+        this.router = router;
         this.executor = Executors.newFixedThreadPool(10);
+    }
+
+    // Backward-compatible constructor for tests
+    public ParallelQueryExecutor(MasterServiceGrpc.MasterServiceBlockingStub masterStub,
+                                 long queryTimeoutSeconds) {
+        this(masterStub, queryTimeoutSeconds, null);
     }
 
     /**
@@ -366,10 +375,7 @@ public class ParallelQueryExecutor {
             List<AggregateExpression> aggregateExpressions,
             List<String> groupByColumns) throws SQLException {
 
-        ManagedChannel channel = ManagedChannelBuilder
-            .forAddress(location.serverHost, location.serverPort)
-            .usePlaintext()
-            .build();
+        ManagedChannel channel = GrpcChannelFactory.forAddress(location.serverHost, location.serverPort);
 
         try {
             RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
@@ -412,8 +418,6 @@ public class ParallelQueryExecutor {
             return allGroups;
         } catch (RuntimeException e) {
             throw new SQLException("Failed to scan region " + location.regionId, e);
-        } finally {
-            channel.shutdown();
         }
     }
 
@@ -468,24 +472,17 @@ public class ParallelQueryExecutor {
                                                                    List<SelectStatement.OrderByElement> orderBy,
                                                                    int limit,
                                                                    int offset) throws SQLException {
-        ManagedChannel channel = ManagedChannelBuilder
-            .forAddress(location.serverHost, location.serverPort)
-            .usePlaintext()
-            .build();
+        ManagedChannel channel = GrpcChannelFactory.forAddress(location.serverHost, location.serverPort);
 
-        try {
-            RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
-                RegionServerServiceGrpc.newBlockingStub(channel);
-            Table schema = getTableSchema(location.tableName);
-            List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName,
-                whereClause, projectedQualifiers, orderBy, limit, offset);
-            List<com.minisql.common.model.Row> rows = RowAssembler.assemble(keyValues, schema);
+        RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
+            RegionServerServiceGrpc.newBlockingStub(channel);
+        Table schema = getTableSchema(location.tableName);
+        List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName,
+            whereClause, projectedQualifiers, orderBy, limit, offset);
+        List<com.minisql.common.model.Row> rows = RowAssembler.assemble(keyValues, schema);
             // Only re-filter client-side when condition was NOT pushed down to server
             // (whereClause == null means pushdown failed or condition was complex)
             return (whereCondition != null && whereClause == null) ? filterRows(rows, whereCondition) : rows;
-        } finally {
-            channel.shutdown();
-        }
     }
 
     private List<KeyValue> scanKeyValues(RegionServerServiceGrpc.RegionServerServiceBlockingStub stub,
@@ -1066,58 +1063,49 @@ public class ParallelQueryExecutor {
     }
 
     private List<RegionLocation> getTargetRegion(String tableName, byte[] rowKey) {
+        if (router == null) {
+            logger.warn("Router not available, cannot locate region for table: {}", tableName);
+            return new ArrayList<>();
+        }
         try {
-            MasterProto.GetLocationRequest request = MasterProto.GetLocationRequest.newBuilder()
-                .setTableName(tableName)
-                .setRowKey(ByteString.copyFrom(rowKey))
-                .build();
-
-            MasterProto.GetLocationResponse response = masterStub.getRegionLocation(request);
-            if (response.getStatus().getSuccess()) {
-                List<RegionLocation> locations = new ArrayList<>();
-                locations.add(RegionLocation.fromProto(response));
-                return locations;
+            router.refreshRouteCache(tableName);
+            Router.RegionRouteInfo info = router.getTargetRegionLocation(tableName, rowKey);
+            if (info == null) {
+                return new ArrayList<>();
             }
-            logger.warn("Failed to get region location for table " + tableName +
-                ": " + response.getStatus().getMessage());
+            List<RegionLocation> locations = new ArrayList<>();
+            RegionLocation loc = new RegionLocation();
+            loc.regionId = info.getRegionId();
+            loc.tableName = tableName;
+            loc.serverHost = info.getPrimaryServer().getHost();
+            loc.serverPort = info.getPrimaryServer().getPort();
+            locations.add(loc);
+            return locations;
         } catch (Exception e) {
             logger.warn("Exception while getting region location for table: {}", tableName, e);
+            return new ArrayList<>();
         }
-        return new ArrayList<>();
     }
 
     private List<RegionLocation> getAllRegionsForTable(String tableName) {
+        if (router == null) {
+            logger.warn("Router not available, cannot list regions for table: {}", tableName);
+            return new ArrayList<>();
+        }
         try {
-            MasterProto.GetTableRegionsResponse response = masterStub.getTableRegions(
-                MasterProto.GetTableRegionsRequest.newBuilder().setTableName(tableName).build()
-            );
-
-            if (!response.getStatus().getSuccess()) {
-                logger.warn("Failed to get regions for table {}: {}",
-                    tableName, response.getStatus().getMessage());
+            router.refreshRouteCache(tableName);
+            List<Router.RegionRouteInfo> routeInfos = router.getAllRegionLocations(tableName);
+            if (routeInfos == null || routeInfos.isEmpty()) {
                 return new ArrayList<>();
             }
-
             List<RegionLocation> locations = new ArrayList<>();
-            for (CommonProto.RegionInfo regionInfo : response.getRegionsList()) {
-                RegionLocation location = new RegionLocation();
-                location.regionId = regionInfo.getRegionId();
-                location.tableName = regionInfo.getTableName();
-
-
-                if (regionInfo.hasPrimary()) {
-                    location.serverHost = regionInfo.getPrimary().getHost();
-                    location.serverPort = regionInfo.getPrimary().getPort();
-                } else if (regionInfo.getReplicasCount() > 0) {
-                    CommonProto.ServerId replica = regionInfo.getReplicas(0);
-                    location.serverHost = replica.getHost();
-                    location.serverPort = replica.getPort();
-                } else {
-                    logger.warn("Skipping region {}: no server address available", location.regionId);
-                    continue;
-                }
-
-                locations.add(location);
+            for (Router.RegionRouteInfo info : routeInfos) {
+                RegionLocation loc = new RegionLocation();
+                loc.regionId = info.getRegionId();
+                loc.tableName = tableName;
+                loc.serverHost = info.getPrimaryServer().getHost();
+                loc.serverPort = info.getPrimaryServer().getPort();
+                locations.add(loc);
             }
             return locations;
         } catch (Exception e) {
@@ -1135,16 +1123,6 @@ public class ParallelQueryExecutor {
         private String tableName;
         private String serverHost;
         private int serverPort;
-
-        public static RegionLocation fromProto(MasterProto.GetLocationResponse response) {
-            RegionLocation location = new RegionLocation();
-            location.regionId = response.getRegion().getRegionId();
-            location.tableName = response.getRegion().getTableName();
-            location.serverHost = response.getServerId().getHost();
-            location.serverPort = response.getServerId().getPort();
-
-            return location;
-        }
 
         public String getRegionId() { return regionId; }
         public String getTableName() { return tableName; }

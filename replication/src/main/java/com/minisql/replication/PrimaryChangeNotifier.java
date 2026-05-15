@@ -7,8 +7,8 @@ import com.minisql.common.proto.MasterProto;
 import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.zookeeper.ZkClient;
 import com.minisql.zookeeper.ZkPayloads;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,9 +41,9 @@ public class PrimaryChangeNotifier {
 
         String[] parts = masterAddress.split(":");
         String host = parts[0];
-        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16000;
+        int port = parts.length > 1 ? Integer.parseInt(parts[1]) : Constants.DEFAULT_MASTER_PORT;
 
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        ManagedChannel channel = GrpcChannelFactory.forAddress(host, port);
         try {
             MasterServiceGrpc.MasterServiceBlockingStub stub = MasterServiceGrpc.newBlockingStub(channel)
                 .withDeadlineAfter(5000, TimeUnit.MILLISECONDS);
@@ -60,8 +60,6 @@ public class PrimaryChangeNotifier {
             }
         } catch (Exception e) {
             logger.warn("Failed to notify Master about primary change: {}", e.getMessage());
-        } finally {
-            channel.shutdown();
         }
     }
 

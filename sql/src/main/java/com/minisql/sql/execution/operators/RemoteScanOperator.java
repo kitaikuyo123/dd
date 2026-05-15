@@ -7,13 +7,12 @@ import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.Row;
+import com.minisql.common.rpc.GrpcChannelFactory;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Remote scan operator backed by the region server gRPC API.
@@ -59,9 +58,7 @@ public class RemoteScanOperator extends Operator {
 
     @Override
     public void open() {
-        channel = ManagedChannelBuilder.forAddress(serverHost, serverPort)
-            .usePlaintext()
-            .build();
+        channel = GrpcChannelFactory.forAddress(serverHost, serverPort);
         stub = RegionServerServiceGrpc.newBlockingStub(channel);
 
         RegionServerProto.ScanRequest.Builder requestBuilder = RegionServerProto.ScanRequest.newBuilder()
@@ -111,17 +108,8 @@ public class RemoteScanOperator extends Operator {
         kvIterator = null;
         rowIterator = null;
         responseIterator = null;
-        if (channel != null && !channel.isShutdown()) {
-            channel.shutdown();
-            try {
-                if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
-                    channel.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                channel.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
+        channel = null;
+        stub = null;
     }
 
     @Override
