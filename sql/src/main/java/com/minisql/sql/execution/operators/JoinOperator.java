@@ -1,7 +1,8 @@
 package com.minisql.sql.execution.operators;
 
+import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Operator;
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.JoinType;
 import com.minisql.sql.execution.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +40,7 @@ public class JoinOperator extends Operator {
     /** 指定的连接算法 */
     private final JoinAlgorithm algorithm;
     /** 连接类型（INNER / LEFT） */
-    private final QueryPlan.JoinType joinType;
+    private final JoinType joinType;
 
     private boolean opened;
     /** 实际执行策略，在 open 时确定 */
@@ -50,12 +51,12 @@ public class JoinOperator extends Operator {
     /** Hash Join 构建侧行数上限，超过此阈值自动降级为嵌套循环 */
     private final int hashJoinMaxRows;
 
-    public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
+    public JoinOperator(Operator left, Operator right, JoinType joinType,
                         JoinCondition condition) {
         this(left, right, joinType, condition, JoinAlgorithm.HASH, 100_000);
     }
 
-    public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
+    public JoinOperator(Operator left, Operator right, JoinType joinType,
                         JoinCondition condition, JoinAlgorithm algorithm) {
         this(left, right, joinType, condition, algorithm, 100_000);
     }
@@ -63,7 +64,7 @@ public class JoinOperator extends Operator {
     /**
      * @param hashJoinMaxRows Hash Join 构建侧行数上限，最小值为 1000
      */
-    public JoinOperator(Operator left, Operator right, QueryPlan.JoinType joinType,
+    public JoinOperator(Operator left, Operator right, JoinType joinType,
                         JoinCondition condition, JoinAlgorithm algorithm,
                         int hashJoinMaxRows) {
         this.left = left;
@@ -160,18 +161,6 @@ public class JoinOperator extends Operator {
         return new Row(getOutputColumns(), combined);
     }
 
-    /** 在列名数组中查找指定列的位置，支持 table.column 格式的列名 */
-    private int findColumnIndex(String[] columns, String columnName) {
-        String fallback = columnName != null && columnName.contains(".")
-            ? columnName.substring(columnName.lastIndexOf('.') + 1)
-            : columnName;
-        for (int i = 0; i < columns.length; i++) {
-            if (columns[i].equalsIgnoreCase(columnName) || columns[i].equalsIgnoreCase(fallback)) {
-                return i;
-            }
-        }
-        throw new IllegalArgumentException("Column not found in join output: " + columnName);
-    }
 
     /** 连接算法枚举 */
     public enum JoinAlgorithm {
@@ -239,8 +228,8 @@ public class JoinOperator extends Operator {
                 throw new IllegalArgumentException("Hash join only supports equality joins");
             }
 
-            leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
-            rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn());
+            leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn(), true);
+            rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn(), true);
 
             int rowCount = 0;
             while (left.hasMore()) {
@@ -286,7 +275,7 @@ public class JoinOperator extends Operator {
             }
 
             // Phase 2: for LEFT JOIN, emit unmatched left rows with null right
-            if (joinType == QueryPlan.JoinType.LEFT && leftUnmatchedIterator == null) {
+            if (joinType == JoinType.LEFT && leftUnmatchedIterator == null) {
                 List<Row> unmatched = new ArrayList<>();
                 for (Map.Entry<JoinKey, List<Row>> entry : hashTable.entrySet()) {
                     if (!matchedLeftKeys.contains(entry.getKey())) {
@@ -322,8 +311,8 @@ public class JoinOperator extends Operator {
             if (condition == null) {
                 throw new IllegalArgumentException("Join condition is required");
             }
-            leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
-            rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn());
+            leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn(), true);
+            rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn(), true);
             currentLeftRow = left.hasMore() ? left.nextRow() : null;
             currentLeftMatched = false;
         }
@@ -333,7 +322,7 @@ public class JoinOperator extends Operator {
             while (currentLeftRow != null) {
                 if (currentRightRow == null) {
                     // LEFT JOIN: if previous left row had no match, emit null-right
-                    if (joinType == QueryPlan.JoinType.LEFT && !currentLeftMatched) {
+                    if (joinType == JoinType.LEFT && !currentLeftMatched) {
                         Row result = combineRowsWithNullRight(currentLeftRow);
                         currentLeftRow = left.hasMore() ? left.nextRow() : null;
                         currentLeftMatched = false;
@@ -386,22 +375,12 @@ public class JoinOperator extends Operator {
         }
     }
 
-    /** 比较两个值，优先尝试数值比较，失败则回退到字符串比较 */
+    /** 比较两个值，null 排最前，非 null 委托 ValueComparator */
     private int compareValues(Object leftValue, Object rightValue) {
-        if (leftValue == null && rightValue == null) {
-            return 0;
-        }
-        if (leftValue == null) {
-            return -1;
-        }
-        if (rightValue == null) {
-            return 1;
-        }
-        try {
-            return Double.compare(Double.parseDouble(String.valueOf(leftValue)), Double.parseDouble(String.valueOf(rightValue)));
-        } catch (NumberFormatException ignored) {
-            return String.valueOf(leftValue).compareTo(String.valueOf(rightValue));
-        }
+        if (leftValue == null && rightValue == null) return 0;
+        if (leftValue == null) return -1;
+        if (rightValue == null) return 1;
+        return ValueComparator.compareWithNumericCoercion(leftValue, rightValue);
     }
 
     /** Hash Join 中的哈希键包装类 */

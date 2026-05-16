@@ -1,9 +1,10 @@
 package com.minisql.sql.execution.operators;
 
 import com.minisql.common.utils.ValueComparator;
+import com.minisql.sql.AggregateExpr;
+import com.minisql.sql.AggregateType;
 import com.minisql.sql.execution.Operator;
 import com.minisql.sql.execution.Row;
-import com.minisql.sql.execution.QueryPlan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,7 +20,7 @@ public class AggregateOperator extends Operator {
     private static final Logger log = LoggerFactory.getLogger(AggregateOperator.class);
 
     private final Operator child;
-    private final List<QueryPlan.AggregateExpr> aggregates;
+    private final List<AggregateExpr> aggregates;
     private final List<String> groupByColumns;
 
     // 最大分组数警告阈值（超过此值记录 WARN，提示可能 OOM）
@@ -35,12 +36,12 @@ public class AggregateOperator extends Operator {
     private int[] columnIndices;
     private int[] groupByIndices;
 
-    public AggregateOperator(Operator child, List<QueryPlan.AggregateExpr> aggregates,
+    public AggregateOperator(Operator child, List<AggregateExpr> aggregates,
                              List<String> groupByColumns) {
         this(child, aggregates, groupByColumns, 1_000_000);
     }
 
-    public AggregateOperator(Operator child, List<QueryPlan.AggregateExpr> aggregates,
+    public AggregateOperator(Operator child, List<AggregateExpr> aggregates,
                              List<String> groupByColumns, int maxGroupWarningThreshold) {
         this.child = child;
         this.aggregates = aggregates;
@@ -63,13 +64,13 @@ public class AggregateOperator extends Operator {
             if (col.equals("*")) {
                 columnIndices[i] = -1; // COUNT(*)
             } else {
-                columnIndices[i] = findColumnIndex(inputColumns, col);
+                columnIndices[i] = findColumnIndex(inputColumns, col, true);
             }
         }
 
         groupByIndices = new int[groupByColumns.size()];
         for (int i = 0; i < groupByColumns.size(); i++) {
-            groupByIndices[i] = findColumnIndex(inputColumns, groupByColumns.get(i));
+            groupByIndices[i] = findColumnIndex(inputColumns, groupByColumns.get(i), true);
         }
     }
 
@@ -171,7 +172,7 @@ public class AggregateOperator extends Operator {
         computed = true;
     }
 
-    private AggregateState createState(QueryPlan.AggregateExpr expr) {
+    private AggregateState createState(AggregateExpr expr) {
         switch (expr.getType()) {
             case COUNT:
                 return new CountState("*".equals(expr.getColumn()));
@@ -214,7 +215,7 @@ public class AggregateOperator extends Operator {
 
         // 聚合列
         for (int i = 0; i < aggregates.size(); i++) {
-            QueryPlan.AggregateExpr expr = aggregates.get(i);
+            AggregateExpr expr = aggregates.get(i);
             String name = expr.getType().name() + "(" + expr.getColumn() + ")";
             if (expr.getAlias() != null) {
                 name = expr.getAlias();
@@ -225,14 +226,6 @@ public class AggregateOperator extends Operator {
         return columns;
     }
 
-    private int findColumnIndex(String[] columns, String columnName) {
-        for (int i = 0; i < columns.length; i++) {
-            if (columns[i].equalsIgnoreCase(columnName)) {
-                return i;
-            }
-        }
-        throw new IllegalArgumentException("Column not found: " + columnName);
-    }
 
     /**
      * 聚合状态基类

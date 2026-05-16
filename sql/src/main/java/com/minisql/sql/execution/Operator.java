@@ -63,4 +63,26 @@ public abstract class Operator implements Iterator<Row>, AutoCloseable {
      * 获取算子返回的列名
      */
     public abstract String[] getOutputColumns();
+
+    /**
+     * 在列名数组中查找指定列的位置
+     *
+     * @param columns         列名数组
+     * @param columnName      目标列名，支持 table.column 格式
+     * @param throwIfNotFound true 时找不到抛异常，false 时返回 -1
+     */
+    protected static int findColumnIndex(String[] columns, String columnName, boolean throwIfNotFound) {
+        String fallback = columnName != null && columnName.contains(".")
+            ? columnName.substring(columnName.lastIndexOf('.') + 1)
+            : columnName;
+        for (int i = 0; i < columns.length; i++) {
+            if (columns[i].equalsIgnoreCase(columnName) || columns[i].equalsIgnoreCase(fallback)) {
+                return i;
+            }
+        }
+        if (throwIfNotFound) {
+            throw new IllegalArgumentException("Column not found: " + columnName);
+        }
+        return -1;
+    }
 }

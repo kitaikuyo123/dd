@@ -1,6 +1,6 @@
 package com.minisql.sql.ast;
 
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.JoinType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,7 +19,7 @@ public class SelectStatement extends Statement {
     // JOIN
     private String joinTable;
     private String joinTableAlias;
-    private QueryPlan.JoinType joinType;
+    private JoinType joinType;
     private Condition joinCondition;
 
     private Condition where;
@@ -64,8 +64,8 @@ public class SelectStatement extends Statement {
     public void setJoinTable(String joinTable) { this.joinTable = joinTable; }
     public String getJoinTableAlias() { return joinTableAlias; }
     public void setJoinTableAlias(String joinTableAlias) { this.joinTableAlias = joinTableAlias; }
-    public QueryPlan.JoinType getJoinType() { return joinType; }
-    public void setJoinType(QueryPlan.JoinType joinType) { this.joinType = joinType; }
+    public JoinType getJoinType() { return joinType; }
+    public void setJoinType(JoinType joinType) { this.joinType = joinType; }
     public Condition getJoinCondition() { return joinCondition; }
     public void setJoinCondition(Condition joinCondition) { this.joinCondition = joinCondition; }
     public Condition getWhere() { return where; }

@@ -124,7 +124,6 @@ public class MiniSQLResultSetMetaData implements ResultSetMetaData {
     }
 
     private static final int columnNullable = ResultSetMetaData.columnNullable;
-    private static final int columnNotNull = ResultSetMetaData.columnNoNulls;
 
     @Override
     public int isNullable(int column) throws SQLException {

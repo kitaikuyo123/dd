@@ -38,27 +38,11 @@ public class InsertStatement extends Statement {
             for (int i = 0; i < values.size(); i++) {
                 if (i > 0) sb.append(", ");
                 String value = values.get(i);
-                // 判断是否是数字，不是数字则加引号
-                if (value == null || value.isEmpty()) {
-                    sb.append("NULL");
-                } else if (isNumeric(value)) {
-                    sb.append(value);
-                } else {
-                    sb.append("'").append(value.replace("'", "''")).append("'");
-                }
+                sb.append(formatValue(value));
             }
         }
         sb.append(")");
         return sb.toString();
     }
 
-    private boolean isNumeric(String str) {
-        if (str == null || str.isEmpty()) return false;
-        try {
-            Double.parseDouble(str);
-            return true;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
 }

@@ -169,7 +169,7 @@ class RebalanceSupport {
                      String message, String details) {
         if (monitoringService != null) {
             monitoringService.recordEvent(type, severity, regionId, null,
-                serverId == null ? null : serverId.getHost() + ":" + serverId.getPort(),
+                serverId != null ? serverId.getServerName() : null,
                 null, message, details);
         }
     }
@@ -178,8 +178,8 @@ class RebalanceSupport {
                      ServerId targetServer, String message, String details) {
         if (monitoringService != null) {
             monitoringService.recordEvent(type, severity, regionId, null,
-                sourceServer == null ? null : sourceServer.getHost() + ":" + sourceServer.getPort(),
-                targetServer == null ? null : targetServer.getHost() + ":" + targetServer.getPort(),
+                sourceServer != null ? sourceServer.getServerName() : null,
+                targetServer != null ? targetServer.getServerName() : null,
                 message, details);
         }
     }

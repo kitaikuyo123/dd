@@ -2,6 +2,7 @@ package com.minisql.regionserver;
 
 import com.minisql.common.model.Column;
 import com.minisql.common.model.Table;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.common.utils.RowKeySerializer;
 import com.minisql.storage.StorageColumnPredicate;
 import com.minisql.sql.ast.CompoundCondition;
@@ -289,7 +290,7 @@ final class PredicatePushdownPlanner {
 
             byte[] mergedStart = maxStart(this.startKey, other.startKey);
             byte[] mergedEnd = minEnd(this.endKey, other.endKey);
-            if (mergedStart != null && mergedEnd != null && compareBytes(mergedStart, mergedEnd) >= 0) {
+            if (mergedStart != null && mergedEnd != null && BytesUtil.compareTo(mergedStart, mergedEnd) >= 0) {
                 return none();
             }
             List<StorageColumnPredicate> mergedPredicates = new ArrayList<>(this.columnPredicates);
@@ -305,7 +306,7 @@ final class PredicatePushdownPlanner {
             if (right == null) {
                 return left;
             }
-            return compareBytes(left, right) >= 0 ? left : right;
+            return BytesUtil.compareTo(left, right) >= 0 ? left : right;
         }
 
         private static byte[] minEnd(byte[] left, byte[] right) {
@@ -315,29 +316,7 @@ final class PredicatePushdownPlanner {
             if (right == null) {
                 return left;
             }
-            return compareBytes(left, right) <= 0 ? left : right;
+            return BytesUtil.compareTo(left, right) <= 0 ? left : right;
         }
-    }
-
-    static int compareBytes(byte[] left, byte[] right) {
-        if (left == right) {
-            return 0;
-        }
-        if (left == null) {
-            return -1;
-        }
-        if (right == null) {
-            return 1;
-        }
-
-        int minLength = Math.min(left.length, right.length);
-        for (int i = 0; i < minLength; i++) {
-            int a = left[i] & 0xFF;
-            int b = right[i] & 0xFF;
-            if (a != b) {
-                return Integer.compare(a, b);
-            }
-        }
-        return Integer.compare(left.length, right.length);
     }
 }

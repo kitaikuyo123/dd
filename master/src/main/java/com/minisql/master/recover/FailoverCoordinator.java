@@ -306,12 +306,14 @@ public class FailoverCoordinator {
                     "Promotion RPC failed");
                 logger.error("Failed to promote replica {} for region: {}",
                         newPrimary.getServerId(), regionId);
-                recordEvent("FAILOVER_TRIGGERED", "ERROR", regionId, null, null, toServerName(newPrimary.getServerId()),
+                recordEvent("FAILOVER_TRIGGERED", "ERROR", regionId, null, null,
+                    newPrimary.getServerId() != null ? newPrimary.getServerId().getServerName() : null,
                     "Failover promotion RPC failed", null);
                 return;
             }
             replicaMonitor.promoteToPrimary(regionId, newPrimary.getServerId());
-            recordEvent("PRIMARY_PROMOTED", "INFO", regionId, null, null, toServerName(newPrimary.getServerId()),
+            recordEvent("PRIMARY_PROMOTED", "INFO", regionId, null, null,
+                newPrimary.getServerId() != null ? newPrimary.getServerId().getServerName() : null,
                 "Primary promoted during failover", null);
             lifecycleManager.transition(regionId, newPrimary.getServerId(),
                 ReplicaLifecycleManager.ReplicaLifecycleState.PRIMARY_READY,
@@ -329,7 +331,8 @@ public class FailoverCoordinator {
 
             logger.info("Failover completed for region: {} new primary: {} (took {}ms)",
                        regionId, newPrimary.getServerId(), (System.currentTimeMillis() - startTime));
-            recordEvent("FAILOVER_TRIGGERED", "INFO", regionId, null, null, toServerName(newPrimary.getServerId()),
+            recordEvent("FAILOVER_TRIGGERED", "INFO", regionId, null, null,
+                newPrimary.getServerId() != null ? newPrimary.getServerId().getServerName() : null,
                 "Failover completed", "durationMs=" + (System.currentTimeMillis() - startTime));
 
         } catch (Exception e) {
@@ -438,10 +441,6 @@ public class FailoverCoordinator {
         if (monitoringService != null) {
             monitoringService.recordEvent(type, severity, regionId, tableName, sourceServer, targetServer, message, details);
         }
-    }
-
-    private String toServerName(ServerId serverId) {
-        return serverId == null ? null : serverId.getHost() + ":" + serverId.getPort();
     }
 
     /**

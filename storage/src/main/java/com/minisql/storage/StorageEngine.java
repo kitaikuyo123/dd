@@ -21,12 +21,7 @@ public interface StorageEngine {
             .build());
     }
 
-    default Iterator<KeyValue> scan(StorageScanFilter filter) {
-        if (filter == null) {
-            return scan(new StorageScanFilter(null, null, null, null));
-        }
-        return scan(filter);
-    }
+    Iterator<KeyValue> scan(StorageScanFilter filter);
 
     void delete(byte[] key);
 

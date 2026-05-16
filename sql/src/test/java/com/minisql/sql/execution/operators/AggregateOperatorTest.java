@@ -1,7 +1,8 @@
 package com.minisql.sql.execution.operators;
 
 import com.minisql.sql.execution.Operator;
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.AggregateExpr;
+import com.minisql.sql.AggregateType;
 import com.minisql.sql.execution.Row;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,8 +30,8 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.COUNT, "*"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -55,8 +56,8 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.SUM, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.SUM, "age"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -81,8 +82,8 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.AVG, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.AVG, "age"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -107,8 +108,8 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.MAX, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.MAX, "age"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -132,8 +133,8 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.MIN, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.MIN, "age"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -157,12 +158,12 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*"));
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.SUM, "age"));
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.AVG, "age"));
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.MAX, "age"));
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.MIN, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.COUNT, "*"));
+        aggregates.add(new AggregateExpr(AggregateType.SUM, "age"));
+        aggregates.add(new AggregateExpr(AggregateType.AVG, "age"));
+        aggregates.add(new AggregateExpr(AggregateType.MAX, "age"));
+        aggregates.add(new AggregateExpr(AggregateType.MIN, "age"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -192,9 +193,9 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*"));
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.SUM, "age"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.COUNT, "*"));
+        aggregates.add(new AggregateExpr(AggregateType.SUM, "age"));
 
         List<String> groupBy = Collections.singletonList("category");
 
@@ -222,8 +223,8 @@ class AggregateOperatorTest {
         List<Row> testData = new ArrayList<>();
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        aggregates.add(new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*"));
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        aggregates.add(new AggregateExpr(AggregateType.COUNT, "*"));
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
         aggregate.open();
@@ -245,8 +246,8 @@ class AggregateOperatorTest {
         testData.add(createRow(1, "alice", 25));
 
         MockOperator mockOperator = new MockOperator(testData);
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        QueryPlan.AggregateExpr expr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*");
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        AggregateExpr expr = new AggregateExpr(AggregateType.COUNT, "*");
         aggregates.add(expr);
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
@@ -269,8 +270,8 @@ class AggregateOperatorTest {
         testData.add(createRow(2, "bob", 30));
 
         MockOperator mockOperator = new MockOperator(testData);
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        QueryPlan.AggregateExpr expr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*");
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        AggregateExpr expr = new AggregateExpr(AggregateType.COUNT, "*");
         aggregates.add(expr);
 
         AggregateOperator aggregate = new AggregateOperator(mockOperator, aggregates, null);
@@ -301,12 +302,12 @@ class AggregateOperatorTest {
         testData.add(createRow(1, "alice", 25));
 
         MockOperator mockOperator = new MockOperator(testData);
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        QueryPlan.AggregateExpr countExpr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*");
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        AggregateExpr countExpr = new AggregateExpr(AggregateType.COUNT, "*");
         countExpr.setAlias("total");
         aggregates.add(countExpr);
 
-        QueryPlan.AggregateExpr sumExpr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.SUM, "age");
+        AggregateExpr sumExpr = new AggregateExpr(AggregateType.SUM, "age");
         sumExpr.setAlias("sum_age");
         aggregates.add(sumExpr);
 
@@ -327,12 +328,12 @@ class AggregateOperatorTest {
 
         MockOperator mockOperator = new MockOperator(testData);
 
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
-        QueryPlan.AggregateExpr countExpr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.COUNT, "*");
+        List<AggregateExpr> aggregates = new ArrayList<>();
+        AggregateExpr countExpr = new AggregateExpr(AggregateType.COUNT, "*");
         countExpr.setAlias("user_count");
         aggregates.add(countExpr);
 
-        QueryPlan.AggregateExpr avgExpr = new QueryPlan.AggregateExpr(QueryPlan.AggregateType.AVG, "age");
+        AggregateExpr avgExpr = new AggregateExpr(AggregateType.AVG, "age");
         avgExpr.setAlias("avg_age");
         aggregates.add(avgExpr);
 

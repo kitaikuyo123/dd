@@ -1,6 +1,7 @@
 package com.minisql.storage;
 
 import com.minisql.common.model.KeyValue;
+import com.minisql.common.utils.BytesUtil;
 import org.rocksdb.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,7 +11,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.function.Supplier;
 
 /** 基于 RocksDB 的 KV 存储引擎，每个 Region 使用独立的 RocksDB 实例 */
 public class RocksDBStorageEngine implements StorageEngine {
@@ -23,7 +23,6 @@ public class RocksDBStorageEngine implements StorageEngine {
     private final String regionId;
     private final String dbPath;
     private final RocksDB db;
-    private final ColumnFamilyHandle defaultCf;
     private final RocksDBConfig config;
 
     public RocksDBStorageEngine(RocksDBConfig config, String regionId) {
@@ -60,7 +59,6 @@ public class RocksDBStorageEngine implements StorageEngine {
 
             Options options = buildOptions(config);
             this.db = RocksDB.open(options, dbPath);
-            this.defaultCf = null; // default column family
             logger.info("RocksDB opened for region {} at {}", regionId, dbPath);
         } catch (RocksDBException e) {
             throw new RuntimeException("Failed to open RocksDB for region " + regionId, e);
@@ -195,7 +193,7 @@ public class RocksDBStorageEngine implements StorageEngine {
                 byte[] rowKey = extractRowKey(compositeKey);
 
                 // Past end key?
-                if (compareBytes(rowKey, endKey) >= 0) {
+                if (BytesUtil.compareTo(rowKey, endKey) >= 0) {
                     flushRowBuffer();
                     closeIt();
                     return;
@@ -242,7 +240,7 @@ public class RocksDBStorageEngine implements StorageEngine {
                         passes = false;
                         break;
                     }
-                    int cmp = compareBytes(
+                    int cmp = BytesUtil.compareTo(
                         targetKv.getValue() != null ? targetKv.getValue() : EMPTY_BYTES,
                         pred.getValue() != null ? pred.getValue() : EMPTY_BYTES);
                     switch (pred.getOperator()) {
@@ -455,13 +453,6 @@ public class RocksDBStorageEngine implements StorageEngine {
 
     // ---- Helpers ----
 
-    private int findSeparator(byte[] data, int from) {
-        for (int i = from; i < data.length; i++) {
-            if (data[i] == 0x00) return i;
-        }
-        return data.length;
-    }
-
     private boolean startsWith(byte[] data, byte[] prefix) {
         if (data.length < prefix.length) return false;
         for (int i = 0; i < prefix.length; i++) {
@@ -470,81 +461,8 @@ public class RocksDBStorageEngine implements StorageEngine {
         return true;
     }
 
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = Byte.toUnsignedInt(a[i]) - Byte.toUnsignedInt(b[i]);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
-    }
-
     private String columnKey(String family, String qualifier) {
         return (family != null ? family : "") + '\0' + (qualifier != null ? qualifier : "");
-    }
-
-    private void flushRow(List<KeyValue> results, Map<String, KeyValue> currentRow, StorageScanFilter filter) {
-        // Check if this row passes all column predicates (row-level filtering)
-        if (filter != null && filter.hasColumnPredicates()) {
-            for (StorageColumnPredicate pred : filter.getColumnPredicates()) {
-                KeyValue targetKv = null;
-                for (KeyValue kv : currentRow.values()) {
-                    if (kv.isDelete()) continue;
-                    if (pred.matchesQualifier(kv.getQualifier())) {
-                        targetKv = kv;
-                        break;
-                    }
-                }
-                if (targetKv == null) {
-                    // Column not present in row; skip entire row
-                    return;
-                }
-                byte[] kvValue = targetKv.getValue();
-                byte[] predValue = pred.getValue();
-                if (kvValue == null || predValue == null) {
-                    return;
-                }
-                int cmp = compareBytes(kvValue, predValue);
-                boolean passes = true;
-                switch (pred.getOperator()) {
-                    case "=":
-                    case "==":
-                        passes = (cmp == 0);
-                        break;
-                    case ">":
-                        passes = (cmp > 0);
-                        break;
-                    case ">=":
-                        passes = (cmp >= 0);
-                        break;
-                    case "<":
-                        passes = (cmp < 0);
-                        break;
-                    case "<=":
-                        passes = (cmp <= 0);
-                        break;
-                    default:
-                        break;
-                }
-                if (!passes) {
-                    // Predicate not satisfied; skip entire row
-                    return;
-                }
-            }
-        }
-
-        for (KeyValue kv : currentRow.values()) {
-            if (kv.isDelete()) continue;
-
-            // Apply projected qualifiers filter at storage level
-            if (filter != null && filter.hasProjectedQualifiers()) {
-                if (!filter.getProjectedQualifiers().contains(kv.getQualifier())) {
-                    continue;
-                }
-            }
-
-            results.add(kv);
-        }
     }
 
     private String safeDirName(String regionId) {

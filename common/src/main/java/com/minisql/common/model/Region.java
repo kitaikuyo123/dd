@@ -53,47 +53,29 @@ public class Region implements Serializable, Comparable<Region> {
         this.endKey = endKey;
     }
 
-    /**
-     * 检查key是否属于该Region
-     */
-    public boolean contains(byte[] key) {
+    boolean contains(byte[] key) {
         return BytesUtil.isKeyInRange(key, startKey, endKey);
     }
 
-    /**
-     * 与另一个Region是否相邻
-     */
-    public boolean isAdjacent(Region other) {
+    boolean isAdjacent(Region other) {
         return Arrays.equals(this.endKey, other.startKey) ||
                 Arrays.equals(other.endKey, this.startKey);
     }
 
-    /**
-     * 判断Region是否为空（无数据范围）
-     */
-    public boolean isEmpty() {
+    boolean isEmpty() {
         return Arrays.equals(startKey, endKey);
     }
 
-    /**
-     * 获取Region大小估计值（MB）
-     */
-    public double getSizeInMB() {
+    double getSizeInMB() {
         return estimatedSize / (1024.0 * 1024.0);
     }
 
-    /**
-     * 记录读请求
-     */
-    public void recordRead() {
+    void recordRead() {
         this.readRequestCount++;
         this.lastUpdateTime = System.currentTimeMillis();
     }
 
-    /**
-     * 记录写请求
-     */
-    public void recordWrite() {
+    void recordWrite() {
         this.writeRequestCount++;
         this.lastUpdateTime = System.currentTimeMillis();
     }

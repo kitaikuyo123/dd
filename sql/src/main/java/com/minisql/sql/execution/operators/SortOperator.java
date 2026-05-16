@@ -54,7 +54,7 @@ public class SortOperator extends Operator {
         int[] keyIndices = new int[sortKeys.size()];
         boolean[] ascending = new boolean[sortKeys.size()];
         for (int i = 0; i < sortKeys.size(); i++) {
-            keyIndices[i] = findColumnIndex(columns, sortKeys.get(i).getColumn());
+            keyIndices[i] = findColumnIndex(columns, sortKeys.get(i).getColumn(), true);
             ascending[i] = sortKeys.get(i).isAscending();
         }
 
@@ -159,14 +159,6 @@ public class SortOperator extends Operator {
         return child.getOutputColumns();
     }
 
-    private int findColumnIndex(String[] columns, String columnName) {
-        for (int i = 0; i < columns.length; i++) {
-            if (columns[i].equalsIgnoreCase(columnName)) {
-                return i;
-            }
-        }
-        throw new IllegalArgumentException("Column not found: " + columnName);
-    }
 
     /**
      * Multi-way merge iterator for sorted runs stored in spill files.

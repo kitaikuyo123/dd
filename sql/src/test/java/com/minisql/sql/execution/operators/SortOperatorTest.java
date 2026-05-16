@@ -1,7 +1,6 @@
 package com.minisql.sql.execution.operators;
 
 import com.minisql.sql.execution.Operator;
-import com.minisql.sql.execution.QueryPlan;
 import com.minisql.sql.execution.Row;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

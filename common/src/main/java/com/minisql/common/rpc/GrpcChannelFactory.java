@@ -2,8 +2,6 @@ package com.minisql.common.rpc;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
-import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -15,28 +13,10 @@ public class GrpcChannelFactory {
 
     private static final Logger logger = Logger.getLogger(GrpcChannelFactory.class.getName());
 
-    private static volatile GrpcSslConfig sslConfig;
-
     // Per-address channel cache (host:port -> ManagedChannel)
     private static final ConcurrentMap<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
     private GrpcChannelFactory() {
-    }
-
-    /**
-     * Configure global TLS settings. Set to null to fall back to plaintext.
-     */
-    public static void setSslConfig(GrpcSslConfig config) {
-        sslConfig = config;
-        if (config != null && config.isTlsEnabled()) {
-            logger.info("gRPC TLS enabled (trustCert=" + config.getTrustCertPath() + ")");
-        } else {
-            logger.info("gRPC plaintext mode (no TLS configured)");
-        }
-    }
-
-    public static GrpcSslConfig getSslConfig() {
-        return sslConfig;
     }
 
     /**
@@ -57,7 +37,7 @@ public class GrpcChannelFactory {
     /**
      * Remove and shut down a cached channel.
      */
-    public static void removeChannel(String host, int port) {
+    static void removeChannel(String host, int port) {
         String key = host + ":" + port;
         ManagedChannel channel = channels.remove(key);
         if (channel != null) {
@@ -68,7 +48,7 @@ public class GrpcChannelFactory {
     /**
      * Shut down all cached channels.
      */
-    public static void shutdownAll() {
+    static void shutdownAll() {
         for (ManagedChannel channel : channels.values()) {
             shutdownChannel(channel);
         }
@@ -76,16 +56,6 @@ public class GrpcChannelFactory {
     }
 
     private static ManagedChannel buildChannel(String host, int port) {
-        if (sslConfig != null && sslConfig.isTlsEnabled()) {
-            SslContext sslContext = sslConfig.buildClientSslContext();
-            if (sslContext != null) {
-                logger.fine("Creating TLS gRPC channel to " + host + ":" + port);
-                return NettyChannelBuilder.forAddress(host, port)
-                    .sslContext(sslContext)
-                    .maxInboundMessageSize(64 * 1024 * 1024)
-                    .build();
-            }
-        }
         logger.fine("Creating plaintext gRPC channel to " + host + ":" + port);
         return ManagedChannelBuilder.forAddress(host, port)
             .usePlaintext()

@@ -17,11 +17,6 @@ public class Row {
         this.values = new Object[0];
     }
 
-    public Row(Object[] values) {
-        this.columns = new String[0];
-        this.values = values;
-    }
-
     public Row(String[] columns, Object[] values) {
         this.columns = columns;
         this.values = values;

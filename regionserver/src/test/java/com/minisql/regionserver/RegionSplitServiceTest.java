@@ -5,6 +5,7 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.model.KeyValue;
 import com.minisql.storage.StorageEngine;
 import com.minisql.storage.StorageEngineFactory;
+import com.minisql.storage.StorageScanFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -29,6 +30,9 @@ class RegionSplitServiceTest {
         @Override public void batchPut(List<KeyValue> values) {}
         @Override public List<KeyValue> get(byte[] key) { return Collections.emptyList(); }
         @Override public Iterator<KeyValue> scan(byte[] startKey, byte[] endKey) {
+            return Collections.<KeyValue>emptyList().iterator();
+        }
+        @Override public Iterator<KeyValue> scan(StorageScanFilter filter) {
             return Collections.<KeyValue>emptyList().iterator();
         }
         @Override public void delete(byte[] key) {}
@@ -87,102 +91,6 @@ class RegionSplitServiceTest {
         FakeRegionServer fakeServer = new FakeRegionServer();
         regionManager = fakeServer.getRegionManager();
         splitService = new RegionSplitService(regionManager);
-    }
-
-    // ==================== shouldSplit ====================
-
-    @Nested
-    @DisplayName("shouldSplit")
-    class ShouldSplitTests {
-
-        @Test
-        @DisplayName("returns false when region does not exist")
-        void testShouldSplitUnknownRegion() {
-            assertFalse(splitService.shouldSplit("nonexistent"));
-        }
-
-        @Test
-        @DisplayName("returns false when region size is below minSplitSize")
-        void testShouldSplitBelowMinSplitSize() {
-            // Default minSplitSize = 1GB, give 500MB
-            long size500MB = 500L * 1024 * 1024;
-            registerRegionWithSize("small", "t", "a".getBytes(), "z".getBytes(), size500MB);
-
-            assertFalse(splitService.shouldSplit("small"));
-        }
-
-        @Test
-        @DisplayName("returns false when region size between minSplitSize and splitThreshold")
-        void testShouldSplitBetweenMinAndThreshold() {
-            // minSplitSize = 1GB, splitThreshold = 10GB; give 5GB
-            long size5GB = 5L * 1024 * 1024 * 1024;
-            registerRegionWithSize("mid", "t", "a".getBytes(), "z".getBytes(), size5GB);
-
-            assertFalse(splitService.shouldSplit("mid"));
-        }
-
-        @Test
-        @DisplayName("returns true when region size meets splitThreshold")
-        void testShouldSplitAtThreshold() {
-            // Default splitThreshold = 10GB
-            long size10GB = 10L * 1024 * 1024 * 1024;
-            registerRegionWithSize("big", "t", "a".getBytes(), "z".getBytes(), size10GB);
-
-            assertTrue(splitService.shouldSplit("big"));
-        }
-
-        @Test
-        @DisplayName("returns true when region size exceeds splitThreshold")
-        void testShouldSplitAboveThreshold() {
-            long size15GB = 15L * 1024 * 1024 * 1024;
-            registerRegionWithSize("huge", "t", "a".getBytes(), "z".getBytes(), size15GB);
-
-            assertTrue(splitService.shouldSplit("huge"));
-        }
-
-        @Test
-        @DisplayName("custom threshold: under threshold returns false")
-        void testCustomConfigUnderThreshold() {
-            splitService.setConfig(100, 10); // 100MB threshold, 10MB min
-
-            long size50MB = 50L * 1024 * 1024;
-            registerRegionWithSize("custom-under", "t", "a".getBytes(), "z".getBytes(), size50MB);
-
-            assertFalse(splitService.shouldSplit("custom-under"));
-        }
-
-        @Test
-        @DisplayName("custom threshold: over threshold but below min returns false")
-        void testCustomConfigOverThresholdButBelowMin() {
-            splitService.setConfig(100, 10); // 100MB threshold, 10MB min
-
-            long size5MB = 5L * 1024 * 1024;
-            registerRegionWithSize("tiny", "t", "a".getBytes(), "z".getBytes(), size5MB);
-
-            assertFalse(splitService.shouldSplit("tiny"),
-                    "Region below minSplitSize should not split even if threshold is low");
-        }
-
-        @Test
-        @DisplayName("custom threshold: above threshold and above min returns true")
-        void testCustomConfigAboveThreshold() {
-            splitService.setConfig(100, 10); // 100MB threshold, 10MB min
-
-            long size150MB = 150L * 1024 * 1024;
-            registerRegionWithSize("custom-over", "t", "a".getBytes(), "z".getBytes(), size150MB);
-
-            assertTrue(splitService.shouldSplit("custom-over"));
-        }
-
-        @Test
-        @DisplayName("returns false when region storage is null (region registered without storage)")
-        void testShouldSplitNoStorage() {
-            Region region = new Region("no-storage", "t", "a".getBytes(), "z".getBytes());
-            regionManager.registerRegionInternal(region);
-            regionManager.setRegionState("no-storage", RegionManager.RegionState.OPEN);
-
-            assertFalse(splitService.shouldSplit("no-storage"));
-        }
     }
 
     // ==================== findBestSplitPoint ====================
@@ -292,40 +200,6 @@ class RegionSplitServiceTest {
             assertEquals(2, splitKey.length);
             assertEquals(0x01, splitKey[0] & 0xFF);
             assertEquals(0x08, splitKey[1] & 0xFF);
-        }
-    }
-
-    // ==================== setConfig ====================
-
-    @Nested
-    @DisplayName("setConfig")
-    class SetConfigTests {
-
-        @Test
-        @DisplayName("setConfig applies custom threshold and minSplitSize")
-        void testSetConfigAffectsThreshold() {
-            splitService.setConfig(50, 5); // 50MB threshold, 5MB min
-
-            // 30MB is above 5MB min but below 50MB threshold -> no split
-            long size30MB = 30L * 1024 * 1024;
-            registerRegionWithSize("cfg1", "t", "a".getBytes(), "z".getBytes(), size30MB);
-            assertFalse(splitService.shouldSplit("cfg1"));
-
-            // 60MB is above both -> should split
-            long size60MB = 60L * 1024 * 1024;
-            registerRegionWithSize("cfg2", "t", "a".getBytes(), "z".getBytes(), size60MB);
-            assertTrue(splitService.shouldSplit("cfg2"));
-        }
-
-        @Test
-        @DisplayName("setConfig with very large threshold means nothing splits")
-        void testSetConfigLargeThreshold() {
-            splitService.setConfig(1024 * 1024, 1); // 1TB threshold
-
-            long size10GB = 10L * 1024 * 1024 * 1024;
-            registerRegionWithSize("huge2", "t", "a".getBytes(), "z".getBytes(), size10GB);
-
-            assertFalse(splitService.shouldSplit("huge2"));
         }
     }
 }

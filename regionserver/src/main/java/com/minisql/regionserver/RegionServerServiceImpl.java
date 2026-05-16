@@ -1028,7 +1028,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         if (pushed == null) {
             return existing;
         }
-        return PredicatePushdownPlanner.compareBytes(existing, pushed) >= 0 ? existing : pushed;
+        return BytesUtil.compareTo(existing, pushed) >= 0 ? existing : pushed;
     }
 
     private byte[] narrowUpperBound(byte[] existing, byte[] pushed) {
@@ -1038,7 +1038,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
         if (pushed == null) {
             return existing;
         }
-        return PredicatePushdownPlanner.compareBytes(existing, pushed) <= 0 ? existing : pushed;
+        return BytesUtil.compareTo(existing, pushed) <= 0 ? existing : pushed;
     }
 
     private List<Row> filterRows(List<Row> rows, Condition condition) {

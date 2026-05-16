@@ -79,6 +79,9 @@ public class RegionMergeCoordinator {
      * Legacy 2-argument constructor kept for existing callers.
      * The caller must call setters for commandClient before merge operations are used.
      */
+    /**
+     * @VisibleForTesting — production code should use the 4-arg constructor.
+     */
     public RegionMergeCoordinator(ClusterManager clusterManager,
                                   MetadataManager metadataManager) {
         this(clusterManager, metadataManager, null, null);
@@ -110,7 +113,7 @@ public class RegionMergeCoordinator {
         this.support.lifecycleManager = lifecycleManager;
     }
 
-    public void setCommandClient(RegionServerCommandClient commandClient) {
+    void setCommandClient(RegionServerCommandClient commandClient) {
         // For legacy callers that used the 2-arg constructor
         try {
             java.lang.reflect.Field field = RegionMergeCoordinator.class.getDeclaredField("commandClient");

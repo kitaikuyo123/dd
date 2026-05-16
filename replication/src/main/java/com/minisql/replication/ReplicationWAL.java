@@ -1,6 +1,7 @@
 package com.minisql.replication;
 
 import com.minisql.common.model.KeyValue;
+import com.minisql.common.utils.BytesUtil;
 import org.rocksdb.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -138,7 +139,7 @@ public class ReplicationWAL implements AutoCloseable {
             it.seek(seekKey);
             while (it.isValid()) {
                 byte[] key = it.key();
-                if (upperBound != null && compareBytes(key, upperBound) >= 0) {
+                if (upperBound != null && BytesUtil.compareTo(key, upperBound) >= 0) {
                     break;
                 }
                 byte[] prefix = regionPrefix(regionId);
@@ -211,7 +212,7 @@ public class ReplicationWAL implements AutoCloseable {
                 int deleteCount = 0;
                 while (it.isValid()) {
                     byte[] key = it.key();
-                    if (compareBytes(key, upperBound) >= 0) {
+                    if (BytesUtil.compareTo(key, upperBound) >= 0) {
                         break;
                     }
                     if (!startsWith(key, regionPrefix(regionId))) {
@@ -244,7 +245,7 @@ public class ReplicationWAL implements AutoCloseable {
                 it.seek(prefix);
                 while (it.isValid()) {
                     byte[] key = it.key();
-                    if (upperBound != null && compareBytes(key, upperBound) >= 0) {
+                    if (upperBound != null && BytesUtil.compareTo(key, upperBound) >= 0) {
                         break;
                     }
                     if (!startsWith(key, prefix)) {
@@ -484,12 +485,4 @@ public class ReplicationWAL implements AutoCloseable {
         return true;
     }
 
-    private int compareBytes(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = Byte.toUnsignedInt(a[i]) - Byte.toUnsignedInt(b[i]);
-            if (cmp != 0) return cmp;
-        }
-        return a.length - b.length;
-    }
 }

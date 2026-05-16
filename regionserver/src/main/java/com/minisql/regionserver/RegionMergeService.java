@@ -150,7 +150,6 @@ public class RegionMergeService {
             // 2. 创建新存储（会自动创建 kv_store_{mergedRegionId} 表）
             RegionStorage mergedStorage = regionManager.createRegionStorage(mergedId);
             checkpoint.mergedStorage = mergedStorage;
-            mergedStorage.start();
 
             int leftCount = 0;
             int rightCount = 0;

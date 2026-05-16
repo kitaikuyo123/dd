@@ -30,10 +30,6 @@ public class RegionStorage {
             storageEngine.getClass().getSimpleName());
     }
 
-    public void start() throws IOException {
-        logger.info("RegionStorage started for region: {}", regionId);
-    }
-
     public void put(KeyValue kv) throws IOException {
         writeRequestCount.incrementAndGet();
         storageEngine.put(kv.getRowKey(), kv);

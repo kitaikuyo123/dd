@@ -120,7 +120,7 @@ public class MonitoringService {
 
         for (ClusterManager.ServerInfo info : activeServers) {
             Map<String, Object> row = new HashMap<>();
-            row.put("serverId", toServerName(info.getServerId()));
+            row.put("serverId", info.getServerId() != null ? info.getServerId().getServerName() : null);
             row.put("lastHeartbeat", info.getLastHeartbeat());
             row.put("online", true);
 
@@ -152,7 +152,7 @@ public class MonitoringService {
 
         for (ClusterManager.GraveyardEntry entry : clusterManager.getRemovedServers()) {
             Map<String, Object> row = new HashMap<>();
-            row.put("serverId", toServerName(entry.getServerId()));
+            row.put("serverId", entry.getServerId() != null ? entry.getServerId().getServerName() : null);
             row.put("lastHeartbeat", entry.getLastHeartbeat());
             row.put("online", false);
             row.put("status", "offline");
@@ -185,7 +185,7 @@ public class MonitoringService {
     public List<Map<String, Object>> regions() {
         List<Map<String, Object>> result = new ArrayList<>();
         for (ClusterManager.ServerInfo info : clusterManager.getActiveServers()) {
-            String serverName = toServerName(info.getServerId());
+            String serverName = info.getServerId() != null ? info.getServerId().getServerName() : null;
             for (Map.Entry<String, ClusterManager.RegionLoad> entry : info.getRegionLoads().entrySet()) {
                 String regionId = entry.getKey();
                 Region region = metadataManager.getRegion(regionId);
@@ -201,7 +201,7 @@ public class MonitoringService {
                 row.put("regionId", regionId);
                 row.put("tableName", region.getTableName());
                 row.put("serverId", serverName);
-                row.put("primaryServer", primary != null ? toServerName(primary) : null);
+                row.put("primaryServer", primary != null ? primary.getServerName() : null);
                 row.put("role", isPrimary ? "Primary" : "Replica");
                 row.put("state", String.valueOf(clusterManager.getRegionState(regionId)));
                 row.put("readRequests", load != null ? load.getReadRequests() : 0L);
@@ -231,11 +231,11 @@ public class MonitoringService {
             row.put("regionId", region.getRegionId());
             row.put("tableName", region.getTableName());
             ServerId primary = clusterManager.getPrimaryServerForRegion(region.getRegionId());
-            row.put("primaryServer", primary != null ? toServerName(primary) : null);
+            row.put("primaryServer", primary != null ? primary.getServerName() : null);
             List<ServerId> replicas = clusterManager.getSecondaryServers(region.getRegionId());
             row.put("replicas", replicas == null
                 ? Collections.emptyList()
-                : replicas.stream().map(this::toServerName).collect(Collectors.toList()));
+                : replicas.stream().map(ServerId::getServerName).collect(Collectors.toList()));
             row.put("state", String.valueOf(clusterManager.getRegionState(region.getRegionId())));
             ClusterManager.RegionLoad load = resolveLoad(region.getRegionId());
             long readRequests = load != null ? load.getReadRequests() : 0L;
@@ -315,7 +315,7 @@ public class MonitoringService {
     public List<Map<String, Object>> regionReplicas() {
         List<Map<String, Object>> result = new ArrayList<>();
         for (ClusterManager.ServerInfo info : clusterManager.getActiveServers()) {
-            String serverName = toServerName(info.getServerId());
+            String serverName = info.getServerId() != null ? info.getServerId().getServerName() : null;
             double serverLoadScore = displayLoadCalculator.calculateLoadScore(info);
             for (Map.Entry<String, ClusterManager.RegionLoad> entry : info.getRegionLoads().entrySet()) {
                 String regionId = entry.getKey();
@@ -387,19 +387,22 @@ public class MonitoringService {
         return new ReplicaMonitor.FailoverCallback() {
             @Override
             public void onReplicaFailed(String regionId, ServerId failedReplica) {
-                recordEvent("SERVER_OFFLINE", "WARN", regionId, tableName(regionId), toServerName(failedReplica),
+                recordEvent("SERVER_OFFLINE", "WARN", regionId, tableName(regionId),
+                    failedReplica != null ? failedReplica.getServerName() : null,
                     null, "Replica reported offline", null);
             }
 
             @Override
             public void onReplicaLagging(String regionId, ServerId laggingReplica, long lagMs) {
-                recordEvent("REPLICA_LAGGING", "WARN", regionId, tableName(regionId), toServerName(laggingReplica),
+                recordEvent("REPLICA_LAGGING", "WARN", regionId, tableName(regionId),
+                    laggingReplica != null ? laggingReplica.getServerName() : null,
                     null, "Replica lagging", "lag=" + lagMs);
             }
 
             @Override
             public void onReplicaRecovered(String regionId, ServerId recoveredReplica) {
-                recordEvent("REPLICA_RECOVERED", "INFO", regionId, tableName(regionId), toServerName(recoveredReplica),
+                recordEvent("REPLICA_RECOVERED", "INFO", regionId, tableName(regionId),
+                    recoveredReplica != null ? recoveredReplica.getServerName() : null,
                     null, "Replica recovered", null);
             }
         };
@@ -442,7 +445,7 @@ public class MonitoringService {
                 continue;
             }
             Map<String, Object> row = new HashMap<>();
-            row.put("serverId", toServerName(status.getServerId()));
+            row.put("serverId", status.getServerId() != null ? status.getServerId().getServerName() : null);
             row.put("state", status.getState().name());
             row.put("detail", status.getDetail());
             row.put("updatedAt", status.getUpdatedAt());
@@ -479,10 +482,6 @@ public class MonitoringService {
 
     private long sum(List<Map<String, Object>> rows, String key) {
         return rows.stream().mapToLong(row -> ((Number) row.getOrDefault(key, 0L)).longValue()).sum();
-    }
-
-    private String toServerName(ServerId serverId) {
-        return serverId == null ? null : serverId.getHost() + ":" + serverId.getPort();
     }
 
     private String tableName(String regionId) {

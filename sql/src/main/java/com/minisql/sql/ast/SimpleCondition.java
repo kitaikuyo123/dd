@@ -1,5 +1,6 @@
 package com.minisql.sql.ast;
 
+import com.minisql.common.utils.ValueComparator;
 import com.minisql.sql.execution.Row;
 
 /** 简单比较条件，表示 列名 运算符 值 的二元比较 */
@@ -42,13 +43,13 @@ public class SimpleCondition extends Condition {
             case "<>":
                 return !columnText.equals(valueText);
             case ">":
-                return compareValues(columnText, valueText) > 0;
+                return ValueComparator.compareWithNumericCoercion(columnText, valueText) > 0;
             case ">=":
-                return compareValues(columnText, valueText) >= 0;
+                return ValueComparator.compareWithNumericCoercion(columnText, valueText) >= 0;
             case "<":
-                return compareValues(columnText, valueText) < 0;
+                return ValueComparator.compareWithNumericCoercion(columnText, valueText) < 0;
             case "<=":
-                return compareValues(columnText, valueText) <= 0;
+                return ValueComparator.compareWithNumericCoercion(columnText, valueText) <= 0;
             case "LIKE":
                 return matchLike(columnText, valueText);
             default:
@@ -62,14 +63,6 @@ public class SimpleCondition extends Condition {
             return direct;
         }
         return row.getValue(reference.substring(reference.lastIndexOf('.') + 1));
-    }
-
-    private int compareValues(String a, String b) {
-        try {
-            return Double.compare(Double.parseDouble(a), Double.parseDouble(b));
-        } catch (NumberFormatException e) {
-            return a.compareTo(b);
-        }
     }
 
     private boolean matchLike(String str, String pattern) {

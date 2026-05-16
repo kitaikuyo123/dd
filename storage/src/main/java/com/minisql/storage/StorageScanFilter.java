@@ -32,8 +32,9 @@ public class StorageScanFilter {
     }
 
     /**
-     * Alias for builder() for compatibility
+     * @deprecated Use {@link #builder()} instead
      */
+    @Deprecated
     public static Builder newBuilder() {
         return builder();
     }

@@ -1,7 +1,7 @@
 package com.minisql.sql.execution.operators;
 
 import com.minisql.sql.execution.Operator;
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.JoinType;
 import com.minisql.sql.execution.Row;
 import org.junit.jupiter.api.Test;
 
@@ -32,7 +32,7 @@ class JoinOperatorTest {
                 new Row(new String[] {"user_id", "city"}, new Object[] {1, "shanghai"}),
                 new Row(new String[] {"user_id", "city"}, new Object[] {2, "beijing"})
             )),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -61,7 +61,7 @@ class JoinOperatorTest {
             new MockOperator(List.of(
                 new Row(new String[] {"user_id"}, new Object[] {99})
             )),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -77,7 +77,7 @@ class JoinOperatorTest {
             new MockOperator(List.of(
                 new Row(new String[] {"user_id"}, new Object[] {1})
             ), new String[] {"user_id"}),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -93,7 +93,7 @@ class JoinOperatorTest {
                 new Row(new String[] {"id"}, new Object[] {1})
             ), new String[] {"id"}),
             new MockOperator(Collections.emptyList(), new String[] {"user_id"}),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -112,7 +112,7 @@ class JoinOperatorTest {
                 new Row(new String[] {"user_id", "city"}, new Object[] {1, "shanghai"}),
                 new Row(new String[] {"user_id", "city"}, new Object[] {1, "beijing"})
             )),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -130,7 +130,7 @@ class JoinOperatorTest {
         JoinOperator operator = new JoinOperator(
             new MockOperator(List.of(new Row(new String[] {"id", "name"}, new Object[] {1, "a"}))),
             new MockOperator(List.of(new Row(new String[] {"user_id", "city"}, new Object[] {1, "b"}))),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 
@@ -152,7 +152,7 @@ class JoinOperatorTest {
             new MockOperator(List.of(
                 new Row(new String[] {"user_id"}, new Object[] {1})
             ), new String[] {"user_id"}),
-            QueryPlan.JoinType.INNER,
+            JoinType.INNER,
             new JoinOperator.JoinCondition("id", "user_id", JoinOperator.JoinOperatorType.EQUALS)
         );
 

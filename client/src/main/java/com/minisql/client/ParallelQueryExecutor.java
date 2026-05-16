@@ -16,7 +16,9 @@ import com.minisql.sql.ast.CompoundCondition;
 import com.minisql.sql.ast.ConditionSplitter;
 import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.ast.SimpleCondition;
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.AggregateExpr;
+import com.minisql.sql.AggregateType;
+import com.minisql.sql.JoinType;
 import com.minisql.sql.execution.Row;
 import com.minisql.sql.execution.operators.AggregateOperator;
 import com.minisql.sql.execution.operators.FilterOperator;
@@ -68,8 +70,8 @@ public class ParallelQueryExecutor {
         this.executor = Executors.newFixedThreadPool(10);
     }
 
-    public ParallelQueryExecutor(MasterServiceGrpc.MasterServiceBlockingStub masterStub,
-                                 long queryTimeoutSeconds) {
+    ParallelQueryExecutor(MasterServiceGrpc.MasterServiceBlockingStub masterStub,
+                          long queryTimeoutSeconds) {
         this(masterStub, queryTimeoutSeconds, null);
     }
 
@@ -227,7 +229,7 @@ public class ParallelQueryExecutor {
         // Build JoinOperator
         JoinOperator.JoinCondition joinCond = buildJoinCondition(
             ast.getJoinCondition(), leftQualifier, rightQualifier, leftColumns, rightColumns);
-        QueryPlan.JoinType joinType = ast.getJoinType() != null ? ast.getJoinType() : QueryPlan.JoinType.INNER;
+        JoinType joinType = ast.getJoinType() != null ? ast.getJoinType() : JoinType.INNER;
 
         com.minisql.sql.execution.Operator pipeline = new JoinOperator(
             leftSource, rightSource, joinType, joinCond);
@@ -251,11 +253,11 @@ public class ParallelQueryExecutor {
 
     private com.minisql.sql.execution.Operator appendAggregate(
             com.minisql.sql.execution.Operator input, SelectStatement ast) {
-        List<QueryPlan.AggregateExpr> aggregates = new ArrayList<>();
+        List<AggregateExpr> aggregates = new ArrayList<>();
         if (ast.getAggregates() != null) {
             for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
-                QueryPlan.AggregateType type = QueryPlan.AggregateType.valueOf(agg.getFunction().toUpperCase());
-                QueryPlan.AggregateExpr expr = new QueryPlan.AggregateExpr(type, agg.getColumn());
+                AggregateType type = AggregateType.valueOf(agg.getFunction().toUpperCase());
+                AggregateExpr expr = new AggregateExpr(type, agg.getColumn());
                 expr.setAlias(agg.getOutputName());
                 aggregates.add(expr);
             }
@@ -959,7 +961,7 @@ public class ParallelQueryExecutor {
 
     // ── Inner classes ──────────────────────────────────────────────────
 
-    public static class RegionLocation {
+    private static class RegionLocation {
         private String regionId;
         private String tableName;
         private String serverHost;

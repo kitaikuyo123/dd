@@ -122,7 +122,7 @@ public class BytesUtil {
     /**
      * 计算字节数组的哈希值
      */
-    public static int hashCode(byte[] bytes) {
+    static int hashCode(byte[] bytes) {
         int hash = 1;
         for (byte b : bytes) {
             hash = (31 * hash) + b;

@@ -14,7 +14,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -56,26 +56,6 @@ public class ReplicationCoordinator {
 
     // Tracks whether each region is currently degraded (all secondaries unreachable)
     private final Set<String> degradedRegions = ConcurrentHashMap.newKeySet();
-    // Listeners for replication degradation/recovery events
-    private final List<ReplicationDegradationListener> degradationListeners = new CopyOnWriteArrayList<>();
-
-    /**
-     * Listener for replication degradation and recovery events.
-     * Fired when all secondaries become unreachable (degradation) or when
-     * at least one secondary acknowledges again (recovery).
-     */
-    @FunctionalInterface
-    public interface ReplicationDegradationListener {
-        void onDegradationChange(String regionId, boolean degraded, int successCount, int totalSecondaries);
-    }
-
-    public void addDegradationListener(ReplicationDegradationListener listener) {
-        degradationListeners.add(listener);
-    }
-
-    public void removeDegradationListener(ReplicationDegradationListener listener) {
-        degradationListeners.remove(listener);
-    }
 
     public boolean isDegraded(String regionId) {
         return degradedRegions.contains(regionId);
@@ -486,13 +466,11 @@ public class ReplicationCoordinator {
                 // Partial ack success — if previously degraded, check for recovery
                 if (successCount > 0 && degradedRegions.remove(regionId)) {
                     logger.info("Replication recovered for region {}: got {} acks", regionId, successCount);
-                    notifyDegradationChange(regionId, false, successCount, secondaryCount);
                 }
             }
         } else if (secondaryCount > 0 && degradedRegions.remove(regionId)) {
             // Full ack — clear degraded state if present
             logger.info("Replication fully recovered for region {}: all {} secondaries acked", regionId, secondaryCount);
-            notifyDegradationChange(regionId, false, successCount, secondaryCount);
         }
 
         for (ReplicationTask task : batch) {
@@ -624,18 +602,8 @@ public class ReplicationCoordinator {
 
     private void markDegraded(String regionId, int successCount, int secondaryCount) {
         if (degradedRegions.add(regionId)) {
-            notifyDegradationChange(regionId, true, successCount, secondaryCount);
-        }
-    }
-
-    private void notifyDegradationChange(String regionId, boolean degraded,
-                                          int successCount, int totalSecondaries) {
-        for (ReplicationDegradationListener listener : degradationListeners) {
-            try {
-                listener.onDegradationChange(regionId, degraded, successCount, totalSecondaries);
-            } catch (Exception e) {
-                logger.warn("Degradation listener threw exception for region {}: {}", regionId, e.getMessage());
-            }
+            logger.warn("Replication degraded for region {}: 0 of {} secondaries responding",
+                regionId, secondaryCount);
         }
     }
 

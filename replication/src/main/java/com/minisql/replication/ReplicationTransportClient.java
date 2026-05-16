@@ -12,6 +12,7 @@ public interface ReplicationTransportClient extends AutoCloseable {
 
     boolean replicateBatch(ServerId replica, String regionId, List<ReplicationLogEntry> entries, long timeoutMs);
 
+    @Deprecated
     List<KeyValue> fetchSnapshot(ServerId primary, String regionId, long timeoutMs);
 
     /**
@@ -23,8 +24,10 @@ public interface ReplicationTransportClient extends AutoCloseable {
     boolean streamSnapshotDirect(ServerId primary, ServerId replica, String regionId,
                                   int batchSize, long timeoutMs, long finalSequenceId);
 
+    @Deprecated
     boolean sendSnapshot(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId);
 
+    @Deprecated
     boolean sendSnapshotStreaming(ServerId replica, String regionId, List<KeyValue> snapshot, int batchSize, long timeoutMs, long finalSequenceId);
 
     @Override

@@ -265,7 +265,7 @@ public class Router {
         return new ServerAddress(host, port);
     }
 
-    public void addRoute(String tableName, Region region, ServerId primaryServer) {
+    void addRoute(String tableName, Region region, ServerId primaryServer) {
         RegionRouteInfo newRoute = new RegionRouteInfo(region, primaryServer);
         routeCache.compute(tableName, (key, existing) -> {
             List<RegionRouteInfo> updated = existing == null
@@ -290,7 +290,7 @@ public class Router {
         return entry != null ? entry.regions : null;
     }
 
-    public void clearCache() {
+    void clearCache() {
         routeCache.clear();
         watchedTables.clear();
         watchedRegionPaths.clear();

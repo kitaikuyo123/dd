@@ -17,7 +17,7 @@ import com.minisql.sql.ast.SimpleCondition;
 import com.minisql.sql.ast.Statement;
 import com.minisql.sql.ast.UpdateStatement;
 
-import com.minisql.sql.execution.QueryPlan;
+import com.minisql.sql.JoinType;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -194,16 +194,16 @@ public class SQLParser {
      * 省略连接类型时默认为 INNER JOIN
      */
     private void parseJoin(SelectStatement stmt) {
-        QueryPlan.JoinType joinType = null;
+        JoinType joinType = null;
 
         if (match(TokenType.LEFT)) {
-            joinType = QueryPlan.JoinType.LEFT;
+            joinType = JoinType.LEFT;
             consume(TokenType.JOIN);
         } else if (match(TokenType.INNER)) {
-            joinType = QueryPlan.JoinType.INNER;
+            joinType = JoinType.INNER;
             consume(TokenType.JOIN);
         } else if (match(TokenType.JOIN)) {
-            joinType = QueryPlan.JoinType.INNER;
+            joinType = JoinType.INNER;
         }
 
         if (joinType == null) {

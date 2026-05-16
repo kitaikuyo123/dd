@@ -41,30 +41,6 @@ public class RegionSplitService {
     }
 
     /**
-     * 检查 Region 是否需要分裂
-     */
-    public boolean shouldSplit(String regionId) {
-        try {
-            RegionStorage storage = regionManager.getRegionStorage(regionId);
-            if (storage == null) return false;
-
-            // 获取实际大小（定期校准估算值）
-            long actualSize = storage.getActualTableSize();
-
-            // 小于最小分裂大小，不分裂（防止过度分裂）
-            if (actualSize < minSplitSize) {
-                return false;
-            }
-
-            // 超过阈值，需要分裂
-            return actualSize >= splitThreshold;
-        } catch (Exception e) {
-            logger.error("Error checking split for region: " + regionId, e);
-            return false;
-        }
-    }
-
-    /**
      * 寻找最佳分裂点（中点分裂策略）
      */
     public byte[] findBestSplitPoint(String regionId) throws IOException {
@@ -162,8 +138,6 @@ public class RegionSplitService {
         // 2. 创建新的存储
         RegionStorage leftStorage = regionManager.createRegionStorage(leftId);
         RegionStorage rightStorage = regionManager.createRegionStorage(rightId);
-        leftStorage.start();
-        rightStorage.start();
 
         // 3. 数据迁移 - 左半部分
         logger.info("Migrating left part for region: {}", leftId);

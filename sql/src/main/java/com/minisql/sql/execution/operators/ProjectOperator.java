@@ -52,19 +52,11 @@ public class ProjectOperator extends Operator {
             List<String> lookupColumns = sourceColumns != null ? sourceColumns : columns;
             columnIndices = new int[columns.size()];
             for (int i = 0; i < columns.size(); i++) {
-                columnIndices[i] = findColumnIndex(inputColumns, lookupColumns.get(i));
+                columnIndices[i] = findColumnIndex(inputColumns, lookupColumns.get(i), false);
             }
         }
     }
 
-    private int findColumnIndex(String[] columns, String target) {
-        for (int i = 0; i < columns.length; i++) {
-            if (columns[i].equalsIgnoreCase(target)) {
-                return i;
-            }
-        }
-        return -1;  // 未找到
-    }
 
     @Override
     public Row nextRow() throws IOException {

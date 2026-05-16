@@ -45,10 +45,6 @@ public class HeartbeatSender {
 
     private long diskCapacityMb = 1024L;
 
-    public HeartbeatSender(ServerId serverId, RegionManager regionManager) {
-        this(serverId, regionManager, Constants.DEFAULT_HEARTBEAT_INTERVAL_MS);
-    }
-
     public HeartbeatSender(ServerId serverId, RegionManager regionManager, long heartbeatIntervalMs) {
         this.serverId = serverId;
         this.regionManager = regionManager;

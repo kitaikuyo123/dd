@@ -41,31 +41,4 @@ public class UpdateStatement extends Statement {
         return sb.toString();
     }
 
-    private String formatValue(String value) {
-        if (value == null || value.isEmpty()) {
-            return "NULL";
-        } else if (isNumeric(value)) {
-            return value;
-        } else {
-            return "'" + value.replace("'", "''") + "'";
-        }
-    }
-
-    private String whereToString(Condition condition) {
-        if (condition instanceof SimpleCondition) {
-            SimpleCondition sc = (SimpleCondition) condition;
-            return sc.getColumn() + " " + sc.getOperator() + " " + formatValue(sc.getValue());
-        }
-        return "1=1"; // 默认条件
-    }
-
-    private boolean isNumeric(String str) {
-        if (str == null || str.isEmpty()) return false;
-        try {
-            Double.parseDouble(str);
-            return true;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
 }

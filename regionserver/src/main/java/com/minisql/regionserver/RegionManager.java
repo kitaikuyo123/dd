@@ -83,7 +83,6 @@ public class RegionManager {
 
             try {
                 RegionStorage storage = createRegionStorage(id);
-                storage.start();
                 doRegisterOpenedRegion(region, storage);
                 return RegionState.OPEN;
             } catch (Exception e) {
@@ -230,11 +229,11 @@ public class RegionManager {
         }
     }
 
-    public void registerRegionStorage(String regionId, RegionStorage storage) {
+    void registerRegionStorage(String regionId, RegionStorage storage) {
         regionStorages.put(regionId, storage);
     }
 
-    public void registerRegionInternal(Region region) {
+    void registerRegionInternal(Region region) {
         regions.put(region.getRegionId(), region);
     }
 

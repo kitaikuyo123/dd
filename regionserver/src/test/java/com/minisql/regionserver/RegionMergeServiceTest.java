@@ -5,6 +5,7 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.model.KeyValue;
 import com.minisql.storage.StorageEngine;
 import com.minisql.storage.StorageEngineFactory;
+import com.minisql.storage.StorageScanFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -30,6 +31,9 @@ class RegionMergeServiceTest {
         @Override public void batchPut(List<KeyValue> values) {}
         @Override public List<KeyValue> get(byte[] key) { return Collections.emptyList(); }
         @Override public Iterator<KeyValue> scan(byte[] startKey, byte[] endKey) {
+            return Collections.<KeyValue>emptyList().iterator();
+        }
+        @Override public Iterator<KeyValue> scan(StorageScanFilter filter) {
             return Collections.<KeyValue>emptyList().iterator();
         }
         @Override public void delete(byte[] key) {}
