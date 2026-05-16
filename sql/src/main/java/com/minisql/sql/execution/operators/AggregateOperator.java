@@ -137,7 +137,7 @@ public class AggregateOperator extends Operator {
             AggregateState[] states = groupStates.computeIfAbsent(key, k -> {
                 AggregateState[] newStates = new AggregateState[aggregates.size()];
                 for (int i = 0; i < aggregates.size(); i++) {
-                    newStates[i] = createState(aggregates.get(i).getType());
+                    newStates[i] = createState(aggregates.get(i));
                 }
                 return newStates;
             });
@@ -162,7 +162,7 @@ public class AggregateOperator extends Operator {
             GroupKey emptyKey = new GroupKey(0);
             AggregateState[] states = new AggregateState[aggregates.size()];
             for (int i = 0; i < aggregates.size(); i++) {
-                states[i] = createState(aggregates.get(i).getType());
+                states[i] = createState(aggregates.get(i));
             }
             groupStates.put(emptyKey, states);
         }
@@ -171,10 +171,10 @@ public class AggregateOperator extends Operator {
         computed = true;
     }
 
-    private AggregateState createState(QueryPlan.AggregateType type) {
-        switch (type) {
+    private AggregateState createState(QueryPlan.AggregateExpr expr) {
+        switch (expr.getType()) {
             case COUNT:
-                return new CountState();
+                return new CountState("*".equals(expr.getColumn()));
             case SUM:
                 return new SumState();
             case AVG:
@@ -184,7 +184,7 @@ public class AggregateOperator extends Operator {
             case MIN:
                 return new MinState();
             default:
-                throw new IllegalArgumentException("Unknown aggregate type: " + type);
+                throw new IllegalArgumentException("Unknown aggregate type: " + expr.getType());
         }
     }
 
@@ -247,10 +247,17 @@ public class AggregateOperator extends Operator {
      */
     private static class CountState extends AggregateState {
         private long count = 0;
+        private final boolean countStar;
+
+        CountState(boolean countStar) {
+            this.countStar = countStar;
+        }
 
         @Override
         void accumulate(Object value) {
-            count++;
+            if (countStar || value != null) {
+                count++;
+            }
         }
 
         @Override
@@ -264,17 +271,19 @@ public class AggregateOperator extends Operator {
      */
     private static class SumState extends AggregateState {
         private double sum = 0;
+        private boolean hasValue = false;
 
         @Override
         void accumulate(Object value) {
             if (value instanceof Number) {
                 sum += ((Number) value).doubleValue();
+                hasValue = true;
             }
         }
 
         @Override
         Object getResult() {
-            return sum;
+            return hasValue ? sum : null;
         }
     }
 

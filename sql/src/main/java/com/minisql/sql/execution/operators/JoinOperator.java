@@ -9,10 +9,12 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 连接算子，支持 Hash Join 和嵌套循环两种执行策略
@@ -36,6 +38,8 @@ public class JoinOperator extends Operator {
     private final JoinCondition condition;
     /** 指定的连接算法 */
     private final JoinAlgorithm algorithm;
+    /** 连接类型（INNER / LEFT） */
+    private final QueryPlan.JoinType joinType;
 
     private boolean opened;
     /** 实际执行策略，在 open 时确定 */
@@ -66,6 +70,7 @@ public class JoinOperator extends Operator {
         this.right = right;
         this.condition = condition;
         this.algorithm = algorithm;
+        this.joinType = joinType;
         this.hashJoinMaxRows = Math.max(1000, hashJoinMaxRows);
     }
 
@@ -145,6 +150,16 @@ public class JoinOperator extends Operator {
         return new Row(getOutputColumns(), combined);
     }
 
+    /** LEFT JOIN: left row + null right columns */
+    private Row combineRowsWithNullRight(Row leftRow) {
+        Object[] leftValues = leftRow.getValues();
+        String[] rightCols = right.getOutputColumns();
+        Object[] combined = new Object[leftValues.length + rightCols.length];
+        System.arraycopy(leftValues, 0, combined, 0, leftValues.length);
+        // right side stays null
+        return new Row(getOutputColumns(), combined);
+    }
+
     /** 在列名数组中查找指定列的位置，支持 table.column 格式的列名 */
     private int findColumnIndex(String[] columns, String columnName) {
         String fallback = columnName != null && columnName.contains(".")
@@ -206,11 +221,14 @@ public class JoinOperator extends Operator {
      */
     private final class HashJoinStrategy implements JoinStrategy {
         private final Map<JoinKey, List<Row>> hashTable = new HashMap<>();
+        private final Set<JoinKey> matchedLeftKeys = new HashSet<>();
         private Iterator<Row> matchingRows;
         private Row currentRightRow;
         private int rightKeyIndex;
+        private int leftKeyIndex;
         private boolean fellBackToNestedLoop;
         private NestedLoopJoinStrategy fallback;
+        private Iterator<Row> leftUnmatchedIterator;
 
         @Override
         public void open() throws IOException {
@@ -221,23 +239,19 @@ public class JoinOperator extends Operator {
                 throw new IllegalArgumentException("Hash join only supports equality joins");
             }
 
-            int leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
+            leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
             rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn());
 
             int rowCount = 0;
             while (left.hasMore()) {
                 Row row = left.nextRow();
                 if (rowCount >= hashJoinMaxRows) {
-                    // Hash table too large — fall back to nested loop join
                     log.warn("Hash join build side exceeded {} rows (got {}), falling back to nested loop join. " +
                         "Consider increasing hashJoinMaxRows or adding a more selective filter.",
                         hashJoinMaxRows, rowCount);
                     hashTable.clear();
                     fellBackToNestedLoop = true;
                     fallback = new NestedLoopJoinStrategy();
-                    // The left rows we already read are gone, but the full scan
-                    // means NestedLoopJoinStrategy will re-read from left.reset()
-                    // which should re-open the child operator chain
                     left.reset();
                     fallback.open();
                     return;
@@ -252,17 +266,41 @@ public class JoinOperator extends Operator {
             if (fellBackToNestedLoop) {
                 return fallback.next();
             }
+
+            // Phase 1: emit matched rows
             while (true) {
                 if (matchingRows != null && matchingRows.hasNext()) {
-                    return combineRows(matchingRows.next(), currentRightRow);
+                    Row rightRow = currentRightRow;
+                    return combineRows(matchingRows.next(), rightRow);
                 }
                 if (!right.hasMore()) {
-                    return null;
+                    break;
                 }
                 currentRightRow = right.nextRow();
-                List<Row> matches = hashTable.get(new JoinKey(currentRightRow.getValue(rightKeyIndex)));
-                matchingRows = matches == null ? null : matches.iterator();
+                JoinKey rightKey = new JoinKey(currentRightRow.getValue(rightKeyIndex));
+                List<Row> matches = hashTable.get(rightKey);
+                if (matches != null) {
+                    matchedLeftKeys.add(rightKey);
+                    matchingRows = matches.iterator();
+                }
             }
+
+            // Phase 2: for LEFT JOIN, emit unmatched left rows with null right
+            if (joinType == QueryPlan.JoinType.LEFT && leftUnmatchedIterator == null) {
+                List<Row> unmatched = new ArrayList<>();
+                for (Map.Entry<JoinKey, List<Row>> entry : hashTable.entrySet()) {
+                    if (!matchedLeftKeys.contains(entry.getKey())) {
+                        unmatched.addAll(entry.getValue());
+                    }
+                }
+                leftUnmatchedIterator = unmatched.iterator();
+            }
+
+            if (leftUnmatchedIterator != null && leftUnmatchedIterator.hasNext()) {
+                return combineRowsWithNullRight(leftUnmatchedIterator.next());
+            }
+
+            return null;
         }
     }
 
@@ -277,6 +315,7 @@ public class JoinOperator extends Operator {
         private Row currentRightRow;
         private int leftKeyIndex;
         private int rightKeyIndex;
+        private boolean currentLeftMatched;
 
         @Override
         public void open() throws IOException {
@@ -286,14 +325,23 @@ public class JoinOperator extends Operator {
             leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn());
             rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn());
             currentLeftRow = left.hasMore() ? left.nextRow() : null;
+            currentLeftMatched = false;
         }
 
         @Override
         public Row next() throws IOException {
             while (currentLeftRow != null) {
                 if (currentRightRow == null) {
+                    // LEFT JOIN: if previous left row had no match, emit null-right
+                    if (joinType == QueryPlan.JoinType.LEFT && !currentLeftMatched) {
+                        Row result = combineRowsWithNullRight(currentLeftRow);
+                        currentLeftRow = left.hasMore() ? left.nextRow() : null;
+                        currentLeftMatched = false;
+                        return result;
+                    }
                     if (!right.hasMore()) {
                         currentLeftRow = left.hasMore() ? left.nextRow() : null;
+                        currentLeftMatched = false;
                         if (currentLeftRow == null) {
                             return null;
                         }
@@ -305,11 +353,13 @@ public class JoinOperator extends Operator {
                     currentRightRow = right.nextRow();
                 }
 
-                Row result = compare(currentLeftRow, currentRightRow) ? combineRows(currentLeftRow, currentRightRow) : null;
-                currentRightRow = right.hasMore() ? right.nextRow() : null;
-                if (result != null) {
+                if (compare(currentLeftRow, currentRightRow)) {
+                    Row result = combineRows(currentLeftRow, currentRightRow);
+                    currentLeftMatched = true;
+                    currentRightRow = right.hasMore() ? right.nextRow() : null;
                     return result;
                 }
+                currentRightRow = right.hasMore() ? right.nextRow() : null;
             }
             return null;
         }

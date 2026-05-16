@@ -18,6 +18,9 @@ public class ProjectOperator extends Operator {
     private int[] columnIndices;
     private boolean opened;
 
+    // Optional: source column names when different from output names (aliases)
+    private List<String> sourceColumns;
+
     public ProjectOperator(Operator child, List<String> columns) {
         this(child, columns, false);
     }
@@ -28,17 +31,28 @@ public class ProjectOperator extends Operator {
         this.selectAll = selectAll;
     }
 
+    /**
+     * Project with alias support: sourceColumns[i] is looked up in the input,
+     * output uses columns[i] as the name.
+     */
+    public ProjectOperator(Operator child, List<String> sourceColumns, List<String> outputColumns) {
+        this.child = child;
+        this.columns = outputColumns != null ? outputColumns : Collections.emptyList();
+        this.sourceColumns = sourceColumns != null ? sourceColumns : this.columns;
+        this.selectAll = false;
+    }
+
     @Override
     public void open() throws IOException {
         child.open();
         opened = true;
 
         if (!selectAll && !columns.isEmpty()) {
-            // 计算列索引映射
             String[] inputColumns = child.getOutputColumns();
+            List<String> lookupColumns = sourceColumns != null ? sourceColumns : columns;
             columnIndices = new int[columns.size()];
             for (int i = 0; i < columns.size(); i++) {
-                columnIndices[i] = findColumnIndex(inputColumns, columns.get(i));
+                columnIndices[i] = findColumnIndex(inputColumns, lookupColumns.get(i));
             }
         }
     }
