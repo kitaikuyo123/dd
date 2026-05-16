@@ -16,9 +16,11 @@ public interface RegionServerCommandClient {
 
     RegionServerProto.GetSplitKeyResponse getSplitKey(ServerId serverId, String regionId);
 
-    RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey);
+    RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId);
 
-    RegionServerProto.MergeRegionResponse mergeRegion(ServerId serverId, String leftRegionId, String rightRegionId);
+    RegionServerProto.MergeRegionResponse mergeRegion(ServerId serverId, String leftRegionId, String rightRegionId,
+                                                      String mergedRegionId);
 
     RegionServerProto.MigrateResponse startMigration(ServerId serverId, String regionId, ServerId targetServer, long timeoutMs);
 

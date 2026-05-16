@@ -485,13 +485,14 @@ class FailoverCoordinatorTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId) {
             throw new UnsupportedOperationException();
         }
 
         @Override
         public RegionServerProto.MergeRegionResponse mergeRegion(ServerId serverId, String leftRegionId,
-                                                                 String rightRegionId) {
+                                                                 String rightRegionId, String mergedRegionId) {
             throw new UnsupportedOperationException();
         }
 
@@ -556,12 +557,13 @@ class FailoverCoordinatorTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId s, String r, byte[] k) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId s, String r, byte[] k,
+                                                      String leftR, String rightR) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r) {
+        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r, String merged) {
             throw new UnsupportedOperationException();
         }
 

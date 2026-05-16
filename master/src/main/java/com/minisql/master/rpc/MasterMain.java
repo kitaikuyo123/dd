@@ -340,6 +340,7 @@ public class MasterMain {
             monitoringService, clusterManager, metadataManager, loadBalancer,
             serviceImpl != null ? serviceImpl.getMigrationCoordinator() : null,
             serviceImpl != null ? serviceImpl.getSplitCoordinator() : null,
+            serviceImpl != null ? serviceImpl.getMergeCoordinator() : null,
             sqlConsoleService));
         monitorHttpServer.start(monitorHost, monitorPort);
         logger.info("Monitor HTTP server started on {}:{}", monitorHost, monitorPort);

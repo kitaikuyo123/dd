@@ -74,12 +74,12 @@ class GrpcRegionServerCommandClientTest {
         assertEquals("orders_r1",
             commandClient.buildGetSplitKeyRequest("orders_r1").getRegionId());
 
-        RegionServerProto.SplitRegionRequest splitRequest = commandClient.buildSplitRegionRequest("orders_r1", splitKey);
+        RegionServerProto.SplitRegionRequest splitRequest = commandClient.buildSplitRegionRequest("orders_r1", splitKey, null, null);
         assertEquals("orders_r1", splitRequest.getRegionId());
         assertEquals(ByteString.copyFrom(splitKey), splitRequest.getSplitKey());
 
         RegionServerProto.MergeRegionRequest mergeRequest =
-            commandClient.buildMergeRegionRequest("orders_r1_left", "orders_r1_right");
+            commandClient.buildMergeRegionRequest("orders_r1_left", "orders_r1_right", null);
         assertEquals("orders_r1_left", mergeRequest.getLeftRegionId());
         assertEquals("orders_r1_right", mergeRequest.getRightRegionId());
 

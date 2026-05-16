@@ -235,6 +235,8 @@ message CloseRegionResponse {
 message SplitRegionRequest {
     string regionId = 1;
     bytes splitKey = 2;  // 分裂点，如果为空则由系统自动选择
+    string leftRegionId = 3;   // 左孩子名字，Master 分配传入
+    string rightRegionId = 4;  // 右孩子名字，Master 分配传入
 }
 
 message SplitRegionResponse {
@@ -322,6 +324,7 @@ message StreamSnapshotResponse {
 message MergeRegionRequest {
     string leftRegionId = 1;   // 左 Region（范围较小）
     string rightRegionId = 2;  // 右 Region（范围较大）
+    string mergedRegionId = 3; // 合并后名字，Master 分配传入
 }
 
 message MergeRegionResponse {

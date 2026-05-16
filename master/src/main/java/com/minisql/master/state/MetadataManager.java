@@ -177,7 +177,7 @@ public class MetadataManager {
     public void deleteTable(String tableName) {
         tables.remove(tableName);
 
-        // 从 ZK 删除整个表目录
+        // 从 ZK 删除整个表目录（递归）
         if (zkClient != null) {
             try {
                 String tablePath = TABLES_BASE + "/" + tableName;
@@ -337,6 +337,46 @@ public class MetadataManager {
             } catch (Exception e) {
                 logger.warn("Failed to delete region from ZK: {}", e.getMessage(), e);
             }
+        }
+    }
+
+    /**
+     * 分配一个新的 region ID，格式 {tableName}.{自增序号}，序号持久化到 ZK。
+     */
+    public synchronized String allocateRegionId(String tableName) {
+        long next = readNextId(tableName);
+        writeNextId(tableName, next + 1);
+        return tableName + "." + next;
+    }
+
+    private long readNextId(String tableName) {
+        if (zkClient == null) return 1L;
+        try {
+            String path = TABLES_BASE + "/" + tableName + "/next-id";
+            if (!zkClient.exists(path)) return 1L;
+            byte[] data = zkClient.getData(path);
+            return Long.parseLong(new String(data, java.nio.charset.StandardCharsets.UTF_8).trim());
+        } catch (Exception e) {
+            return 1L;
+        }
+    }
+
+    private void writeNextId(String tableName, long nextId) {
+        if (zkClient == null) return;
+        try {
+            String tablePath = TABLES_BASE + "/" + tableName;
+            if (!zkClient.exists(tablePath)) {
+                zkClient.createPersistent(tablePath, new byte[0]);
+            }
+            String path = tablePath + "/next-id";
+            byte[] data = String.valueOf(nextId).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            if (zkClient.exists(path)) {
+                zkClient.setData(path, data);
+            } else {
+                zkClient.createPersistent(path, data);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to persist next-id for {}: {}", tableName, e.getMessage());
         }
     }
 

@@ -301,14 +301,15 @@ class RegionSplitCoordinatorTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId) {
             splitStarted.countDown();
             try {
                 allowComplete.await(5, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            return super.splitRegion(serverId, regionId, splitKey);
+            return super.splitRegion(serverId, regionId, splitKey, leftRegionId, rightRegionId);
         }
     }
 
@@ -346,7 +347,8 @@ class RegionSplitCoordinatorTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId) {
             CommonProto.RegionInfo leftRegion = CommonProto.RegionInfo.newBuilder()
                 .setRegionId(regionId + "_l")
                 .setTableName("orders")
@@ -367,7 +369,7 @@ class RegionSplitCoordinatorTest {
         }
 
         @Override
-        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r) {
+        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r, String merged) {
             throw new UnsupportedOperationException();
         }
 

@@ -46,6 +46,8 @@ public class RegionMergeCoordinator {
     private final RebalanceSupport support;
     private final RegionServerCommandClient commandClient;
 
+    private volatile RegionMigrationCoordinator migrationCoordinator;
+
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
 
@@ -127,6 +129,10 @@ public class RegionMergeCoordinator {
         this.maxMergeSize = maxMergeSize;
     }
 
+    public void setMigrationCoordinator(RegionMigrationCoordinator migrationCoordinator) {
+        this.migrationCoordinator = migrationCoordinator;
+    }
+
     public void setMinMergeSize(long minMergeSize) {
         this.minMergeSize = minMergeSize;
     }
@@ -181,6 +187,53 @@ public class RegionMergeCoordinator {
      */
     public void triggerCheckNow() {
         checkAndScheduleMerges();
+    }
+
+    /**
+     * 强制合并指定表的相邻 region（绕过大小检查和冷却期）。
+     */
+    public boolean forceMerge(String tableName) {
+        List<Region> regions = new ArrayList<>(support.metadataManager.getRegionsForTable(tableName));
+        if (regions.size() < 2) {
+            logger.info("Table {} has fewer than 2 regions, nothing to merge", tableName);
+            return false;
+        }
+        regions.sort(Comparator.comparing(Region::getStartKey, BytesUtil::compareTo));
+        for (int i = 0; i < regions.size() - 1; i++) {
+            Region left = regions.get(i);
+            Region right = regions.get(i + 1);
+            if (mergingRegions.contains(left.getRegionId()) || mergingRegions.contains(right.getRegionId())
+                || queuedMergingRegions.contains(left.getRegionId()) || queuedMergingRegions.contains(right.getRegionId())) {
+                continue;
+            }
+
+            // 确保两个 region 在同一台 RS 上，否则迁到一起
+            ServerId leftServer = support.clusterManager.getPrimaryServerForRegion(left.getRegionId());
+            ServerId rightServer = support.clusterManager.getPrimaryServerForRegion(right.getRegionId());
+            if (leftServer != null && rightServer != null && !leftServer.equals(rightServer)) {
+                logger.info("Force merge: migrating {} from {} to {} before merge",
+                    right.getRegionId(), rightServer, leftServer);
+                try {
+                    if (migrationCoordinator != null) {
+                        migrationCoordinator.execute(new LoadBalancer.BalanceAction(
+                            right.getRegionId(), rightServer, leftServer));
+                    } else {
+                        logger.warn("MigrationCoordinator not set, cannot colocate regions for merge");
+                        return false;
+                    }
+                } catch (Exception e) {
+                    logger.error("Failed to migrate {} to {}: {}", right.getRegionId(), leftServer, e.getMessage());
+                    return false;
+                }
+            }
+
+            boolean scheduled = scheduleMerge(left, right);
+            logger.info("Force merge {} for {} + {}: {}", scheduled ? "scheduled" : "failed",
+                left.getRegionId(), right.getRegionId(), tableName);
+            return scheduled;
+        }
+        logger.info("No adjacent region pair available for merge in table: {}", tableName);
+        return false;
     }
 
     // --- Internal ---
@@ -368,8 +421,9 @@ public class RegionMergeCoordinator {
             support.recordEvent("REGION_MERGE_STARTED", "INFO", leftRegionId, validatedTask.getServerId(),
                 "Region merge started", rightRegionId);
 
+            String mergedRegionId = support.metadataManager.allocateRegionId(validatedTask.getTableName());
             MergeResult result = notifyServerMergeRegions(
-                validatedTask.getServerId(), leftRegionId, rightRegionId);
+                validatedTask.getServerId(), leftRegionId, rightRegionId, mergedRegionId);
 
             if (result == null) {
                 logger.warn("Merge failed for regions: {} and {}", leftRegionId, rightRegionId);
@@ -393,14 +447,15 @@ public class RegionMergeCoordinator {
         }
     }
 
-    private MergeResult notifyServerMergeRegions(ServerId serverId, String leftRegionId, String rightRegionId) {
+    private MergeResult notifyServerMergeRegions(ServerId serverId, String leftRegionId, String rightRegionId,
+                                                 String mergedRegionId) {
         if (commandClient == null) {
             logger.error("commandClient not set, cannot merge regions");
             return null;
         }
         try {
             RegionServerProto.MergeRegionResponse response =
-                commandClient.mergeRegion(serverId, leftRegionId, rightRegionId);
+                commandClient.mergeRegion(serverId, leftRegionId, rightRegionId, mergedRegionId);
 
             if (response.getStatus().getSuccess()) {
                 return new MergeResult(RebalanceSupport.convertProtoToRegion(response.getMergedRegion()));
@@ -486,17 +541,20 @@ public class RegionMergeCoordinator {
     private static class MergeTask {
         private final String leftRegionId;
         private final String rightRegionId;
+        private final String tableName;
         private final ServerId serverId;
 
         MergeTask(String leftRegionId, String rightRegionId,
                   String tableName, ServerId serverId) {
             this.leftRegionId = leftRegionId;
             this.rightRegionId = rightRegionId;
+            this.tableName = tableName;
             this.serverId = serverId;
         }
 
         String getLeftRegionId() { return leftRegionId; }
         String getRightRegionId() { return rightRegionId; }
+        String getTableName() { return tableName; }
         ServerId getServerId() { return serverId; }
     }
 

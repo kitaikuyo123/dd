@@ -668,7 +668,8 @@ class HotSpotCoordinatorIntegrationTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId) {
             return RegionServerProto.SplitRegionResponse.newBuilder()
                 .setStatus(OK)
                 .setLeftRegion(CommonProto.RegionInfo.newBuilder()
@@ -685,7 +686,7 @@ class HotSpotCoordinatorIntegrationTest {
         }
 
         @Override
-        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r) {
+        public RegionServerProto.MergeRegionResponse mergeRegion(ServerId s, String l, String r, String merged) {
             throw new UnsupportedOperationException();
         }
 

@@ -114,13 +114,14 @@ class RegionMigrationOrchestratorTest {
         }
 
         @Override
-        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+        public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                      String leftRegionId, String rightRegionId) {
             throw new UnsupportedOperationException();
         }
 
         @Override
         public RegionServerProto.MergeRegionResponse mergeRegion(ServerId serverId, String leftRegionId,
-                                                                 String rightRegionId) {
+                                                                 String rightRegionId, String mergedRegionId) {
             throw new UnsupportedOperationException();
         }
 

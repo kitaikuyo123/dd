@@ -158,6 +158,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.mergeCoordinator.setReplicationCoordinator(replicationCoordinator);
         this.mergeCoordinator.setReplicaMonitor(replicaMonitor);
         this.mergeCoordinator.setLifecycleManager(lifecycleManager);
+        this.mergeCoordinator.setMigrationCoordinator(migrationCoordinator);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
         this.hotSpotCoordinator.setHotSpotRegistry(loadBalancer.getHotSpotRegistry());
@@ -294,6 +295,9 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
     }
     public RegionSplitCoordinator getSplitCoordinator() {
         return splitCoordinator;
+    }
+    public RegionMergeCoordinator getMergeCoordinator() {
+        return mergeCoordinator;
     }
 
     public void setLoadBalanceConfig(boolean enabled, long intervalMs) {
@@ -1574,7 +1578,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
         if (numRegions <= 1) {
             Region region = new Region();
-            region.setRegionId(tableName + "_" + UUID.randomUUID().toString().substring(0, 8));
+            region.setRegionId(metadataManager.allocateRegionId(tableName));
             region.setTableName(tableName);
             region.setStartKey(startKey != null ? startKey : new byte[0]);
             region.setEndKey(endKey != null ? endKey : new byte[]{(byte) 0xFF});
@@ -1589,7 +1593,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         // 简化处理：均匀分区
         for (int i = 0; i < numRegions; i++) {
             Region region = new Region();
-            region.setRegionId(tableName + "_" + i + "_" + UUID.randomUUID().toString().substring(0, 8));
+            region.setRegionId(metadataManager.allocateRegionId(tableName));
             region.setTableName(tableName);
 
             if (i == 0) {

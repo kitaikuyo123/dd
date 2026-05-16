@@ -364,6 +364,7 @@ const DEMO_STEPS = [
   { id: "query", label: "SELECT · WHERE · ORDER BY · LIMIT · 聚合 · GROUP BY · UPDATE · DELETE", tag: "Query / DML" },
   { id: "join", label: "JOIN (INNER + LEFT) · JOIN + 聚合 + 分组", tag: "Complex Query" },
   { id: "split", label: "Force Split → New Regions → Auto Rebalance", tag: "Region Split" },
+  { id: "merge", label: "Force Merge → Adjacent Regions → Shrink", tag: "Region Merge" },
   { id: "failover", label: "Kill Random RS → Auto Failover", tag: "Fault Tolerance" },
   { id: "recover", label: "Restart RS → Data Catch-up", tag: "Recovery" },
   { id: "scaleout", label: "Add New RS-4 Node", tag: "Cluster Scaling" },
@@ -402,6 +403,8 @@ const DEMO_SQL = {
     "SELECT COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM demo_orders;",
     "SELECT status, COUNT(*) AS cnt, SUM(amount) AS total FROM demo_orders GROUP BY status ORDER BY total DESC;",
     "SELECT user_id, SUM(amount) AS total FROM demo_orders GROUP BY user_id HAVING total > 100 ORDER BY total DESC;",
+    "SELECT id, name, age FROM demo_users WHERE age > 25 AND age < 35;",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE status = 'paid' OR status = 'shipped' ORDER BY id;",
     "UPDATE demo_users SET age = 31 WHERE id = 2;",
     "SELECT * FROM demo_users WHERE id = 2;",
     "DELETE FROM demo_orders WHERE status = 'cancelled';",
@@ -414,6 +417,7 @@ const DEMO_SQL = {
     "SELECT u.name, o.amount, o.status FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
     "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total DESC;",
     "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY orders DESC, total DESC;",
+    "SELECT u.name, o.amount, o.status FROM demo_users u JOIN demo_orders o ON u.id = o.user_id WHERE (u.age > 25 AND o.amount > 60) OR o.amount > 200 ORDER BY o.amount DESC;",
   ].join("\n"),
   verify: "SELECT * FROM demo_users;",
 };
@@ -460,6 +464,9 @@ const DemoMode = {
           emit("fill-sql", DEMO_SQL.join);
         } else if (step.id === "split") {
           await postJson("/monitor/api/demo/force-split", { tableName: "demo_users" });
+          setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 3000);
+        } else if (step.id === "merge") {
+          await postJson("/monitor/api/demo/force-merge", { tableName: "demo_users" });
           setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 3000);
         } else if (step.id === "failover") {
           // 随机选一个 RS 实例杀掉

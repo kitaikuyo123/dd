@@ -108,7 +108,8 @@ public class RegionMergeService {
     /**
      * 执行 Region 合并（带事务回滚机制）
      */
-    public RegionMergeResult mergeRegions(String leftRegionId, String rightRegionId) throws Exception {
+    public RegionMergeResult mergeRegions(String leftRegionId, String rightRegionId,
+                                          String mergedRegionId) throws Exception {
         RegionStorage leftStorage = regionManager.getRegionStorage(leftRegionId);
         RegionStorage rightStorage = regionManager.getRegionStorage(rightRegionId);
 
@@ -135,18 +136,19 @@ public class RegionMergeService {
         checkpoint.mergedStorage = null;
 
         try {
-            // 1. 创建合并后的新 Region
-            String mergedRegionId = leftRegion.getTableName() + "_m_" + UUID.randomUUID().toString().substring(0, 6);
-            checkpoint.mergedRegionId = mergedRegionId;
+            // 1. 创建合并后的新 Region（优先用 Master 传过来的 ID）
+            String mergedId = (mergedRegionId != null && !mergedRegionId.isEmpty())
+                ? mergedRegionId : leftRegion.getTableName() + "_m_" + UUID.randomUUID().toString().substring(0, 6);
+            checkpoint.mergedRegionId = mergedId;
 
             Region mergedRegion = new Region();
-            mergedRegion.setRegionId(mergedRegionId);
+            mergedRegion.setRegionId(mergedId);
             mergedRegion.setTableName(leftRegion.getTableName());
             mergedRegion.setStartKey(leftRegion.getStartKey());
             mergedRegion.setEndKey(rightRegion.getEndKey());
 
             // 2. 创建新存储（会自动创建 kv_store_{mergedRegionId} 表）
-            RegionStorage mergedStorage = regionManager.createRegionStorage(mergedRegionId);
+            RegionStorage mergedStorage = regionManager.createRegionStorage(mergedId);
             checkpoint.mergedStorage = mergedStorage;
             mergedStorage.start();
 
@@ -155,7 +157,7 @@ public class RegionMergeService {
 
             try {
                 // 3. 迁移数据 - 左半部分
-                logger.info("Migrating left part for region: {}", mergedRegionId);
+                logger.info("Migrating left part for region: {}", mergedId);
                 Iterator<KeyValue> leftIterator = leftStorage.scan(leftRegion.getStartKey(), leftRegion.getEndKey());
                 while (leftIterator.hasNext()) {
                     KeyValue kv = leftIterator.next();
@@ -165,7 +167,7 @@ public class RegionMergeService {
                 logger.info("Migrated {} entries from left region", leftCount);
 
                 // 4. 迁移数据 - 右半部分
-                logger.info("Migrating right part for region: {}", mergedRegionId);
+                logger.info("Migrating right part for region: {}", mergedId);
                 Iterator<KeyValue> rightIterator = rightStorage.scan(rightRegion.getStartKey(), rightRegion.getEndKey());
                 while (rightIterator.hasNext()) {
                     KeyValue kv = rightIterator.next();
@@ -189,7 +191,7 @@ public class RegionMergeService {
             // 6. 打开新 Region
             regionManager.registerOpenedRegion(mergedRegion, mergedStorage);
 
-            logger.info("Region merge completed: {} + {} -> {}", leftRegionId, rightRegionId, mergedRegionId);
+            logger.info("Region merge completed: {} + {} -> {}", leftRegionId, rightRegionId, mergedId);
 
             // 7. 构建结果
             RegionMergeResult result = new RegionMergeResult();

@@ -4,6 +4,7 @@ import com.minisql.common.model.Region;
 import com.minisql.common.model.ServerId;
 import com.minisql.master.rebalance.LoadBalancer;
 import com.minisql.master.rebalance.RegionMigrationCoordinator;
+import com.minisql.master.rebalance.RegionMergeCoordinator;
 import com.minisql.master.rebalance.RegionSplitCoordinator;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
@@ -53,6 +54,7 @@ public class DemoService {
     private final LoadBalancer loadBalancer;
     private final RegionMigrationCoordinator migrationCoordinator;
     private final RegionSplitCoordinator splitCoordinator;
+    private final RegionMergeCoordinator mergeCoordinator;
     private final SqlConsoleService sqlConsoleService;
     private final String projectRoot;
 
@@ -62,6 +64,7 @@ public class DemoService {
                        LoadBalancer loadBalancer,
                        RegionMigrationCoordinator migrationCoordinator,
                        RegionSplitCoordinator splitCoordinator,
+                       RegionMergeCoordinator mergeCoordinator,
                        SqlConsoleService sqlConsoleService) {
         this.monitoringService = monitoringService;
         this.clusterManager = clusterManager;
@@ -69,6 +72,7 @@ public class DemoService {
         this.loadBalancer = loadBalancer;
         this.migrationCoordinator = migrationCoordinator;
         this.splitCoordinator = splitCoordinator;
+        this.mergeCoordinator = mergeCoordinator;
         this.sqlConsoleService = sqlConsoleService;
         this.projectRoot = detectProjectRoot();
         System.out.println("[DemoService] projectRoot detected: " + this.projectRoot);
@@ -184,6 +188,27 @@ public class DemoService {
         }
         result.put("success", false);
         result.put("error", "No region found for table: " + tableName);
+        return result;
+    }
+
+    /** 强制合并指定表的相邻 region */
+    public Map<String, Object> forceMerge(String tableName) {
+        Map<String, Object> result = new HashMap<>();
+        if (mergeCoordinator == null) {
+            result.put("success", false);
+            result.put("error", "Merge coordinator not available");
+            return result;
+        }
+        try {
+            boolean scheduled = mergeCoordinator.forceMerge(tableName);
+            result.put("success", scheduled);
+            result.put("message", scheduled
+                ? "Merge scheduled for table " + tableName
+                : "No mergeable regions found for table " + tableName);
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
         return result;
     }
 

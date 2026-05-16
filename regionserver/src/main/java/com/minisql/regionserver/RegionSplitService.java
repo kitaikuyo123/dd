@@ -117,7 +117,8 @@ public class RegionSplitService {
     /**
      * 执行 Region 分裂
      */
-    public RegionSplitResult splitRegion(String regionId, byte[] splitKey) throws Exception {
+    public RegionSplitResult splitRegion(String regionId, byte[] splitKey,
+                                         String leftRegionId, String rightRegionId) throws Exception {
         RegionStorage oldStorage = regionManager.getRegionStorage(regionId);
         if (oldStorage == null) {
             throw new IOException("Region storage not found: " + regionId);
@@ -140,30 +141,32 @@ public class RegionSplitService {
         regionManager.blockWrites(regionId);
         try {
 
-        // 1. 创建两个新 Region 元数据
-        String leftRegionId = oldRegion.getTableName() + "_l_" + UUID.randomUUID().toString().substring(0, 6);
-        String rightRegionId = oldRegion.getTableName() + "_r_" + UUID.randomUUID().toString().substring(0, 6);
+        // 1. 创建两个新 Region 元数据（优先用 Master 传过来的 ID）
+        String leftId = (leftRegionId != null && !leftRegionId.isEmpty())
+            ? leftRegionId : oldRegion.getTableName() + "_l_" + UUID.randomUUID().toString().substring(0, 6);
+        String rightId = (rightRegionId != null && !rightRegionId.isEmpty())
+            ? rightRegionId : oldRegion.getTableName() + "_r_" + UUID.randomUUID().toString().substring(0, 6);
 
         Region leftRegion = new Region();
-        leftRegion.setRegionId(leftRegionId);
+        leftRegion.setRegionId(leftId);
         leftRegion.setTableName(oldRegion.getTableName());
         leftRegion.setStartKey(oldRegion.getStartKey());
         leftRegion.setEndKey(splitKey);
 
         Region rightRegion = new Region();
-        rightRegion.setRegionId(rightRegionId);
+        rightRegion.setRegionId(rightId);
         rightRegion.setTableName(oldRegion.getTableName());
         rightRegion.setStartKey(splitKey);
         rightRegion.setEndKey(oldRegion.getEndKey());
 
         // 2. 创建新的存储
-        RegionStorage leftStorage = regionManager.createRegionStorage(leftRegionId);
-        RegionStorage rightStorage = regionManager.createRegionStorage(rightRegionId);
+        RegionStorage leftStorage = regionManager.createRegionStorage(leftId);
+        RegionStorage rightStorage = regionManager.createRegionStorage(rightId);
         leftStorage.start();
         rightStorage.start();
 
         // 3. 数据迁移 - 左半部分
-        logger.info("Migrating left part for region: {}", leftRegionId);
+        logger.info("Migrating left part for region: {}", leftId);
         Iterator<KeyValue> leftIterator = oldStorage.scan(oldRegion.getStartKey(), splitKey);
         int leftCount = 0;
         while (leftIterator.hasNext()) {
@@ -174,7 +177,7 @@ public class RegionSplitService {
         logger.info("Migrated {} entries to left region", leftCount);
 
         // 4. 数据迁移 - 右半部分
-        logger.info("Migrating right part for region: {}", rightRegionId);
+        logger.info("Migrating right part for region: {}", rightId);
         Iterator<KeyValue> rightIterator = oldStorage.scan(splitKey, oldRegion.getEndKey());
         int rightCount = 0;
         while (rightIterator.hasNext()) {
@@ -184,8 +187,8 @@ public class RegionSplitService {
         }
         logger.info("Migrated {} entries to right region", rightCount);
         if (leftCount == 0 || rightCount == 0) {
-            cleanupSplitStorage(leftRegionId, leftStorage);
-            cleanupSplitStorage(rightRegionId, rightStorage);
+            cleanupSplitStorage(leftId, leftStorage);
+            cleanupSplitStorage(rightId, rightStorage);
             throw new IllegalStateException(String.format(
                 "Split aborted for region %s: unbalanced split key %s (leftEntries=%d, rightEntries=%d). " +
                     "Likely a single-key or extremely skewed hotspot that split cannot mitigate.",
@@ -201,7 +204,7 @@ public class RegionSplitService {
         regionManager.registerOpenedRegion(leftRegion, leftStorage);
         regionManager.registerOpenedRegion(rightRegion, rightStorage);
 
-        logger.info("Region split completed: {} -> {} + {}", regionId, leftRegionId, rightRegionId);
+        logger.info("Region split completed: {} -> {} + {}", regionId, leftId, rightId);
 
         RegionSplitResult result = new RegionSplitResult();
         result.setParentRegionId(regionId);

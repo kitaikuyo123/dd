@@ -245,7 +245,10 @@ public class RegionSplitCoordinator {
 
             support.recordEvent("REGION_SPLIT_STARTED", "INFO", regionId, task.getServerId(),
                 "Region split started", null);
-            SplitResult result = notifyServerSplitRegion(task.getServerId(), regionId, splitKey);
+            String leftRegionId = support.metadataManager.allocateRegionId(task.getTableName());
+            String rightRegionId = support.metadataManager.allocateRegionId(task.getTableName());
+            SplitResult result = notifyServerSplitRegion(task.getServerId(), regionId, splitKey,
+                leftRegionId, rightRegionId);
             if (result == null) {
                 logger.warn("Split failed for region: {} (server={})", regionId, task.getServerId());
                 return;
@@ -301,9 +304,11 @@ public class RegionSplitCoordinator {
         return null;
     }
 
-    private SplitResult notifyServerSplitRegion(ServerId serverId, String regionId, byte[] splitKey) {
+    private SplitResult notifyServerSplitRegion(ServerId serverId, String regionId, byte[] splitKey,
+                                                String leftRegionId, String rightRegionId) {
         try {
-            RegionServerProto.SplitRegionResponse response = commandClient.splitRegion(serverId, regionId, splitKey);
+            RegionServerProto.SplitRegionResponse response = commandClient.splitRegion(serverId, regionId, splitKey,
+                leftRegionId, rightRegionId);
             if (response.getStatus().getSuccess()) {
                 return new SplitResult(
                         RebalanceSupport.convertProtoToRegion(response.getLeftRegion()),
