@@ -21,6 +21,7 @@
         <module>replication</module>
         <module>sql</module>
         <module>client</module>
+        <module>stress-test</module>
     </modules>
 
     <properties>

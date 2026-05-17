@@ -409,7 +409,7 @@ public class Router {
     /**
      * 路由信息
      */
-    static class RegionRouteInfo {
+    public static class RegionRouteInfo {
         private final String regionId;
         private final byte[] startKey;
         private final byte[] endKey;

@@ -1,9 +1,14 @@
 package com.minisql.sql.ast;
 
-import com.minisql.common.utils.ValueComparator;
-import com.minisql.sql.execution.Row;
-
-/** 简单比较条件，表示 列名 运算符 值 的二元比较 */
+/**
+ * 简单比较条件（纯数据 AST 节点）。
+ *
+ * <p>表示 {@code 列名 运算符 值} 的二元比较。
+ * 当 {@code valueColumnReference} 为 true 时，右侧值是列引用而非字面量。
+ *
+ * <p>求值逻辑已迁移到
+ * {@link com.minisql.sql.execution.ConditionEvaluatorFactory#createSimple}。
+ */
 public class SimpleCondition extends Condition {
     private final String column;
     private final String operator;
@@ -19,54 +24,6 @@ public class SimpleCondition extends Condition {
         this.operator = operator;
         this.value = value;
         this.valueColumnReference = valueColumnReference;
-    }
-
-    @Override
-    public boolean evaluate(Row row) {
-        Object columnValue = resolveValue(row, column);
-        if (columnValue == null) {
-            return false;
-        }
-
-        Object rightValue = valueColumnReference ? resolveValue(row, value) : value;
-        if (rightValue == null) {
-            return false;
-        }
-
-        String columnText = String.valueOf(columnValue);
-        String valueText = String.valueOf(rightValue);
-        switch (operator.toUpperCase()) {
-            case "=":
-            case "==":
-                return columnText.equals(valueText);
-            case "!=":
-            case "<>":
-                return !columnText.equals(valueText);
-            case ">":
-                return ValueComparator.compareWithNumericCoercion(columnText, valueText) > 0;
-            case ">=":
-                return ValueComparator.compareWithNumericCoercion(columnText, valueText) >= 0;
-            case "<":
-                return ValueComparator.compareWithNumericCoercion(columnText, valueText) < 0;
-            case "<=":
-                return ValueComparator.compareWithNumericCoercion(columnText, valueText) <= 0;
-            case "LIKE":
-                return matchLike(columnText, valueText);
-            default:
-                throw new UnsupportedOperationException("Unsupported operator: " + operator);
-        }
-    }
-
-    private Object resolveValue(Row row, String reference) {
-        Object direct = row.getValue(reference);
-        if (direct != null || reference == null || !reference.contains(".")) {
-            return direct;
-        }
-        return row.getValue(reference.substring(reference.lastIndexOf('.') + 1));
-    }
-
-    private boolean matchLike(String str, String pattern) {
-        return str.matches(pattern.replace("%", ".*").replace("_", "."));
     }
 
     public String getColumn() {

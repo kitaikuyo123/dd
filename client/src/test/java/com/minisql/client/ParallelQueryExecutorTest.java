@@ -1,76 +1,58 @@
 package com.minisql.client;
 
+import com.minisql.client.executor.QueryPlanner;
 import com.minisql.sql.SQLParser;
 import com.minisql.sql.ast.SelectStatement;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Method;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DisplayName("ParallelQueryExecutor tests")
+/**
+ * 验证 QueryPlanner 的 JOIN 列投影计算逻辑。
+ *
+ * <p>确保每个表只拉取 JOIN 条件、SELECT 列表、WHERE、GROUP BY、
+ * HAVING 和聚合函数实际引用的列，避免传输冗余数据。
+ */
+@DisplayName("QueryPlanner JOIN 投影测试")
 class ParallelQueryExecutorTest {
 
     private SelectStatement parseSelect(String sql) throws Exception {
         return (SelectStatement) new SQLParser(sql).parse();
     }
 
-    @SuppressWarnings("unchecked")
-    private List<String> determineJoinProjectedQualifiersFromAst(
-            ParallelQueryExecutor executor,
-            SelectStatement ast,
-            String tableName,
-            String tableAlias,
-            String joinColumnsSide) throws Exception {
+    private List<String> determineJoinProjectedQualifiers(
+            SelectStatement ast, String tableName, String tableAlias,
+            String joinColumnsSide) {
 
-        // Extract join columns via AST
-        List<String> leftCols = new java.util.ArrayList<>();
-        List<String> rightCols = new java.util.ArrayList<>();
+        List<String> leftCols = new ArrayList<>();
+        List<String> rightCols = new ArrayList<>();
         String leftQualifier = ast.getTableAlias() != null ? ast.getTableAlias() : ast.getTable();
         String rightQualifier = ast.getJoinTableAlias() != null ? ast.getJoinTableAlias() : ast.getJoinTable();
 
-        Method extractMethod = ParallelQueryExecutor.class.getDeclaredMethod(
-            "extractJoinConditionColumns",
-            com.minisql.sql.ast.Condition.class,
-            List.class, List.class, String.class, String.class
-        );
-        extractMethod.setAccessible(true);
-        extractMethod.invoke(executor, ast.getJoinCondition(), leftCols, rightCols, leftQualifier, rightQualifier);
+        QueryPlanner.extractJoinConditionColumns(ast.getJoinCondition(),
+            leftCols, rightCols, leftQualifier, rightQualifier);
 
         List<String> joinCols = "leftConditions".equals(joinColumnsSide) ? leftCols : rightCols;
+        List<QueryPlanner.AggregateExpression> aggregates =
+            QueryPlanner.buildAggregateExpressions(ast);
 
-        // Build aggregate expressions
-        Method buildAggMethod = ParallelQueryExecutor.class.getDeclaredMethod(
-            "buildAggregateExpressions", SelectStatement.class
-        );
-        buildAggMethod.setAccessible(true);
-        List<?> aggregates = (List<?>) buildAggMethod.invoke(executor, ast);
-
-        Method method = ParallelQueryExecutor.class.getDeclaredMethod(
-            "determineJoinProjectedQualifiersFromAst",
-            SelectStatement.class, String.class, String.class, List.class, List.class
-        );
-        method.setAccessible(true);
-        return (List<String>) method.invoke(executor, ast, tableName, tableAlias, joinCols, aggregates);
+        return QueryPlanner.determineJoinProjectedQualifiers(
+            ast, tableName, tableAlias, joinCols, aggregates);
     }
 
     @Test
-    @DisplayName("join projection pushdown keeps only columns needed by each side")
+    @DisplayName("JOIN 投影下推：每侧只保留所需列")
     void testDetermineJoinProjectedQualifiers() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
         SelectStatement ast = parseSelect(
             "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id WHERE o.amount > 100 ORDER BY u.name"
         );
 
-        List<String> leftProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "users", "u", "leftConditions"
-        );
-        List<String> rightProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "orders", "o", "rightConditions"
-        );
+        List<String> leftProjected = determineJoinProjectedQualifiers(ast, "users", "u", "leftConditions");
+        List<String> rightProjected = determineJoinProjectedQualifiers(ast, "orders", "o", "rightConditions");
 
         assertTrue(leftProjected.contains("id"));
         assertTrue(leftProjected.contains("name"));
@@ -82,11 +64,8 @@ class ParallelQueryExecutorTest {
     }
 
     @Test
-    @DisplayName("join projection pushdown keeps group by having and aggregate source columns")
+    @DisplayName("JOIN 投影下推：保留 GROUP BY 列和聚合源列")
     void testDetermineJoinProjectedQualifiersForGroupByAndHaving() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
-        // Note: HAVING with aggregate function calls (e.g. SUM(o.amount)) is not yet
-        // supported by the formal SQLParser. Use alias-based HAVING instead.
         SelectStatement ast = parseSelect(
             "SELECT u.name, SUM(o.amount) AS total " +
                 "FROM users u JOIN orders o ON u.id = o.user_id " +
@@ -95,12 +74,8 @@ class ParallelQueryExecutorTest {
                 "ORDER BY u.name"
         );
 
-        List<String> leftProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "users", "u", "leftConditions"
-        );
-        List<String> rightProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "orders", "o", "rightConditions"
-        );
+        List<String> leftProjected = determineJoinProjectedQualifiers(ast, "users", "u", "leftConditions");
+        List<String> rightProjected = determineJoinProjectedQualifiers(ast, "orders", "o", "rightConditions");
 
         assertTrue(leftProjected.contains("id"));
         assertTrue(leftProjected.contains("name"));
@@ -111,21 +86,16 @@ class ParallelQueryExecutorTest {
     }
 
     @Test
-    @DisplayName("join projection pushdown keeps columns referenced by where clauses")
+    @DisplayName("JOIN 投影下推：保留 WHERE 引用的列")
     void testDetermineJoinProjectedQualifiersForWhereClauses() throws Exception {
-        ParallelQueryExecutor executor = new ParallelQueryExecutor(null, 5);
         SelectStatement ast = parseSelect(
             "SELECT u.name " +
                 "FROM users u JOIN orders o ON u.id = o.user_id " +
                 "WHERE u.age >= 18 AND o.amount <= 200"
         );
 
-        List<String> leftProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "users", "u", "leftConditions"
-        );
-        List<String> rightProjected = determineJoinProjectedQualifiersFromAst(
-            executor, ast, "orders", "o", "rightConditions"
-        );
+        List<String> leftProjected = determineJoinProjectedQualifiers(ast, "users", "u", "leftConditions");
+        List<String> rightProjected = determineJoinProjectedQualifiers(ast, "orders", "o", "rightConditions");
 
         assertTrue(leftProjected.contains("id"));
         assertTrue(leftProjected.contains("name"));

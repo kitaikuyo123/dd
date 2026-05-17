@@ -170,6 +170,7 @@ public class Lexer {
         ORDER, BY, LIMIT, OFFSET, ASC, DESC,
         GROUP, HAVING, AS,
         SHOW, TABLES,
+        RIGHT, FULL, OUTER, DISTINCT, BETWEEN, IN, IS, EXISTS, LIKE,
 
         // 标识符和字面量
         IDENTIFIER, STRING, INTEGER, FLOAT,
@@ -223,6 +224,15 @@ public class Lexer {
             KEYWORDS.put("GROUP", GROUP);
             KEYWORDS.put("HAVING", HAVING);
             KEYWORDS.put("AS", AS);
+            KEYWORDS.put("RIGHT", RIGHT);
+            KEYWORDS.put("FULL", FULL);
+            KEYWORDS.put("OUTER", OUTER);
+            KEYWORDS.put("DISTINCT", DISTINCT);
+            KEYWORDS.put("BETWEEN", BETWEEN);
+            KEYWORDS.put("IN", IN);
+            KEYWORDS.put("IS", IS);
+            KEYWORDS.put("EXISTS", EXISTS);
+            KEYWORDS.put("LIKE", LIKE);
         }
     }
 

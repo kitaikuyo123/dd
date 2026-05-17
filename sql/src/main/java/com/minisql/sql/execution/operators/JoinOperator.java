@@ -161,6 +161,16 @@ public class JoinOperator extends Operator {
         return new Row(getOutputColumns(), combined);
     }
 
+    /** FULL OUTER JOIN: null left columns + right row */
+    private Row combineRowsWithNullLeft(Row rightRow) {
+        String[] leftCols = left.getOutputColumns();
+        Object[] rightValues = rightRow.getValues();
+        Object[] combined = new Object[leftCols.length + rightValues.length];
+        // left side stays null
+        System.arraycopy(rightValues, 0, combined, leftCols.length, rightValues.length);
+        return new Row(getOutputColumns(), combined);
+    }
+
 
     /** 连接算法枚举 */
     public enum JoinAlgorithm {
@@ -211,6 +221,8 @@ public class JoinOperator extends Operator {
     private final class HashJoinStrategy implements JoinStrategy {
         private final Map<JoinKey, List<Row>> hashTable = new HashMap<>();
         private final Set<JoinKey> matchedLeftKeys = new HashSet<>();
+        private final List<Row> allRightRows = new ArrayList<>();
+        private final Set<JoinKey> matchedRightKeys = new HashSet<>();
         private Iterator<Row> matchingRows;
         private Row currentRightRow;
         private int rightKeyIndex;
@@ -218,6 +230,7 @@ public class JoinOperator extends Operator {
         private boolean fellBackToNestedLoop;
         private NestedLoopJoinStrategy fallback;
         private Iterator<Row> leftUnmatchedIterator;
+        private Iterator<Row> rightUnmatchedIterator;
 
         @Override
         public void open() throws IOException {
@@ -270,12 +283,17 @@ public class JoinOperator extends Operator {
                 List<Row> matches = hashTable.get(rightKey);
                 if (matches != null) {
                     matchedLeftKeys.add(rightKey);
+                    matchedRightKeys.add(rightKey);
                     matchingRows = matches.iterator();
+                }
+                // 记录所有右表行用于 FULL OUTER JOIN Phase 3
+                if (joinType == JoinType.FULL) {
+                    allRightRows.add(currentRightRow);
                 }
             }
 
-            // Phase 2: for LEFT JOIN, emit unmatched left rows with null right
-            if (joinType == JoinType.LEFT && leftUnmatchedIterator == null) {
+            // Phase 2: LEFT / FULL — emit unmatched left rows with null right
+            if ((joinType == JoinType.LEFT || joinType == JoinType.FULL) && leftUnmatchedIterator == null) {
                 List<Row> unmatched = new ArrayList<>();
                 for (Map.Entry<JoinKey, List<Row>> entry : hashTable.entrySet()) {
                     if (!matchedLeftKeys.contains(entry.getKey())) {
@@ -287,6 +305,22 @@ public class JoinOperator extends Operator {
 
             if (leftUnmatchedIterator != null && leftUnmatchedIterator.hasNext()) {
                 return combineRowsWithNullRight(leftUnmatchedIterator.next());
+            }
+
+            // Phase 3: FULL OUTER JOIN — emit unmatched right rows with null left
+            if (joinType == JoinType.FULL && rightUnmatchedIterator == null) {
+                List<Row> unmatched = new ArrayList<>();
+                for (Row rightRow : allRightRows) {
+                    JoinKey rk = new JoinKey(rightRow.getValue(rightKeyIndex));
+                    if (!matchedRightKeys.contains(rk)) {
+                        unmatched.add(rightRow);
+                    }
+                }
+                rightUnmatchedIterator = unmatched.iterator();
+            }
+
+            if (rightUnmatchedIterator != null && rightUnmatchedIterator.hasNext()) {
+                return combineRowsWithNullLeft(rightUnmatchedIterator.next());
             }
 
             return null;
@@ -305,6 +339,9 @@ public class JoinOperator extends Operator {
         private int leftKeyIndex;
         private int rightKeyIndex;
         private boolean currentLeftMatched;
+        private final List<Row> allRightRows = new ArrayList<>();
+        private final Set<Integer> matchedRightIndices = new HashSet<>();
+        private int rightRowIndex;
 
         @Override
         public void open() throws IOException {
@@ -313,43 +350,90 @@ public class JoinOperator extends Operator {
             }
             leftKeyIndex = findColumnIndex(left.getOutputColumns(), condition.getLeftColumn(), true);
             rightKeyIndex = findColumnIndex(right.getOutputColumns(), condition.getRightColumn(), true);
+            // FULL OUTER JOIN: 物化所有右表行
+            if (joinType == JoinType.FULL) {
+                while (right.hasMore()) {
+                    allRightRows.add(right.nextRow());
+                }
+            }
             currentLeftRow = left.hasMore() ? left.nextRow() : null;
             currentLeftMatched = false;
+            rightRowIndex = 0;
         }
 
         @Override
         public Row next() throws IOException {
             while (currentLeftRow != null) {
-                if (currentRightRow == null) {
-                    // LEFT JOIN: if previous left row had no match, emit null-right
-                    if (joinType == JoinType.LEFT && !currentLeftMatched) {
-                        Row result = combineRowsWithNullRight(currentLeftRow);
+                // FULL OUTER JOIN: 从物化列表中取右行；否则从算子拉取
+                if (joinType == JoinType.FULL) {
+                    if (rightRowIndex >= allRightRows.size()) {
+                        // 扫描完所有右侧行，处理当前左侧行
+                        if ((joinType == JoinType.LEFT || joinType == JoinType.FULL) && !currentLeftMatched) {
+                            Row result = combineRowsWithNullRight(currentLeftRow);
+                            currentLeftRow = left.hasMore() ? left.nextRow() : null;
+                            currentLeftMatched = false;
+                            rightRowIndex = 0;
+                            return result;
+                        }
                         currentLeftRow = left.hasMore() ? left.nextRow() : null;
                         currentLeftMatched = false;
+                        rightRowIndex = 0;
+                        if (currentLeftRow == null) {
+                            break;
+                        }
+                        continue;
+                    }
+                    currentRightRow = allRightRows.get(rightRowIndex);
+                    rightRowIndex++;
+
+                    if (compare(currentLeftRow, currentRightRow)) {
+                        currentLeftMatched = true;
+                        matchedRightIndices.add(rightRowIndex - 1);
+                        return combineRows(currentLeftRow, currentRightRow);
+                    }
+                } else {
+                    if (currentRightRow == null) {
+                        // LEFT JOIN: if previous left row had no match, emit null-right
+                        if (joinType == JoinType.LEFT && !currentLeftMatched) {
+                            Row result = combineRowsWithNullRight(currentLeftRow);
+                            currentLeftRow = left.hasMore() ? left.nextRow() : null;
+                            currentLeftMatched = false;
+                            return result;
+                        }
+                        if (!right.hasMore()) {
+                            currentLeftRow = left.hasMore() ? left.nextRow() : null;
+                            currentLeftMatched = false;
+                            if (currentLeftRow == null) {
+                                return null;
+                            }
+                            right.reset();
+                            if (!right.hasMore()) {
+                                continue;
+                            }
+                        }
+                        currentRightRow = right.nextRow();
+                    }
+
+                    if (compare(currentLeftRow, currentRightRow)) {
+                        Row result = combineRows(currentLeftRow, currentRightRow);
+                        currentLeftMatched = true;
+                        currentRightRow = right.hasMore() ? right.nextRow() : null;
                         return result;
                     }
-                    if (!right.hasMore()) {
-                        currentLeftRow = left.hasMore() ? left.nextRow() : null;
-                        currentLeftMatched = false;
-                        if (currentLeftRow == null) {
-                            return null;
-                        }
-                        right.reset();
-                        if (!right.hasMore()) {
-                            continue;
-                        }
-                    }
-                    currentRightRow = right.nextRow();
-                }
-
-                if (compare(currentLeftRow, currentRightRow)) {
-                    Row result = combineRows(currentLeftRow, currentRightRow);
-                    currentLeftMatched = true;
                     currentRightRow = right.hasMore() ? right.nextRow() : null;
-                    return result;
                 }
-                currentRightRow = right.hasMore() ? right.nextRow() : null;
             }
+
+            // Phase 3: FULL OUTER JOIN — emit unmatched right rows with null left
+            if (joinType == JoinType.FULL) {
+                for (int i = 0; i < allRightRows.size(); i++) {
+                    if (!matchedRightIndices.contains(i)) {
+                        matchedRightIndices.add(i); // 标记已发送，避免重复
+                        return combineRowsWithNullLeft(allRightRows.get(i));
+                    }
+                }
+            }
+
             return null;
         }
 

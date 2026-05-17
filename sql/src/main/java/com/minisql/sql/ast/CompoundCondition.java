@@ -1,14 +1,16 @@
 package com.minisql.sql.ast;
 
-import com.minisql.sql.execution.Row;
-
 /**
- * 复合条件
+ * 复合条件（纯数据 AST 节点）。
+ *
+ * <p>用 AND / OR 连接两个子条件。
+ * 求值逻辑已迁移到
+ * {@link com.minisql.sql.execution.ConditionEvaluatorFactory#createCompound}。
  */
 public class CompoundCondition extends Condition {
-    private Condition left;
-    private Condition right;
-    private String operator;  // AND or OR
+    private final Condition left;
+    private final Condition right;
+    private final String operator;  // "AND" 或 "OR"
 
     public CompoundCondition(Condition left, Condition right, String operator) {
         this.left = left;
@@ -16,20 +18,15 @@ public class CompoundCondition extends Condition {
         this.operator = operator;
     }
 
-    @Override
-    public boolean evaluate(Row row) {
-        boolean leftResult = left.evaluate(row);
-        boolean rightResult = right.evaluate(row);
-
-        if ("AND".equals(operator)) {
-            return leftResult && rightResult;
-        } else {
-            return leftResult || rightResult;
-        }
+    public Condition getLeft() {
+        return left;
     }
 
-    // Getters
-    public Condition getLeft() { return left; }
-    public Condition getRight() { return right; }
-    public String getOperator() { return operator; }
+    public Condition getRight() {
+        return right;
+    }
+
+    public String getOperator() {
+        return operator;
+    }
 }

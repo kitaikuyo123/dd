@@ -33,8 +33,29 @@ public class ConditionSplitter {
         if (condition instanceof CompoundCondition) {
             return splitCompound((CompoundCondition) condition);
         }
-        // Unknown condition type -> cross table
+        if (condition instanceof NotCondition) {
+            return doSplit(((NotCondition) condition).getInner());
+        }
+        // 单列条件类型：根据列名限定符归入左/右表
+        if (condition instanceof BetweenCondition) {
+            return splitByColumn(((BetweenCondition) condition).getColumn(), condition);
+        }
+        if (condition instanceof InCondition) {
+            return splitByColumn(((InCondition) condition).getColumn(), condition);
+        }
+        if (condition instanceof IsNullCondition) {
+            return splitByColumn(((IsNullCondition) condition).getColumn(), condition);
+        }
+        // 子查询条件无法按表拆分，归入 cross
         return new SplitResult(null, null, condition);
+    }
+
+    /** 根据列名的表限定符将条件归入左表或右表 */
+    private SplitResult splitByColumn(String column, Condition condition) {
+        if (belongsToLeft(column)) return new SplitResult(condition, null, null);
+        if (belongsToRight(column)) return new SplitResult(null, condition, null);
+        // 未限定列名，默认归入左表
+        return new SplitResult(condition, null, null);
     }
 
     private SplitResult splitSimple(SimpleCondition sc) {

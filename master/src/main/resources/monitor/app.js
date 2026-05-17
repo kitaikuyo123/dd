@@ -362,7 +362,8 @@ const SqlConsole = {
 const DEMO_STEPS = [
   { id: "setup", label: "CREATE TABLE + INSERT", tag: "DDL / DML" },
   { id: "query", label: "SELECT · WHERE · ORDER BY · LIMIT · 聚合 · GROUP BY · UPDATE · DELETE", tag: "Query / DML" },
-  { id: "join", label: "JOIN (INNER + LEFT) · JOIN + 聚合 + 分组", tag: "Complex Query" },
+  { id: "join", label: "JOIN (INNER + LEFT + RIGHT + FULL) · JOIN + 聚合 + 分组", tag: "Complex Query" },
+  { id: "advanced", label: "DISTINCT · BETWEEN · IN · LIKE · IS NULL · NOT", tag: "Advanced SQL" },
   { id: "split", label: "Force Split → New Regions → Auto Rebalance", tag: "Region Split" },
   { id: "merge", label: "Force Merge → Adjacent Regions → Shrink", tag: "Region Merge" },
   { id: "failover", label: "Kill Random RS → Auto Failover", tag: "Fault Tolerance" },
@@ -415,9 +416,23 @@ const DEMO_SQL = {
   join: [
     "SELECT u.name, o.amount, o.status FROM demo_users u JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
     "SELECT u.name, o.amount, o.status FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
+    "SELECT u.name, o.amount, o.status FROM demo_users u RIGHT JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
+    "SELECT u.name, o.amount, o.status FROM demo_users u FULL JOIN demo_orders o ON u.id = o.user_id ORDER BY u.name;",
     "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total DESC;",
     "SELECT u.name, COUNT(o.id) AS orders, SUM(o.amount) AS total FROM demo_users u LEFT JOIN demo_orders o ON u.id = o.user_id GROUP BY u.name ORDER BY orders DESC, total DESC;",
     "SELECT u.name, o.amount, o.status FROM demo_users u JOIN demo_orders o ON u.id = o.user_id WHERE (u.age > 25 AND o.amount > 60) OR o.amount > 200 ORDER BY o.amount DESC;",
+  ].join("\n"),
+  advanced: [
+    "SELECT DISTINCT status FROM demo_orders ORDER BY status;",
+    "SELECT id, name, age FROM demo_users WHERE age BETWEEN 25 AND 35 ORDER BY age;",
+    "SELECT id, name, age FROM demo_users WHERE age NOT BETWEEN 25 AND 35 ORDER BY age;",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE status IN ('paid', 'shipped') ORDER BY id;",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE status NOT IN ('cancelled', 'pending') ORDER BY id;",
+    "SELECT id, name, age FROM demo_users WHERE name LIKE 'a%';",
+    "SELECT id, name, age FROM demo_users WHERE name LIKE '%e';",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE status IS NOT NULL ORDER BY id;",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE NOT status = 'cancelled' ORDER BY id;",
+    "SELECT id, user_id, amount, status FROM demo_orders WHERE amount > 100 AND status IN ('paid', 'shipped') ORDER BY amount DESC;",
   ].join("\n"),
   verify: "SELECT * FROM demo_users;",
 };
@@ -462,6 +477,8 @@ const DemoMode = {
           emit("fill-sql", DEMO_SQL.query);
         } else if (step.id === "join") {
           emit("fill-sql", DEMO_SQL.join);
+        } else if (step.id === "advanced") {
+          emit("fill-sql", DEMO_SQL.advanced);
         } else if (step.id === "split") {
           await postJson("/monitor/api/demo/force-split", { tableName: "demo_users" });
           setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 3000);

@@ -41,6 +41,9 @@ public class SelectStatement extends Statement {
     private Integer limit;
     private Integer offset;
 
+    // DISTINCT
+    private boolean distinct;
+
     @Override
     public StatementType getType() {
         return StatementType.SELECT;
@@ -84,6 +87,8 @@ public class SelectStatement extends Statement {
     public void setLimit(Integer limit) { this.limit = limit; }
     public Integer getOffset() { return offset; }
     public void setOffset(Integer offset) { this.offset = offset; }
+    public boolean isDistinct() { return distinct; }
+    public void setDistinct(boolean distinct) { this.distinct = distinct; }
 
     // Convenience methods for adding aggregates/aliases during parsing
     public void addAggregate(AggregateExpr expr) {
