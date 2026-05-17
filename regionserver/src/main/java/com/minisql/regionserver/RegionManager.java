@@ -255,6 +255,11 @@ public class RegionManager {
         return regionPrimaryStatus.getOrDefault(regionId, false);
     }
 
+    public boolean canServeReads(String regionId) {
+        if (!isRegionOpen(regionId)) return false;
+        return regionPrimaryStatus.containsKey(regionId);
+    }
+
     public void updateFencingToken(String regionId, long newToken) {
         AtomicLong token = regionFencingTokens.computeIfAbsent(regionId, k -> new AtomicLong(0));
         long oldToken = token.getAndSet(newToken);

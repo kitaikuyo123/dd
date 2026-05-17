@@ -107,8 +107,10 @@ public class JoinExecutor {
 
         com.minisql.sql.execution.Operator pipeline;
         if (joinType == JoinType.RIGHT) {
-            // RIGHT JOIN = swap sources + LEFT JOIN
-            pipeline = new JoinOperator(rightSource, leftSource, JoinType.LEFT, joinCond);
+            // RIGHT JOIN = swap sources + swap join condition + LEFT JOIN
+            JoinOperator.JoinCondition swappedCond = new JoinOperator.JoinCondition(
+                joinCond.getRightColumn(), joinCond.getLeftColumn(), joinCond.getOperator());
+            pipeline = new JoinOperator(rightSource, leftSource, JoinType.LEFT, swappedCond);
         } else {
             pipeline = new JoinOperator(leftSource, rightSource, joinType, joinCond);
         }

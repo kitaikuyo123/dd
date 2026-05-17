@@ -18,6 +18,7 @@ import com.minisql.sql.execution.Row;
 import com.minisql.sql.execution.operators.FilterOperator;
 import com.minisql.sql.execution.operators.ListSourceOperator;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +45,7 @@ public class ScanExecutor {
     private final MasterServiceGrpc.MasterServiceBlockingStub masterStub;
     private final Router router;
     private final long queryTimeoutSeconds;
+    private final List<String> replicaReadWarnings = java.util.Collections.synchronizedList(new ArrayList<>());
 
     public ScanExecutor(ExecutorService executor,
                         MasterServiceGrpc.MasterServiceBlockingStub masterStub,
@@ -62,11 +64,13 @@ public class ScanExecutor {
         private String tableName;
         private String serverHost;
         private int serverPort;
+        private List<Router.ServerAddress> replicaServers;
 
         public String getRegionId() { return regionId; }
         public String getTableName() { return tableName; }
         public String getServerHost() { return serverHost; }
         public int getServerPort() { return serverPort; }
+        public List<Router.ServerAddress> getReplicaServers() { return replicaServers; }
     }
 
     // ── 扫描入口（无排序分页） ──
@@ -118,7 +122,7 @@ public class ScanExecutor {
         return rows;
     }
 
-    // ── 单 Region 数据拉取 ──
+    // ── 单 Region 数据拉取（含 replica 回退） ──
 
     private List<com.minisql.common.model.Row> fetchRowsFromRegion(RegionLocation location,
                                                                      Condition whereCondition,
@@ -127,14 +131,72 @@ public class ScanExecutor {
                                                                      List<SelectStatement.OrderByElement> orderBy,
                                                                      int limit,
                                                                      int offset) throws SQLException {
-        ManagedChannel channel = GrpcChannelFactory.forAddress(location.serverHost, location.serverPort);
-        RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
-            RegionServerServiceGrpc.newBlockingStub(channel);
         Table schema = getTableSchema(location.tableName);
-        List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName,
-            whereClause, projectedQualifiers, orderBy, limit, offset);
-        List<com.minisql.common.model.Row> rows = RowAssembler.assemble(keyValues, schema);
-        return (whereCondition != null && whereClause == null) ? filterRows(rows, whereCondition) : rows;
+
+        Router.ServerAddress primaryAddr = new Router.ServerAddress(location.serverHost, location.serverPort);
+        List<Router.ServerAddress> servers = new ArrayList<>();
+        servers.add(primaryAddr);
+        if (location.replicaServers != null) {
+            for (Router.ServerAddress replica : location.replicaServers) {
+                if (!replica.equals(primaryAddr)) {
+                    servers.add(replica);
+                }
+            }
+        }
+
+        SQLException lastException = null;
+        for (int i = 0; i < servers.size(); i++) {
+            Router.ServerAddress server = servers.get(i);
+            try {
+                ManagedChannel channel = GrpcChannelFactory.forAddress(server.getHost(), server.getPort());
+                RegionServerServiceGrpc.RegionServerServiceBlockingStub stub =
+                    RegionServerServiceGrpc.newBlockingStub(channel);
+                List<KeyValue> keyValues = scanKeyValues(stub, location.regionId, location.tableName,
+                    whereClause, projectedQualifiers, orderBy, limit, offset);
+                List<com.minisql.common.model.Row> rows = RowAssembler.assemble(keyValues, schema);
+
+                if (i > 0) {
+                    String msg = String.format(
+                        "Stale read: region %s read from replica %s:%d (primary %s:%d unavailable)",
+                        location.regionId, server.getHost(), server.getPort(),
+                        location.serverHost, location.serverPort);
+                    replicaReadWarnings.add(msg);
+                    logger.warn(msg);
+                }
+
+                return (whereCondition != null && whereClause == null) ? filterRows(rows, whereCondition) : rows;
+            } catch (SQLException e) {
+                lastException = e;
+                if (isUnavailableError(e) && i < servers.size() - 1) {
+                    logger.info("Server {}:{} unavailable for region {}, trying next server",
+                        server.getHost(), server.getPort(), location.regionId);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw lastException != null ? lastException
+            : new SQLException("All servers failed for region: " + location.regionId);
+    }
+
+    public List<String> drainReplicaReadWarnings() {
+        synchronized (replicaReadWarnings) {
+            List<String> warnings = new ArrayList<>(replicaReadWarnings);
+            replicaReadWarnings.clear();
+            return warnings;
+        }
+    }
+
+    private boolean isUnavailableError(SQLException e) {
+        Throwable cause = e.getCause();
+        while (cause != null) {
+            if (cause instanceof io.grpc.StatusRuntimeException) {
+                Status.Code code = ((io.grpc.StatusRuntimeException) cause).getStatus().getCode();
+                return code == Status.Code.UNAVAILABLE || code == Status.Code.DEADLINE_EXCEEDED;
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 
     // ── gRPC ScanRequest 构建与执行 ──
@@ -238,6 +300,7 @@ public class ScanExecutor {
             loc.tableName = tableName;
             loc.serverHost = info.getPrimaryServer().getHost();
             loc.serverPort = info.getPrimaryServer().getPort();
+            loc.replicaServers = info.getReplicaServers();
             locations.add(loc);
             return locations;
         } catch (Exception e) {
@@ -259,6 +322,7 @@ public class ScanExecutor {
                 loc.tableName = tableName;
                 loc.serverHost = info.getPrimaryServer().getHost();
                 loc.serverPort = info.getPrimaryServer().getPort();
+                loc.replicaServers = info.getReplicaServers();
                 locations.add(loc);
             }
             return locations;

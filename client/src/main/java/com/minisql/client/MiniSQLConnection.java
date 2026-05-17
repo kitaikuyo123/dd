@@ -235,7 +235,21 @@ public class MiniSQLConnection implements Connection {
                         }
                     }
                 }
-                return convertToResultSet(rows, tableName, projectedColumns);
+                MiniSQLResultSet rs = (MiniSQLResultSet) convertToResultSet(rows, tableName, projectedColumns);
+
+                // 传递 replica 读 warning
+                List<String> warnings = parallelQueryExecutor.drainReplicaReadWarnings();
+                if (!warnings.isEmpty()) {
+                    java.sql.SQLWarning first = null;
+                    for (String msg : warnings) {
+                        java.sql.SQLWarning w = new java.sql.SQLWarning(msg);
+                        if (first == null) first = w;
+                        else first.setNextWarning(w);
+                    }
+                    rs.setWarning(first);
+                }
+
+                return rs;
             } else if (stmt instanceof com.minisql.sql.ast.ShowTablesStatement) {
                 List<String> tableNames = listTables();
                 return convertToTableListResultSet(tableNames);

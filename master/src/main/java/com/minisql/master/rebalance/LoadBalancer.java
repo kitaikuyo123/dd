@@ -323,17 +323,32 @@ public class LoadBalancer {
                                           ClusterManager.ServerInfo target,
                                           Set<String> excludedRegions) {
         for (String regionId : source.getRegionLoads().keySet()) {
-            if (excludedRegions.contains(regionId)
-                || target.getRegionLoads().containsKey(regionId)) {
+            if (excludedRegions.contains(regionId)) {
                 continue;
             }
             if (clusterManager == null) {
                 return regionId;
             }
             ServerId primary = clusterManager.getPrimaryServerForRegion(regionId);
-            if (primary != null && primary.equals(source.getServerId())) {
-                return regionId;
+            if (primary == null || !primary.equals(source.getServerId())) {
+                continue;
             }
+            // 如果目标已有 replica，需确认至少还有一个其他 RS 持有副本，
+            // 避免迁移后所有副本集中在同一台 RS 上，宕机即数据全灭。
+            if (target.getRegionLoads().containsKey(regionId)) {
+                int replicaHolders = 0;
+                for (ClusterManager.ServerInfo server : clusterManager.getActiveServers()) {
+                    if (!server.getServerId().equals(source.getServerId())
+                        && !server.getServerId().equals(target.getServerId())
+                        && server.getRegionLoads().containsKey(regionId)) {
+                        replicaHolders++;
+                    }
+                }
+                if (replicaHolders == 0) {
+                    continue;
+                }
+            }
+            return regionId;
         }
         return null;
     }

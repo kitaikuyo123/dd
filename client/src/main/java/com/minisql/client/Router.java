@@ -181,8 +181,26 @@ public class Router {
                             primaryServer = parseServerAddress(new String(primaryData, java.nio.charset.StandardCharsets.UTF_8));
                         }
 
+                        List<ServerAddress> replicaServers = new ArrayList<>();
+                        try {
+                            if (zkClient.exists(replicasPath)) {
+                                byte[] replicasData = zkClient.getData(replicasPath);
+                                String replicasStr = new String(replicasData, java.nio.charset.StandardCharsets.UTF_8);
+                                if (replicasStr != null && !replicasStr.isEmpty()) {
+                                    for (String addr : replicasStr.split(",")) {
+                                        ServerAddress replica = parseServerAddress(addr.trim());
+                                        if (replica != null) {
+                                            replicaServers.add(replica);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.warn("Failed to read replicas for region {}: {}", regionId, e.getMessage());
+                        }
+
                         if (primaryServer != null) {
-                            regions.add(new RegionRouteInfo(region, primaryServer));
+                            regions.add(new RegionRouteInfo(region, primaryServer, replicaServers));
                         }
                     }
                 } catch (Exception e) {
@@ -414,12 +432,20 @@ public class Router {
         private final byte[] startKey;
         private final byte[] endKey;
         private final ServerAddress primaryServer;
+        private final List<ServerAddress> replicaServers;
 
         public RegionRouteInfo(Region region, ServerAddress primaryServer) {
+            this(region, primaryServer, Collections.emptyList());
+        }
+
+        public RegionRouteInfo(Region region, ServerAddress primaryServer, List<ServerAddress> replicaServers) {
             this.regionId = region.getRegionId();
             this.startKey = region.getStartKey();
             this.endKey = region.getEndKey();
             this.primaryServer = primaryServer;
+            this.replicaServers = replicaServers != null
+                ? Collections.unmodifiableList(new ArrayList<>(replicaServers))
+                : Collections.emptyList();
         }
 
         public RegionRouteInfo(Region region, ServerId primaryServer) {
@@ -440,6 +466,10 @@ public class Router {
 
         public ServerAddress getPrimaryServer() {
             return primaryServer;
+        }
+
+        public List<ServerAddress> getReplicaServers() {
+            return replicaServers;
         }
     }
 

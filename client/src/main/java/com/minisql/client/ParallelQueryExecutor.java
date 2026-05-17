@@ -56,6 +56,10 @@ public class ParallelQueryExecutor {
         this(masterStub, queryTimeoutSeconds, null);
     }
 
+    public List<String> drainReplicaReadWarnings() {
+        return scanExecutor.drainReplicaReadWarnings();
+    }
+
     // ── 查询入口 ──
 
     public List<Row> executeQuery(SelectStatement ast, String rawSql) throws SQLException {
