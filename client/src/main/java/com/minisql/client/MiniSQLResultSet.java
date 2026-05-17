@@ -24,6 +24,7 @@ public class MiniSQLResultSet implements ResultSet {
     private List<String> columnNames = new ArrayList<>();
     private List<String> columnTypes = new ArrayList<>();
     private String tableName;
+    private SQLWarning warning;
 
     // 添加结果行
     public void addRow(Row row) {
@@ -40,6 +41,10 @@ public class MiniSQLResultSet implements ResultSet {
 
     public void setColumnTypes(List<String> types) {
         this.columnTypes = types;
+    }
+
+    public void setWarning(SQLWarning warning) {
+        this.warning = warning;
     }
 
     @Override
@@ -209,9 +214,9 @@ public class MiniSQLResultSet implements ResultSet {
     @Override
     public InputStream getBinaryStream(String columnLabel) throws SQLException { return null; }
     @Override
-    public SQLWarning getWarnings() throws SQLException { return null; }
+    public SQLWarning getWarnings() throws SQLException { return warning; }
     @Override
-    public void clearWarnings() throws SQLException {}
+    public void clearWarnings() throws SQLException { warning = null; }
     @Override
     public String getCursorName() throws SQLException { return null; }
     @Override

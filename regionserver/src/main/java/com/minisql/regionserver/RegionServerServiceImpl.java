@@ -148,8 +148,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     public void get(RegionServerProto.GetRequest request, StreamObserver<RegionServerProto.GetResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
-            if (!regionServer.getRegionManager().isPrimary(regionId)) {
-                throw new IOException("Region is not primary on this server: " + regionId);
+            if (!regionServer.getRegionManager().canServeReads(regionId)) {
+                throw new IOException("Region cannot serve reads on this server: " + regionId);
             }
             byte[] rowKey = request.getRowKey().toByteArray();
             RegionStorage storage = regionServer.getRegionManager().getRegionStorage(regionId);
@@ -186,8 +186,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
     public void scan(RegionServerProto.ScanRequest request, StreamObserver<RegionServerProto.ScanResponse> responseObserver) {
         try {
             String regionId = request.getRegionId();
-            if (!regionServer.getRegionManager().isPrimary(regionId)) {
-                throw new IOException("Region is not primary on this server: " + regionId);
+            if (!regionServer.getRegionManager().canServeReads(regionId)) {
+                throw new IOException("Region cannot serve reads on this server: " + regionId);
             }
             // proto3 中 bytes 字段没有 hasXxx() 方法，需要通过 isEmpty() 判断
             byte[] startKey = !request.getStartKey().isEmpty() ? request.getStartKey().toByteArray() : null;
@@ -565,7 +565,11 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             @Override
             public void onError(Throwable t) {
-                logger.error("StreamSnapshot error", t);
+                if (io.grpc.Status.fromThrowable(t).getCode() == io.grpc.Status.Code.CANCELLED) {
+                    logger.info("StreamSnapshot cancelled by client (region={})", regionId);
+                } else {
+                    logger.error("StreamSnapshot error", t);
+                }
             }
 
             @Override
