@@ -447,14 +447,21 @@ public class MiniSQLConnection implements Connection {
         List<String> qualifiers = schema.getColumns().stream()
                 .map(com.minisql.common.model.Column::getName)
                 .collect(Collectors.toList());
-        RegionServerProto.DeleteRequest deleteRequest = RegionServerProto.DeleteRequest.newBuilder()
+        long timestamp = System.currentTimeMillis();
+        RegionServerProto.PutRequest.Builder deleteRequest = RegionServerProto.PutRequest.newBuilder()
                 .setRegionId(target.regionId)
-                .setRowKey(com.google.protobuf.ByteString.copyFrom(rowKey))
-                .addAllQualifiers(qualifiers)
-                .setTimestamp(System.currentTimeMillis())
-                .setDeleteAllVersions(true)
-                .build();
-        RegionServerProto.DeleteResponse response = target.stub.delete(deleteRequest);
+                .setDurable(true);
+        for (String qualifier : qualifiers) {
+            deleteRequest.addKeyValues(CommonProto.KeyValue.newBuilder()
+                    .setRowKey(com.google.protobuf.ByteString.copyFrom(rowKey))
+                    .setColumnFamily("")
+                    .setQualifier(qualifier)
+                    .setTimestamp(timestamp)
+                    .setValue(com.google.protobuf.ByteString.EMPTY)
+                    .setType(CommonProto.KeyValueType.DELETE)
+                    .build());
+        }
+        RegionServerProto.PutResponse response = target.stub.put(deleteRequest.build());
         if (!response.getStatus().getSuccess()) {
             throw new SQLException("Delete failed: " + response.getStatus().getMessage());
         }
