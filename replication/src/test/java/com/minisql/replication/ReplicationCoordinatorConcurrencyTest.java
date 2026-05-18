@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -206,7 +207,7 @@ class ReplicationCoordinatorConcurrencyTest {
                 });
             }
 
-            executor.invokeAll(tasks.stream().map(Executors::callable).toList());
+            executor.invokeAll(tasks.stream().map(Executors::callable).collect(Collectors.toList()));
             executor.shutdown();
             assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS));
 
