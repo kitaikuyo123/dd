@@ -323,10 +323,7 @@ public class FailoverCoordinator {
             updateMetadataPrimary(regionId, newPrimary.getServerId());
             clusterManager.updateRegionAssignment(regionId, newPrimary.getServerId());
 
-            // 5. 更新 ZooKeeper
-            updateZooKeeper(regionId, newPrimary.getServerId());
-
-            // 6. 通知相关组件
+            // 5. 通知相关组件
             notifyFailoverComplete(regionId, newPrimary);
 
             logger.info("Failover completed for region: {} new primary: {} (took {}ms)",
@@ -405,15 +402,6 @@ public class FailoverCoordinator {
     }
 
     /**
-     * 更新 ZooKeeper 中的主副本信息
-     */
-    private void updateZooKeeper(String regionId, ServerId newPrimary) {
-        // The authoritative primary path now lives under /minisql/tables/... and is
-        // updated through MetadataManager.registerRegionForTable().
-        updateMetadataPrimary(regionId, newPrimary);
-    }
-
-    /**
      * 通知故障转移完成
      */
     private void updateMetadataPrimary(String regionId, ServerId newPrimary) {
@@ -481,7 +469,6 @@ public class FailoverCoordinator {
             replicaMonitor.promoteToPrimary(regionId, targetPrimary);
             updateMetadataPrimary(regionId, targetPrimary);
             clusterManager.updateRegionAssignment(regionId, targetPrimary);
-            updateZooKeeper(regionId, targetPrimary);
 
             FailoverState state = failoverStates.computeIfAbsent(regionId, k -> new FailoverState());
             state.recordSuccess();

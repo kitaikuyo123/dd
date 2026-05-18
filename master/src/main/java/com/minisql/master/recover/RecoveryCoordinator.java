@@ -301,6 +301,7 @@ public class RecoveryCoordinator {
         }
 
         clusterManager.assignRegionToServer(region.getRegionId(), primary);
+        metadataManager.registerRegionForTable(region, primary);
 
         IOException lastException = null;
         for (int attempt = 1; attempt <= 5; attempt++) {
@@ -607,11 +608,14 @@ public class RecoveryCoordinator {
             for (ServerId replica : removed) {
                 try {
                     if (!commandClient.closeRegion(replica, regionId, false, false).getStatus().getSuccess()) {
-                        logger.warn("Trim closeRegion returned failure for region {} on {}", regionId, replica);
+                        logger.warn("Trim closeRegion returned failure for region {} on {} - keeping replica in metadata",
+                            regionId, replica);
+                        continue;
                     }
                 } catch (Exception e) {
-                    logger.warn("Failed to close trimmed replica region {} on {}: {}",
+                    logger.warn("Failed to close trimmed replica region {} on {} - keeping replica in metadata: {}",
                         regionId, replica, e.getMessage());
+                    continue;
                 }
                 region.removeReplica(replica);
                 clusterManager.removeReplica(regionId, replica);

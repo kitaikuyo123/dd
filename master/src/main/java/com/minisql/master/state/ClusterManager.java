@@ -191,6 +191,10 @@ public class ClusterManager {
         return result;
     }
 
+    /**
+     * 设置 region 的 primary server（仅修改内存）。
+     * 调用方必须随后调用 metadataManager.registerRegionForTable() 持久化到 ZK。
+     */
     public void assignRegionToServer(String regionId, ServerId serverId) {
         Region region = ensureRegion(regionId);
         region.setPrimary(serverId);
@@ -229,6 +233,10 @@ public class ClusterManager {
         logger.info("Region assignment updated: {} -> {}", regionId, serverId);
     }
 
+    /**
+     * 选择目标 server 并设置 primary（仅修改内存）。
+     * 调用方必须随后调用 metadataManager.registerRegionForTable() 持久化到 ZK。
+     */
     public ServerId assignRegion(Region region) {
         if (metadataManager != null && metadataManager.getRegion(region.getRegionId()) == null) {
             metadataManager.registerRegion(region);
@@ -242,6 +250,10 @@ public class ClusterManager {
         return targetServer;
     }
 
+    /**
+     * 重新选择 server 并设置 primary（仅修改内存）。
+     * 调用方必须随后调用 metadataManager.registerRegionForTable() 持久化到 ZK。
+     */
     public ServerId reassignRegion(String regionId) {
         Region region = requireRegion(regionId);
         if (region == null) {

@@ -258,12 +258,7 @@ public class MetadataManager {
         // 先在内存中注册
         regions.put(regionId, region);
 
-        // 设置主副本到 Region 对象，这样 getTableRegions() 才能获取到 MySQL 配置
-        if (primaryServer != null) {
-            region.setPrimary(primaryServer);
-            region.addReplica(primaryServer);
-        }
-
+        // 注意：调用方应在此之前自行调用 region.setPrimary() / region.addReplica()
         if (zkClient == null) {
             logger.warn("ZooKeeper client not initialized, region registered in memory only");
             return;
@@ -291,6 +286,50 @@ public class MetadataManager {
             upsertPersistentNode(replicasPath, replicasData);
 
             logger.info("Region {} registered for table {}", regionId, tableName);
+        } catch (Exception e) {
+            logger.error("Failed to persist region for table to ZK: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 注册 Region 到 ZK，允许 primary 为 null（此时删除 /primary 节点）。
+     * 用于 RS 宕机后 primary 被清除但尚未选出新 primary 的场景。
+     */
+    public void registerRegionForTableWithNullablePrimary(Region region, ServerId primaryServer) {
+        String tableName = region.getTableName();
+        String regionId = region.getRegionId();
+
+        regions.put(regionId, region);
+
+        if (zkClient == null) {
+            logger.warn("ZooKeeper client not initialized, region registered in memory only");
+            return;
+        }
+
+        try {
+            String tablePath = TABLES_BASE + "/" + tableName;
+            String regionsPath = tablePath + "/regions";
+            String regionPath = regionsPath + "/" + regionId;
+            String primaryPath = regionPath + "/primary";
+            String replicasPath = regionPath + "/replicas";
+
+            ensurePersistentPath(tablePath);
+            ensurePersistentPath(regionsPath);
+            upsertPersistentNode(regionPath, serializeRegion(region));
+
+            if (primaryServer != null) {
+                String serverAddress = primaryServer.getHost() + ":" + primaryServer.getPort();
+                upsertPersistentNode(primaryPath, serverAddress.getBytes(StandardCharsets.UTF_8));
+            } else if (zkClient.exists(primaryPath)) {
+                zkClient.delete(primaryPath);
+                logger.info("Cleared primary for region {} (server failed)", regionId);
+            }
+
+            byte[] replicasData = encodeReplicas(region.getReplicas()).getBytes(StandardCharsets.UTF_8);
+            upsertPersistentNode(replicasPath, replicasData);
+
+            logger.info("Region {} registered (primary={})", regionId,
+                primaryServer != null ? primaryServer : "null");
         } catch (Exception e) {
             logger.error("Failed to persist region for table to ZK: {}", e.getMessage(), e);
         }

@@ -559,11 +559,13 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
         if (primaryFailed && failedServer.equals(region.getPrimary())) {
             region.setPrimary(null);
-            return;
         }
 
+        // 持久化到 ZK：无论 primary 是否为 null 都要更新 replicas
         if (region.getPrimary() != null) {
             metadataManager.registerRegionForTable(region, region.getPrimary());
+        } else {
+            metadataManager.registerRegionForTableWithNullablePrimary(region, null);
         }
     }
 
@@ -1077,6 +1079,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     targetServers.addAll(region.getReplicas());
                 }
                 for (ServerId serverId : targetServers) {
+                    if (!clusterManager.isServerActive(serverId)) {
+                        logger.info("Skipping close region {} on dead server {}", region.getRegionId(), serverId);
+                        continue;
+                    }
                     if (!notifyServerCloseRegionSync(serverId, region.getRegionId(), true)) {
                         closeFailures.add(region.getRegionId() + "@" + serverId.getServerName());
                     }

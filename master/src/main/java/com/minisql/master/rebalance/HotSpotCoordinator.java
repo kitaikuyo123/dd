@@ -499,12 +499,8 @@ public class HotSpotCoordinator {
         if (recoveryCoordinator != null) {
             recoveryCoordinator.setDesiredReplicaCount(regionId, targetReadReplicaCount);
         }
-        Region region = metadataManager.getRegion(regionId);
-        if (region != null) {
-            region.addReplica(targetServerId);
-            metadataManager.registerRegionForTable(region, region.getPrimary());
-        }
-        clusterManager.addReplica(regionId, targetServerId);
+        // ZK 写入由 RecoveryCoordinator.performRecovery() 在 bootstrap 成功后通过
+        // ensureReplicaRegistered + markReplicaReady 完成，此处不预写
         recoveryCoordinator.bootstrapReplica(regionId, targetServerId);
     }
 
