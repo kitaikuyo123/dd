@@ -327,6 +327,9 @@ h2 { font-size: 18px; font-weight: 700; color: var(--text-primary); }
               stroke-dasharray var(--transition-base), opacity var(--transition-slow);
 }
 .node-rect.master { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+.node-rect.leader { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+.node-rect.standby { fill: rgba(100, 116, 139, 0.08); stroke: rgba(100, 116, 139, 0.5); stroke-width: 2; stroke-dasharray: 6 4; }
+.standby-text { fill: var(--text-tertiary); }
 .node-rect.online { stroke: var(--success); stroke-dasharray: none; }
 .node-rect.warning {
   stroke: var(--danger);
@@ -355,6 +358,8 @@ h2 { font-size: 18px; font-weight: 700; color: var(--text-primary); }
 .status-dot.online { fill: var(--success); filter: drop-shadow(0 0 4px rgba(34,197,94,0.6)); }
 .status-dot.warning { fill: var(--danger); filter: drop-shadow(0 0 4px rgba(239,68,68,0.6)); animation: dot-warning-pulse 1.5s ease-in-out infinite; }
 .status-dot.offline { fill: var(--text-tertiary); opacity: 0.5; filter: none; }
+.status-dot.leader { fill: var(--accent); filter: drop-shadow(0 0 4px rgba(99,102,241,0.6)); }
+.status-dot.standby { fill: var(--text-tertiary); opacity: 0.5; }
 
 @keyframes node-warning-pulse {
   0%, 100% { stroke-opacity: 1; }

@@ -1,5 +1,6 @@
 package com.minisql.master.monitoring;
 
+import com.minisql.common.Constants;
 import com.minisql.common.model.Region;
 import com.minisql.common.model.ReplicaInfo;
 import com.minisql.common.model.ServerId;
@@ -10,6 +11,7 @@ import com.minisql.master.state.ReplicaLifecycleManager;
 import com.minisql.master.state.ReplicaMonitor;
 import com.minisql.master.rebalance.HotSpotCoordinator;
 import com.minisql.master.rebalance.LoadBalancer;
+import com.minisql.zookeeper.ZkClient;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -49,6 +51,9 @@ public class MonitoringService {
     private final ClusterEventTimeline eventTimeline;
     private final LoadBalancer.LoadCalculator displayLoadCalculator;
     private volatile HotSpotCoordinator hotSpotCoordinator;
+    private volatile ServerId localMasterId;
+    private volatile boolean localIsLeader;
+    private volatile ZkClient zkClient;
 
     public MonitoringService(ClusterManager clusterManager,
                              MetadataManager metadataManager,
@@ -66,6 +71,90 @@ public class MonitoringService {
 
     public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
         this.hotSpotCoordinator = hotSpotCoordinator;
+    }
+
+    public void setLocalMasterInfo(ServerId masterId, boolean isLeader) {
+        this.localMasterId = masterId;
+        this.localIsLeader = isLeader;
+    }
+
+    public void setZkClient(ZkClient zkClient) {
+        this.zkClient = zkClient;
+    }
+
+    public List<Map<String, Object>> masters() {
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        // Read leader address from ZK
+        String leaderAddr = null;
+        if (zkClient != null) {
+            try {
+                byte[] data = zkClient.getData(Constants.ZK_MASTER_LEADER_PATH);
+                if (data != null) {
+                    leaderAddr = com.minisql.zookeeper.ZkPayloads.decodeLeaderAddress(data);
+                }
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+
+        // Read all master participants from election path
+        if (zkClient != null) {
+            try {
+                java.util.List<String> children = zkClient.getChildren(Constants.ZK_MASTER_ELECTION_PATH);
+                for (String child : children) {
+                    try {
+                        byte[] data = zkClient.getData(Constants.ZK_MASTER_ELECTION_PATH + "/" + child);
+                        if (data == null || data.length == 0) continue;
+                        String participantId = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+                        // Participant ID format: host:port@startTime
+                        String addr = participantId;
+                        int atIdx = addr.indexOf('@');
+                        if (atIdx > 0) {
+                            addr = addr.substring(0, atIdx);
+                        }
+                        int colonIdx = addr.lastIndexOf(':');
+                        if (colonIdx <= 0) continue;
+                        String host = addr.substring(0, colonIdx);
+                        int port;
+                        try {
+                            port = Integer.parseInt(addr.substring(colonIdx + 1));
+                        } catch (NumberFormatException e) {
+                            continue;
+                        }
+
+                        boolean isLeader = addr.equals(leaderAddr);
+                        Map<String, Object> entry = new HashMap<>();
+                        entry.put("serverId", host + ":" + port);
+                        entry.put("name", "Master :" + port);
+                        entry.put("leader", isLeader);
+                        entry.put("status", isLeader ? "leader" : "standby");
+                        result.add(entry);
+                    } catch (Exception ignored) {
+                        // skip unreadable node
+                    }
+                }
+            } catch (Exception e) {
+                // fallback to local info only
+            }
+        }
+
+        if (result.isEmpty() && localMasterId != null) {
+            Map<String, Object> self = new HashMap<>();
+            self.put("serverId", localMasterId.getHost() + ":" + localMasterId.getPort());
+            self.put("name", "Master :" + localMasterId.getPort());
+            self.put("leader", localIsLeader);
+            self.put("status", localIsLeader ? "leader" : "standby");
+            result.add(self);
+        }
+
+        result.sort((a, b) -> {
+            boolean aLeader = Boolean.TRUE.equals(a.get("leader"));
+            boolean bLeader = Boolean.TRUE.equals(b.get("leader"));
+            if (aLeader != bLeader) return aLeader ? -1 : 1;
+            return String.valueOf(a.get("serverId")).compareTo(String.valueOf(b.get("serverId")));
+        });
+        return result;
     }
 
     public void recordSqlMetric(String sqlType, String tableName, boolean success, long latencyMs,
@@ -494,6 +583,7 @@ public class MonitoringService {
         Map<String, Object> result = new HashMap<>();
         result.put("overview", overview());
         result.put("servers", servers());
+        result.put("masters", masters());
         result.put("timestamp", System.currentTimeMillis());
         return result;
     }

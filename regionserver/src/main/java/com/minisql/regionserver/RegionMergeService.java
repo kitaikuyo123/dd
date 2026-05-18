@@ -184,8 +184,8 @@ public class RegionMergeService {
 
             // 5. 关闭旧 Region
             logger.info("Closing old regions: {} and {}", leftRegionId, rightRegionId);
-            regionManager.closeRegion(leftRegionId, true);
-            regionManager.closeRegion(rightRegionId, true);
+            regionManager.closeRegion(leftRegionId, true, true);
+            regionManager.closeRegion(rightRegionId, true, true);
 
             // 6. 打开新 Region
             regionManager.registerOpenedRegion(mergedRegion, mergedStorage);
@@ -222,10 +222,8 @@ public class RegionMergeService {
             // 1. 如果新 Region 已创建但未完成，删除它
             if (checkpoint.mergedStorage != null) {
                 try {
-                    logger.info("Dropping merged table: kv_store_{}", checkpoint.mergedRegionId);
-                    checkpoint.mergedStorage.close();
-                    // 注意：这里不删除表，保留用于故障恢复
-                    logger.info("Merged storage closed (table preserved for recovery)");
+                    logger.info("Dropping merged storage data for region: {}", checkpoint.mergedRegionId);
+                    checkpoint.mergedStorage.dropData();
                 } catch (Exception e) {
                     logger.warn("Error closing merged storage: {}", e.getMessage());
                 }

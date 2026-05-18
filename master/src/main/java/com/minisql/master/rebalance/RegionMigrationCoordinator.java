@@ -151,7 +151,7 @@ public class RegionMigrationCoordinator {
             targetPromoted = true;
 
             updateMigrationState(migrationStatus, MigrationState.CLOSING_SOURCE, "Closing source region");
-            boolean closed = notifyServerCloseRegionSync(sourceServer, regionId, false);
+            boolean closed = notifyServerCloseRegionSync(sourceServer, regionId, true);
             if (!closed) {
                 failMigrationRequiresManualIntervention(
                     migrationStatus,

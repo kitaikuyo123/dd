@@ -77,6 +77,9 @@ function createSseConnection(state) {
           state.servers.splice(0, state.servers.length, ...d.servers);
           console.log("[SSE] servers updated:", d.servers.map(s => s.serverId));
         }
+        if (d.masters) {
+          state.masters.splice(0, state.masters.length, ...d.masters);
+        }
         state.lastUpdated = formatTime(d.timestamp);
         state.connected = true;
       } catch (_) {}
@@ -146,17 +149,19 @@ const OverviewCards = {
 };
 
 const ClusterTopology = {
-  props: ["servers"],
+  props: ["servers", "masters"],
   template: `
     <section class="panel" aria-label="Cluster topology">
       <div class="panel-header"><h2>Cluster Topology</h2></div>
       <svg :viewBox="'0 0 ' + width + ' ' + height" class="topology-svg" role="img" aria-label="Cluster topology diagram">
-        <g class="master-node" :transform="'translate(' + (width/2) + ',50)'">
-          <rect x="-55" y="-22" width="110" height="44" rx="10" class="node-rect master" />
-          <text text-anchor="middle" y="5" class="node-text">Master</text>
+        <g v-for="(m, i) in masterPositions" :key="'m'+i" :transform="'translate(' + m.x + ',50)'">
+          <rect x="-70" y="-22" width="140" height="44" rx="10" :class="['node-rect', m.status]" />
+          <circle cx="-50" cy="0" r="5" :class="['status-dot', m.status]" />
+          <text x="5" text-anchor="middle" y="5" :class="['node-text', m.status === 'standby' ? 'standby-text' : '']">{{ m.name }}</text>
+          <text x="0" text-anchor="middle" y="-28" class="node-label">{{ m.status === 'leader' ? 'LEADER' : 'STANDBY' }}</text>
         </g>
         <line v-for="(s, i) in positions" :key="'l'+i"
-              :x1="width/2" y1="72" :x2="s.x" :y2="s.y - 22" :class="['topology-link', s.status || 'online']" />
+              :x1="leaderX" :y1="72" :x2="s.x" :y2="s.y - 22" :class="['topology-link', s.status || 'online']" />
         <g v-for="(s, i) in positions" :key="'s'+i" :transform="'translate(' + s.x + ',' + s.y + ')'">
           <rect x="-65" y="-22" width="130" height="44" rx="10" :class="['node-rect', s.status || 'online']" />
           <circle cx="-45" cy="0" r="5" :class="['status-dot', s.status || 'online']" />
@@ -164,6 +169,7 @@ const ClusterTopology = {
         </g>
       </svg>
       <div class="topology-stats">
+        <span>Masters: <b>{{ (masters || []).length }}</b></span>
         <span>Total: <b>{{ (servers || []).length }}</b></span>
         <span>Online: <b>{{ onlineCount }}</b></span>
         <span>Warning: <b>{{ warningCount }}</b></span>
@@ -173,6 +179,28 @@ const ClusterTopology = {
   `,
   computed: {
     width() { return 600; },
+    masterPositions() {
+      const list = this.masters || [];
+      if (list.length === 0) return [{ x: this.width / 2, name: 'Master', status: 'leader' }];
+      const spacing = 160;
+      const totalW = (list.length - 1) * spacing;
+      const startX = (this.width - totalW) / 2;
+      return list.map((m, i) => ({
+        ...m,
+        x: startX + i * spacing,
+      }));
+    },
+    leaderX() {
+      const leader = (this.masters || []).find(m => m.status === 'leader');
+      if (leader) {
+        const idx = (this.masters || []).indexOf(leader);
+        const spacing = 160;
+        const totalW = ((this.masters || []).length - 1) * spacing;
+        const startX = (this.width - totalW) / 2;
+        return startX + idx * spacing;
+      }
+      return this.width / 2;
+    },
     height() {
       const n = (this.servers || []).length;
       return Math.max(160, 80 + Math.ceil(n / 3) * 90 + 40);
@@ -366,6 +394,7 @@ const DEMO_STEPS = [
   { id: "advanced", label: "DISTINCT · BETWEEN · IN · LIKE · IS NULL · NOT", tag: "Advanced SQL" },
   { id: "split", label: "Force Split → New Regions → Auto Rebalance", tag: "Region Split" },
   { id: "merge", label: "Force Merge → Adjacent Regions → Shrink", tag: "Region Merge" },
+  { id: "backup-master", label: "Start Backup Master → Dual Master Topology", tag: "Master HA" },
   { id: "failover", label: "Kill Random RS → Auto Failover", tag: "Fault Tolerance" },
   { id: "recover", label: "Restart RS → Data Catch-up", tag: "Recovery" },
   { id: "scaleout", label: "Add New RS-4 Node", tag: "Cluster Scaling" },
@@ -485,6 +514,9 @@ const DemoMode = {
         } else if (step.id === "merge") {
           await postJson("/monitor/api/demo/force-merge", { tableName: "demo_users" });
           setTimeout(() => emit("fill-sql", DEMO_SQL.verify), 3000);
+        } else if (step.id === "backup-master") {
+          await postJson("/monitor/api/demo/start-backup-master");
+          await new Promise(r => setTimeout(r, 5000));
         } else if (step.id === "failover") {
           // 随机选一个 RS 实例杀掉
           const instance = Math.floor(Math.random() * 3) + 1;
@@ -528,6 +560,7 @@ createApp({
       overview: {},
       sqlSummary: {},
       servers: [],
+      masters: [],
       tables: [],
       regions: [],
       regionReplicas: [],
@@ -663,7 +696,7 @@ createApp({
       <demo-mode v-if="demoOpen" @fill-sql="fillSql" />
       <div class="dashboard-content">
         <overview-cards :overview="state.overview" />
-        <cluster-topology :servers="state.servers" />
+        <cluster-topology :servers="state.servers" :masters="state.masters" />
         <sql-panel :summary="state.sqlSummary" :sql-window="state.sqlWindow" @change-window="changeSqlWindow" />
         <sql-console ref="sqlConsole" />
         <section class="grid two">

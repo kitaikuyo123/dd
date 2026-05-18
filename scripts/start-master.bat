@@ -9,6 +9,9 @@ set "SKIP_COMPILE=0"
 
 if /I "%~1"=="--skip-compile" (
     set "SKIP_COMPILE=1"
+) else if not "%~1"=="" (
+    set "MASTER_CONFIG=%PROJECT_ROOT%\master\src\main\resources\%~1"
+    if /I "%~2"=="--skip-compile" set "SKIP_COMPILE=1"
 )
 
 call :check_java || exit /b 1

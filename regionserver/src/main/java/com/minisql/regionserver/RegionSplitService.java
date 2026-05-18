@@ -171,7 +171,7 @@ public class RegionSplitService {
 
         // 5. 关闭旧 Region（不删除表，用于回滚）
         logger.info("Closing old region: {}", regionId);
-        regionManager.closeRegion(regionId, true);
+        regionManager.closeRegion(regionId, true, true);
         parentRegionClosed = true;
 
         // 6. 注册并打开新 Region

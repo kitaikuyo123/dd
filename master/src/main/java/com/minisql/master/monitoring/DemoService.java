@@ -212,6 +212,31 @@ public class DemoService {
         return result;
     }
 
+    /** 启动备份 Master */
+    public Map<String, Object> startBackupMaster() {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            String scriptPath = projectRoot + File.separator + "scripts" + File.separator + "start-master.bat";
+            File scriptFile = new File(scriptPath);
+            if (!scriptFile.exists()) {
+                result.put("success", false);
+                result.put("error", "Script not found: " + scriptPath + " (projectRoot=" + projectRoot + ")");
+                return result;
+            }
+            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start",
+                "\"MiniSQL Master-Backup\"", scriptPath, "master2.properties", "--skip-compile");
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            result.put("success", true);
+            result.put("message", "Backup Master starting on port 16001 (monitor on 16011)");
+            result.put("scriptPath", scriptPath);
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
     /** 触发负载均衡 */
     public Map<String, Object> triggerBalance() {
         Map<String, Object> result = new HashMap<>();

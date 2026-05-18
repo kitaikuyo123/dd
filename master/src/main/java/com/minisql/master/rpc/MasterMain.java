@@ -265,6 +265,8 @@ public class MasterMain {
         recoveryCoordinator.start();
 
         monitoringService = new MonitoringService(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager);
+        monitoringService.setLocalMasterInfo(masterServerId, false);
+        monitoringService.setZkClient(zkClient);
         replicaMonitor.registerCallback(monitoringService.replicaEventCallback());
         failoverCoordinator.setMonitoringService(monitoringService);
         recoveryCoordinator.setMonitoringService(monitoringService);
@@ -328,12 +330,13 @@ public class MasterMain {
             .start();
 
         logger.info("gRPC server started on port {}", port);
-        startMonitorServer(host);
+        startMonitorServer(host, port);
     }
 
-    private void startMonitorServer(String host) throws IOException {
+    private void startMonitorServer(String host, int masterPort) throws IOException {
         String monitorHost = System.getProperty("minisql.monitor.host", host);
-        int monitorPort = Integer.parseInt(System.getProperty("minisql.monitor.port", "16010"));
+        int defaultMonitorPort = masterPort + 10;
+        int monitorPort = Integer.parseInt(System.getProperty("minisql.monitor.port", String.valueOf(defaultMonitorPort)));
         SqlConsoleService sqlConsoleService = zkClient == null ? null : new SqlConsoleService(zkClient.getConnectString());
         monitorHttpServer = new MonitorHttpServer(monitoringService, sqlConsoleService);
         monitorHttpServer.setDemoService(new com.minisql.master.monitoring.DemoService(
@@ -352,6 +355,9 @@ public class MasterMain {
             public void onLeadershipChange(boolean isLeader) {
                 if (serviceImpl != null) {
                     serviceImpl.setLeader(isLeader);
+                }
+                if (monitoringService != null) {
+                    monitoringService.setLocalMasterInfo(masterServerId, isLeader);
                 }
                 if (isLeader) {
                     try {

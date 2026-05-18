@@ -385,7 +385,7 @@ public class RegionSplitCoordinator {
         // Phase 2: close on source
         try {
             RegionServerProto.CloseRegionResponse closeResp =
-                commandClient.closeRegion(sourceServer, regionId, true, false);
+                commandClient.closeRegion(sourceServer, regionId, true, true);
             if (!closeResp.getStatus().getSuccess()) {
                 logger.warn("Failed to close region {} on source {} after target opened; " +
                     "region now exists on both servers, manual cleanup may be needed: {}",

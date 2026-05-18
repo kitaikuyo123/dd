@@ -103,6 +103,7 @@ public class MonitorHttpServer {
         httpServer.createContext("/monitor/api/demo/force-split", this::handleDemoForceSplit);
         httpServer.createContext("/monitor/api/demo/force-merge", this::handleDemoForceMerge);
         httpServer.createContext("/monitor/api/demo/sql", this::handleDemoSql);
+        httpServer.createContext("/monitor/api/demo/start-backup-master", this::handleDemoStartBackupMaster);
 
         httpServer.setExecutor(Executors.newCachedThreadPool());
         httpServer.start();
@@ -295,6 +296,11 @@ public class MonitorHttpServer {
             sql = new String(is.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
         writeJson(exchange, demoService.executeSql(sql));
+    }
+
+    private void handleDemoStartBackupMaster(HttpExchange exchange) throws IOException {
+        if (demoService == null) { writeJson(exchange, Map.of("success", false, "error", "Demo not available")); return; }
+        writeJson(exchange, demoService.startBackupMaster());
     }
 
     // ==================== SQL Console ====================
