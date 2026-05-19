@@ -36,11 +36,11 @@ public class FailoverCoordinator {
     private final ExecutorService executor;
     private ReplicationCoordinator replicationCoordinator;
 
-    // 配置参数
-    private final int maxFailoverRetries;
-    private final long baseFailoverCooldownMs;
-    private final long maxFailoverCooldownMs;
-    private final long failoverTimeoutMs;
+    // 配置参数（支持热重载，volatile 保证可见性）
+    private volatile int maxFailoverRetries;
+    private volatile long baseFailoverCooldownMs;
+    private volatile long maxFailoverCooldownMs;
+    private volatile long failoverTimeoutMs;
 
     // 故障转移历史记录：regionId -> FailoverState
     private final Map<String, FailoverState> failoverStates = new ConcurrentHashMap<>();
@@ -203,6 +203,22 @@ public class FailoverCoordinator {
     public void setReplicationCoordinator(ReplicationCoordinator replicationCoordinator) {
         this.replicationCoordinator = replicationCoordinator;
     }
+
+    /**
+     * 运行时更新故障转移参数（热重载）
+     */
+    public void updateConfig(int maxFailoverRetries, long baseFailoverCooldownMs,
+                             long maxFailoverCooldownMs, long failoverTimeoutMs) {
+        this.maxFailoverRetries = maxFailoverRetries;
+        this.baseFailoverCooldownMs = baseFailoverCooldownMs;
+        this.maxFailoverCooldownMs = maxFailoverCooldownMs;
+        this.failoverTimeoutMs = failoverTimeoutMs;
+    }
+
+    public int getMaxFailoverRetries() { return maxFailoverRetries; }
+    public long getBaseFailoverCooldownMs() { return baseFailoverCooldownMs; }
+    public long getMaxFailoverCooldownMs() { return maxFailoverCooldownMs; }
+    public long getFailoverTimeoutMs() { return failoverTimeoutMs; }
 
     /**
      * 触发故障转移（普通模式）

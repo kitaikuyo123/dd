@@ -253,9 +253,14 @@ public class MasterMain {
         replicaLifecycleManager = new ReplicaLifecycleManager();
 
         int failoverThreadPool = parseIntProperty(config, "failover.thread.pool.size", 3);
+        int failoverMaxRetries = parseIntProperty(config, "failover.max.retries", 5);
+        long failoverCooldownBaseMs = parseLongProperty(config, "failover.cooldown.base.ms", 5000L);
+        long failoverCooldownMaxMs = parseLongProperty(config, "failover.cooldown.max.ms", 120000L);
+        long failoverCandidateLagMs = parseLongProperty(config, "failover.candidate.lag.timeout.ms", 10000L);
         int recoveryThreadPool = parseIntProperty(config, "recovery.thread.pool.size", 2);
         failoverCoordinator = new FailoverCoordinator(clusterManager, metadataManager, replicaMonitor, replicaLifecycleManager,
-            new GrpcRegionServerCommandClient(clusterManager), 3, 30000, 300000, 10000, 60000, failoverThreadPool);
+            new GrpcRegionServerCommandClient(clusterManager),
+            failoverMaxRetries, failoverCooldownBaseMs, failoverCooldownMaxMs, failoverCandidateLagMs, 0L, failoverThreadPool);
         failoverCoordinator.setZkClient(zkClient);
         failoverCoordinator.setReplicationCoordinator(replicationCoordinator);
 
@@ -610,6 +615,17 @@ public class MasterMain {
             }
             logger.info("Reloaded hotspot: readThresh={} writeThresh={} cooldown={}ms interval={}ms",
                 readThreshold, writeThreshold, hotSpotCooldown, hotSpotDetectorIntervalMs);
+        }
+
+        // Hot-reload failover settings
+        if (failoverCoordinator != null) {
+            int fRetries = parseIntProperty(newConfig, "failover.max.retries", failoverCoordinator.getMaxFailoverRetries());
+            long fBaseMs = parseLongProperty(newConfig, "failover.cooldown.base.ms", failoverCoordinator.getBaseFailoverCooldownMs());
+            long fMaxMs = parseLongProperty(newConfig, "failover.cooldown.max.ms", failoverCoordinator.getMaxFailoverCooldownMs());
+            long fLagMs = parseLongProperty(newConfig, "failover.candidate.lag.timeout.ms", failoverCoordinator.getFailoverTimeoutMs());
+            failoverCoordinator.updateConfig(fRetries, fBaseMs, fMaxMs, fLagMs);
+            logger.info("Reloaded failover: retries={} cooldownBase={}ms cooldownMax={}ms candidateLag={}ms",
+                fRetries, fBaseMs, fMaxMs, fLagMs);
         }
 
         this.config = newConfig;

@@ -522,7 +522,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
                     ReplicaLifecycleManager.ReplicaLifecycleState.OFFLINE,
                     "Primary failure detected by ServerFailureEvent");
                 clusterManager.unassignRegion(regionId);
-                failoverCoordinator.triggerEmergencyFailover(regionId);
+                failoverCoordinator.triggerFailover(regionId);
             }
 
             ServerId newServer = selectNewServerForReplica(regionId, failedServer);
@@ -1664,7 +1664,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
 
     private void handleRegionFailure(String regionId) {
         logger.info("Handling failure for region via FailoverCoordinator: {}", regionId);
-        failoverCoordinator.triggerEmergencyFailover(regionId);
+        failoverCoordinator.triggerFailover(regionId);
     }
 
     private void recordEvent(String type, String severity, String regionId, String tableName,
