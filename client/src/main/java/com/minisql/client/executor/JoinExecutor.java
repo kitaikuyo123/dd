@@ -65,7 +65,7 @@ public class JoinExecutor {
                 leftTable, leftAlias, rightTable, rightAlias);
             ConditionSplitter.SplitResult split = splitter.split(ast.getWhere());
             leftWhereCondition = split.leftOnly;
-            leftWhereClause = (split.leftOnly != null && ConditionSerializer.canPushDown(split.leftOnly))
+            leftWhereClause = split.leftOnly != null
                 ? ConditionSerializer.toSql(split.leftOnly) : null;
             rightWhereCondition = split.rightOnly;
             crossTableCondition = split.crossTable;
@@ -84,7 +84,7 @@ public class JoinExecutor {
         List<String> rightProjectedQualifiers = QueryPlanner.determineJoinProjectedQualifiers(
             ast, rightTable, rightAlias, rightJoinCols, aggregateExpressions);
 
-        String rightWhereClause = (rightWhereCondition != null && ConditionSerializer.canPushDown(rightWhereCondition))
+        String rightWhereClause = rightWhereCondition != null
             ? ConditionSerializer.toSql(rightWhereCondition) : null;
 
         // 拉取右表数据

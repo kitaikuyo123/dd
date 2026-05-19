@@ -8,10 +8,8 @@ import com.minisql.client.executor.QueryPlanner;
 import com.minisql.client.executor.ScanExecutor;
 import com.minisql.common.model.Column;
 import com.minisql.common.model.Table;
-import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.execution.Row;
-import com.minisql.sql.execution.operators.FilterOperator;
 import com.minisql.sql.execution.operators.ListSourceOperator;
 import com.minisql.common.proto.MasterServiceGrpc;
 
@@ -27,12 +25,12 @@ import java.util.concurrent.Executors;
  *
  * <p>分析 AST 并委托给专职执行器：
  * <ul>
- *   <li>{@link ScanExecutor} — 并行 Region 扫描</li>
+ *   <li>{@link ScanExecutor} — 并行 Region 扫描 + Region 裁剪</li>
  *   <li>{@link JoinExecutor} — JOIN 管道构建</li>
  *   <li>{@link AggregationExecutor} — 两阶段聚合</li>
  *   <li>{@link PipelineAssembler} — 算子管道组装</li>
  *   <li>{@link QueryPlanner} — AST 分析与列投影计算</li>
- *   <li>{@link ConditionSerializer} — 条件 → SQL 序列化</li>
+ *   <li>{@link ConditionSerializer} — 条件 → SQL 序列化（全部下推，由 RS 决定执行方式）</li>
  * </ul>
  */
 public class ParallelQueryExecutor {
@@ -71,9 +69,8 @@ public class ParallelQueryExecutor {
         List<QueryPlanner.AggregateExpression> aggregateExpressions =
             QueryPlanner.buildAggregateExpressions(ast);
 
-        // WHERE 下推
-        String whereClause = (ast.getWhere() != null
-            && ConditionSerializer.canPushDown(ast.getWhere()) && !hasJoin)
+        // WHERE 下推：所有条件都发给 RS，由 RS 决定哪些可以在存储层执行
+        String whereClause = (ast.getWhere() != null && !hasJoin)
             ? ConditionSerializer.toSql(ast.getWhere()) : null;
 
         // 列投影
@@ -135,11 +132,6 @@ public class ParallelQueryExecutor {
             .map(Column::getName).toArray(String[]::new);
 
         com.minisql.sql.execution.Operator pipeline = new ListSourceOperator(rows, columns);
-
-        if (ast.getWhere() != null && whereClause == null) {
-            Condition cond = ast.getWhere();
-            pipeline = new FilterOperator(pipeline, row -> cond.evaluate(row));
-        }
 
         if (hasAggregation) {
             pipeline = PipelineAssembler.appendAggregate(pipeline, ast);

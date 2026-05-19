@@ -12,6 +12,7 @@ import com.minisql.common.proto.MasterServiceGrpc;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.common.proto.RegionServerServiceGrpc;
 import com.minisql.common.rpc.GrpcChannelFactory;
+import com.minisql.common.utils.BytesUtil;
 import com.minisql.sql.ast.Condition;
 import com.minisql.sql.ast.SelectStatement;
 import com.minisql.sql.execution.Row;
@@ -96,7 +97,7 @@ public class ScanExecutor {
                                                                 int offset) throws SQLException {
         List<RegionLocation> targets = rowKey != null
             ? getTargetRegion(tableName, rowKey)
-            : getAllRegionsForTable(tableName);
+            : getPrunedRegions(tableName, whereCondition);
 
         if (targets.isEmpty()) {
             throw new SQLException("No regions found for table: " + tableName);
@@ -330,6 +331,69 @@ public class ScanExecutor {
             logger.warn("Exception while getting regions for table: {}", tableName, e);
             return new ArrayList<>();
         }
+    }
+
+    /**
+     * 基于 WHERE 条件裁剪 Region：只返回与主键扫描范围有交集的 Region。
+     * 无法提取范围时退化为全量扫描。
+     */
+    private List<RegionLocation> getPrunedRegions(String tableName, Condition whereCondition) {
+        List<RegionLocation> allRegions = getAllRegionsForTable(tableName);
+        if (allRegions.isEmpty() || whereCondition == null) {
+            return allRegions;
+        }
+
+        try {
+            Table schema = getTableSchema(tableName);
+            ScanRangeAnalyzer.ScanRange range = ScanRangeAnalyzer.computeScanRange(schema, whereCondition);
+            if (range.isFullScan()) {
+                return allRegions;
+            }
+
+            List<RegionLocation> pruned = new ArrayList<>();
+            for (RegionLocation loc : allRegions) {
+                Router.RegionRouteInfo regionInfo = findRegionRoute(tableName, loc.regionId);
+                if (regionInfo == null || overlaps(regionInfo, range)) {
+                    pruned.add(loc);
+                }
+            }
+
+            if (pruned.size() < allRegions.size()) {
+                logger.info("Region pruning for table {}: {}/{} regions matched",
+                    tableName, pruned.size(), allRegions.size());
+            }
+            return pruned;
+        } catch (Exception e) {
+            logger.warn("Region pruning failed for table {}, falling back to full scan: {}",
+                tableName, e.getMessage());
+            return allRegions;
+        }
+    }
+
+    private Router.RegionRouteInfo findRegionRoute(String tableName, String regionId) {
+        List<Router.RegionRouteInfo> routes = router.getAllRegionLocations(tableName);
+        if (routes == null) return null;
+        for (Router.RegionRouteInfo info : routes) {
+            if (info.getRegionId().equals(regionId)) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    private boolean overlaps(Router.RegionRouteInfo region, ScanRangeAnalyzer.ScanRange range) {
+        byte[] regionStart = region.getStartKey();
+        byte[] regionEnd = region.getEndKey();
+
+        boolean startsBeforeEnd = (range.lowerBound == null)
+            || (regionEnd == null || regionEnd.length == 0)
+            || BytesUtil.compareTo(range.lowerBound, regionEnd) < 0;
+
+        boolean endsAfterStart = (range.upperBound == null)
+            || (regionStart == null || regionStart.length == 0)
+            || BytesUtil.compareTo(range.upperBound, regionStart) > 0;
+
+        return startsBeforeEnd && endsAfterStart;
     }
 
     // ── 客户端行过滤（WHERE 未能下推时的兜底） ──

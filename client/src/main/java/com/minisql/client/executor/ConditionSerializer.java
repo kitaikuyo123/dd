@@ -11,50 +11,13 @@ import com.minisql.sql.ast.SimpleCondition;
 /**
  * 条件序列化工具：将 AST 条件树转回 SQL WHERE 子句字符串，
  * 用于谓词下推到 RegionServer。
+ *
+ * <p>所有条件都尝试下推，由 RegionServer 决定哪些条件可以在存储层执行，
+ * 剩余条件由 RegionServer 做行级过滤。
  */
 public final class ConditionSerializer {
 
     private ConditionSerializer() {}
-
-    /**
-     * 判断条件是否可以下推到 RegionServer。
-     *
-     * <p>可下推的条件要求：
-     * <ul>
-     *   <li>只包含 {@link SimpleCondition}、{@link BetweenCondition}、
-     *       {@link InCondition}、{@link IsNullCondition} 或 AND 组合的 {@link CompoundCondition}</li>
-     *   <li>列名不包含点号限定符（单表查询）</li>
-     * </ul>
-     */
-    public static boolean canPushDown(Condition condition) {
-        if (condition == null) return false;
-        if (condition instanceof SimpleCondition) {
-            return hasUnqualifiedColumn(((SimpleCondition) condition).getColumn());
-        }
-        if (condition instanceof BetweenCondition) {
-            return hasUnqualifiedColumn(((BetweenCondition) condition).getColumn());
-        }
-        if (condition instanceof InCondition) {
-            return hasUnqualifiedColumn(((InCondition) condition).getColumn());
-        }
-        if (condition instanceof IsNullCondition) {
-            return hasUnqualifiedColumn(((IsNullCondition) condition).getColumn());
-        }
-        if (condition instanceof CompoundCondition) {
-            CompoundCondition compound = (CompoundCondition) condition;
-            return "AND".equalsIgnoreCase(compound.getOperator())
-                && canPushDown(compound.getLeft()) && canPushDown(compound.getRight());
-        }
-        if (condition instanceof NotCondition) {
-            return canPushDown(((NotCondition) condition).getInner());
-        }
-        // 子查询条件暂不下推
-        return false;
-    }
-
-    private static boolean hasUnqualifiedColumn(String column) {
-        return column != null && !column.isBlank() && !column.contains(".");
-    }
 
     /**
      * 将条件树序列化为 SQL 字符串。
