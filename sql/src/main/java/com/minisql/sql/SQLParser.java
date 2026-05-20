@@ -325,6 +325,19 @@ public class SQLParser {
     private Condition parseSimpleCondition() {
         String column = parseIdentifierPath();
 
+        // Handle aggregate expressions in HAVING: SUM(amount), COUNT(*), etc.
+        if (current().type == TokenType.LPAREN && AGGREGATE_FUNCTIONS.contains(column.toUpperCase())) {
+            consume(TokenType.LPAREN);
+            if (current().type == TokenType.ASTERISK) {
+                column = column + "(*)";
+                consume(TokenType.ASTERISK);
+            } else {
+                String arg = parseIdentifierPath();
+                column = column + "(" + arg + ")";
+            }
+            consume(TokenType.RPAREN);
+        }
+
         // BETWEEN
         if (match(TokenType.BETWEEN)) {
             String low = consumeLiteral().value;
@@ -504,13 +517,10 @@ public class SQLParser {
         consume(TokenType.PRIMARY);
         consume(TokenType.KEY);
         consume(TokenType.LPAREN);
-        if (match(TokenType.LPAREN)) {
-            partitionKeys.addAll(parseIdentifierList());
-            consume(TokenType.RPAREN);
-            if (match(TokenType.COMMA)) clusteringKeys.addAll(parseIdentifierList());
-        } else {
-            partitionKeys.add(parseIdentifierPath());
+        if (current().type == TokenType.LPAREN) {
+            throw new RuntimeException("Composite primary key is not supported, use single-column PRIMARY KEY instead");
         }
+        partitionKeys.add(parseIdentifierPath());
         consume(TokenType.RPAREN);
     }
 

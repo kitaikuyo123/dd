@@ -552,7 +552,7 @@ const DemoMode = {
 /* ========== Main App ========== */
 
 createApp({
-  components: { OverviewCards, ClusterTopology, SqlPanel, DataTable, EventTimeline, SqlConsole, DemoMode },
+  components: { OverviewCards, ClusterTopology, DataTable, EventTimeline, SqlConsole, DemoMode },
   directives: { counter: vCounter },
   setup() {
     const state = reactive({

@@ -95,7 +95,7 @@ class RegionServerErrorPathTest {
     }
 
     @Test
-    @DisplayName("get on non-primary region returns error status")
+    @DisplayName("get on replica region succeeds (replicas can serve reads)")
     void getWhenRegionNotPrimary() {
         String regionId = "err-get-not-primary";
         openReplicaRegion(regionId);
@@ -109,8 +109,8 @@ class RegionServerErrorPathTest {
             obs
         );
 
-        assertFalse(obs.value.getStatus().getSuccess());
-        assertTrue(obs.value.getStatus().getMessage().contains("not primary"));
+        // Replicas can serve reads for read-scaling
+        assertTrue(obs.value.getStatus().getSuccess());
     }
 
     @Test
@@ -150,7 +150,7 @@ class RegionServerErrorPathTest {
     }
 
     @Test
-    @DisplayName("scan on non-primary region returns error status")
+    @DisplayName("scan on replica region succeeds (replicas can serve reads)")
     void scanWhenRegionNotPrimary() {
         String regionId = "err-scan-not-primary";
         openReplicaRegion(regionId);
@@ -163,8 +163,8 @@ class RegionServerErrorPathTest {
             obs
         );
 
-        assertFalse(obs.value.getStatus().getSuccess());
-        assertTrue(obs.value.getStatus().getMessage().contains("not primary"));
+        // Replicas can serve reads for read-scaling
+        assertTrue(obs.value.getStatus().getSuccess());
     }
 
     // ================================

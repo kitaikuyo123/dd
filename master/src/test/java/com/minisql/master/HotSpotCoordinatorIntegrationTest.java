@@ -164,6 +164,9 @@ class HotSpotCoordinatorIntegrationTest {
 
             coordinator.executeAction(actions.get(0));
 
+            // Wait for async recovery to register the replica
+            waitForReplica(region.getRegionId(), target, 3000);
+
             // Verify replica was added to ClusterManager
             List<ServerId> replicas = clusterManager.getReplicaServers(region.getRegionId());
             assertTrue(replicas.contains(target), "Target server should be in replica list");
@@ -332,6 +335,7 @@ class HotSpotCoordinatorIntegrationTest {
 
             // Phase 3: Execute
             coordinator.executeAction(actions.get(0));
+            waitForReplica(region.getRegionId(), target, 3000);
             assertTrue(clusterManager.getReplicaServers(region.getRegionId()).contains(target));
 
             // Phase 4: Cooldown — no new actions
@@ -483,6 +487,9 @@ class HotSpotCoordinatorIntegrationTest {
             List<HotSpotCoordinator.HotSpotAction> actions = coordinator.planPendingActions();
             coordinator.executeAction(actions.get(0));
 
+            // Wait for async recovery to register the replica
+            waitForReplica(region.getRegionId(), target, 3000);
+
             // Verify observable effect: replica was added to ClusterManager
             List<ServerId> replicas = clusterManager.getReplicaServers(region.getRegionId());
             assertTrue(replicas.contains(target), "Replica should be registered in ClusterManager");
@@ -506,6 +513,7 @@ class HotSpotCoordinatorIntegrationTest {
             recordReadHistory(coordinator, region.getRegionId(), 0, 25, 50);
             invokeDetection(coordinator);
             coordinator.executeAction(coordinator.planPendingActions().get(0));
+            waitForReplica(region.getRegionId(), target, 3000);
             assertTrue(clusterManager.getReplicaServers(region.getRegionId()).contains(target));
 
             // Wait for cooldown + load drops
@@ -628,6 +636,17 @@ class HotSpotCoordinatorIntegrationTest {
         Method method = HotSpotCoordinator.class.getDeclaredMethod("detectAndPlanHotSpots");
         method.setAccessible(true);
         method.invoke(mgr);
+    }
+
+    private void waitForReplica(String regionId, ServerId server, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (clusterManager.getReplicaServers(regionId).contains(server)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        // Will be caught by the assertion in the caller
     }
 
     // ================================

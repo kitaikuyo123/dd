@@ -52,7 +52,7 @@ public class ProjectOperator extends Operator {
             List<String> lookupColumns = sourceColumns != null ? sourceColumns : columns;
             columnIndices = new int[columns.size()];
             for (int i = 0; i < columns.size(); i++) {
-                columnIndices[i] = findColumnIndex(inputColumns, lookupColumns.get(i), false);
+                columnIndices[i] = findColumnIndex(inputColumns, lookupColumns.get(i), true);
             }
         }
     }

@@ -1,5 +1,14 @@
 package com.minisql.client;
 
+import com.minisql.sql.ast.CompoundCondition;
+import com.minisql.sql.ast.Condition;
+import com.minisql.sql.ast.ExistsCondition;
+import com.minisql.sql.ast.InSubqueryCondition;
+import com.minisql.sql.ast.NotCondition;
+
+import java.util.HashSet;
+import java.util.Set;
+
 import com.minisql.client.executor.AggregationExecutor;
 import com.minisql.client.executor.ConditionSerializer;
 import com.minisql.client.executor.JoinExecutor;
@@ -61,6 +70,9 @@ public class ParallelQueryExecutor {
     // ── 查询入口 ──
 
     public List<Row> executeQuery(SelectStatement ast, String rawSql) throws SQLException {
+        // Resolve subqueries in WHERE before executing the main query
+        resolveSubqueries(ast.getWhere());
+
         String tableName = ast.getTable();
         String tableAlias = ast.getTableAlias();
         boolean hasJoin = ast.getJoinTable() != null;
@@ -139,6 +151,37 @@ public class ParallelQueryExecutor {
 
         pipeline = PipelineAssembler.appendOrderByLimitProject(pipeline, ast, userLimit, userOffset);
         return PipelineAssembler.drain(pipeline);
+    }
+
+    /**
+     * Walk the condition tree and resolve any subquery nodes by executing them.
+     * Injects results into InSubqueryCondition.resolvedValues and ExistsCondition.hasResults.
+     */
+    private void resolveSubqueries(Condition condition) throws SQLException {
+        if (condition == null) return;
+        if (condition instanceof InSubqueryCondition) {
+            InSubqueryCondition isc = (InSubqueryCondition) condition;
+            SelectStatement subAst = isc.getSubquery().getSelectStatement();
+            List<Row> subResults = executeQuery(subAst, "");
+            Set<Object> values = new HashSet<>();
+            for (Row row : subResults) {
+                if (row.getColumnCount() > 0) {
+                    values.add(row.getValue(0));
+                }
+            }
+            isc.setResolvedValues(values);
+        } else if (condition instanceof ExistsCondition) {
+            ExistsCondition ec = (ExistsCondition) condition;
+            SelectStatement subAst = ec.getSubquery().getSelectStatement();
+            List<Row> subResults = executeQuery(subAst, "");
+            ec.setHasResults(!subResults.isEmpty());
+        } else if (condition instanceof CompoundCondition) {
+            CompoundCondition cc = (CompoundCondition) condition;
+            resolveSubqueries(cc.getLeft());
+            resolveSubqueries(cc.getRight());
+        } else if (condition instanceof NotCondition) {
+            resolveSubqueries(((NotCondition) condition).getInner());
+        }
     }
 
     public void shutdown() {

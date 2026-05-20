@@ -457,6 +457,10 @@ public class MiniSQLConnection implements Connection {
     }
 
     private int deleteSingleRow(String tableName, com.minisql.common.model.Table schema, byte[] rowKey) throws SQLException {
+        // Check if row exists before deleting
+        Row existing = fetchExistingRowWithRetry(tableName, rowKey, schema, "Delete");
+        if (existing == null) return 0;
+
         MutationTarget target = resolveMutationTarget(tableName, rowKey);
         List<String> qualifiers = schema.getColumns().stream()
                 .map(com.minisql.common.model.Column::getName)
@@ -508,6 +512,7 @@ public class MiniSQLConnection implements Connection {
         long timestamp = System.currentTimeMillis();
         for (Row row : matchingRows) {
             Row existing = fetchExistingRowWithRetry(tableName, row.getRowKey(), schema, "Update");
+            if (existing == null) continue;
             for (com.minisql.sql.ast.Assignment assignment : stmt.getAssignments()) {
                 Column.ColumnType type = findColumnType(schema, assignment.getColumn());
                 existing.setColumn(assignment.getColumn(), convertValue(assignment.getValue(), type));
@@ -545,6 +550,7 @@ public class MiniSQLConnection implements Connection {
                                  byte[] rowKey, List<com.minisql.sql.ast.Assignment> assignments) throws SQLException {
         // 1. fetch
         Row existingRow = fetchExistingRowWithRetry(tableName, rowKey, schema, "Update");
+        if (existingRow == null) return 0;
         // 2. modify
         for (com.minisql.sql.ast.Assignment assignment : assignments) {
             Column.ColumnType type = findColumnType(schema, assignment.getColumn());
@@ -720,7 +726,7 @@ public class MiniSQLConnection implements Connection {
         }
 
         if (existingKVs.isEmpty()) {
-            throw new SQLException(operation + " failed: row not found");
+            return null;
         }
         return RowAssembler.mergeToRow(existingKVs, schema);
     }
@@ -742,9 +748,8 @@ public class MiniSQLConnection implements Connection {
                 throw e;
             }
         }
-        throw lastError != null
-            ? lastError
-            : new SQLException(operation + " failed: unable to read existing row");
+        if (lastError != null) throw lastError;
+        return null;
     }
 
     private boolean shouldRetryFetchExistingRow(String message) {

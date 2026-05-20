@@ -289,7 +289,7 @@ class MasterServiceImplTest {
         }
 
         @Override
-        public void triggerEmergencyFailover(String regionId) {
+        public void triggerFailover(String regionId) {
             this.triggeredRegionId = regionId;
         }
     }

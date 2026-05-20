@@ -497,83 +497,30 @@ class SQLParserTest {
     // ==================== 复合主键语法测试 ====================
 
     @Test
-    @DisplayName("测试解析复合主键 - PRIMARY KEY ((col1, col2), col3)")
+    @DisplayName("测试复合主键语法被拒绝")
     void testParseCreateTableWithCompositePrimaryKey() {
         String sql = "CREATE TABLE sensor_data (sensor_id VARCHAR(32), bucket INT, timestamp BIGINT, value DOUBLE, PRIMARY KEY ((sensor_id, bucket), timestamp))";
         SQLParser parser = new SQLParser(sql);
-        Statement stmt = parser.parse();
-
-        assertInstanceOf(CreateTableStatement.class, stmt);
-        CreateTableStatement create = (CreateTableStatement) stmt;
-
-        assertEquals("sensor_data", create.getTable());
-        assertEquals(4, create.getColumns().size()); // PRIMARY KEY 不是列
-
-        // 验证分区键
-        assertNotNull(create.getPartitionKeys());
-        assertEquals(2, create.getPartitionKeys().size());
-        assertEquals("sensor_id", create.getPartitionKeys().get(0));
-        assertEquals("bucket", create.getPartitionKeys().get(1));
-
-        // 验证聚类键
-        assertNotNull(create.getClusteringKeys());
-        assertEquals(1, create.getClusteringKeys().size());
-        assertEquals("timestamp", create.getClusteringKeys().get(0));
-
-        // 验证 getAllPrimaryKeys
-        List<String> allKeys = create.getAllPrimaryKeys();
-        assertEquals(3, allKeys.size());
-        assertEquals("sensor_id", allKeys.get(0));
-        assertEquals("bucket", allKeys.get(1));
-        assertEquals("timestamp", allKeys.get(2));
+        RuntimeException ex = assertThrows(RuntimeException.class, parser::parse);
+        assertTrue(ex.getMessage().contains("Composite primary key is not supported"));
     }
 
     @Test
-    @DisplayName("测试解析复合主键 - 只有分区键")
+    @DisplayName("测试复合主键语法被拒绝 - 只有分区键")
     void testParseCreateTableWithPartitionKeysOnly() {
         String sql = "CREATE TABLE users (user_id VARCHAR(32), region INT, name VARCHAR(50), PRIMARY KEY ((user_id, region)))";
         SQLParser parser = new SQLParser(sql);
-        Statement stmt = parser.parse();
-
-        assertInstanceOf(CreateTableStatement.class, stmt);
-        CreateTableStatement create = (CreateTableStatement) stmt;
-
-        assertEquals("users", create.getTable());
-
-        // 验证分区键
-        assertNotNull(create.getPartitionKeys());
-        assertEquals(2, create.getPartitionKeys().size());
-        assertEquals("user_id", create.getPartitionKeys().get(0));
-        assertEquals("region", create.getPartitionKeys().get(1));
-
-        // 验证聚类键为空
-        assertNull(create.getClusteringKeys());
+        RuntimeException ex = assertThrows(RuntimeException.class, parser::parse);
+        assertTrue(ex.getMessage().contains("Composite primary key is not supported"));
     }
 
     @Test
-    @DisplayName("测试解析复合主键 - 多个聚类键")
+    @DisplayName("测试复合主键语法被拒绝 - 多个聚类键")
     void testParseCreateTableWithMultipleClusteringKeys() {
-        // 简化测试：PRIMARY KEY 在列定义之后，只有两个聚类键
         String sql = "CREATE TABLE logs (log_type VARCHAR(20), date INT, timestamp BIGINT, id INT, message TEXT, PRIMARY KEY ((log_type, date), timestamp, id))";
         SQLParser parser = new SQLParser(sql);
-        Statement stmt = parser.parse();
-
-        assertInstanceOf(CreateTableStatement.class, stmt);
-        CreateTableStatement create = (CreateTableStatement) stmt;
-
-        assertEquals("logs", create.getTable());
-
-        // 验证分区键
-        assertNotNull(create.getPartitionKeys());
-        assertEquals(2, create.getPartitionKeys().size());
-        assertEquals("log_type", create.getPartitionKeys().get(0));
-        assertEquals("date", create.getPartitionKeys().get(1));
-
-        // 验证聚类键
-        assertNotNull(create.getClusteringKeys());
-        assertEquals(2, create.getClusteringKeys().size());
-        assertEquals("timestamp", create.getClusteringKeys().get(0));
-        assertEquals("id", create.getClusteringKeys().get(1));
+        RuntimeException ex = assertThrows(RuntimeException.class, parser::parse);
+        assertTrue(ex.getMessage().contains("Composite primary key is not supported"));
     }
 
     @Test
