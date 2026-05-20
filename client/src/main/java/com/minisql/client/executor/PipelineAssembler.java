@@ -16,9 +16,7 @@ import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Volcano 算子管道组装器。
@@ -40,8 +38,7 @@ public final class PipelineAssembler {
             for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
                 AggregateType type = AggregateType.valueOf(agg.getFunction().toUpperCase());
                 AggregateExpr expr = new AggregateExpr(type, agg.getColumn());
-                // Use raw name (e.g. "SUM(amount)") so HAVING can reference it
-                expr.setAlias(null);
+                expr.setAlias(agg.getOutputName());
                 aggregates.add(expr);
             }
         }
@@ -78,22 +75,12 @@ public final class PipelineAssembler {
         if (ast.isSelectAll()) {
             pipeline = new ProjectOperator(pipeline, Collections.emptyList(), true);
         } else if (ast.getColumns() != null && !ast.getColumns().isEmpty()) {
-            // Build mapping from alias to raw aggregate name for source column lookup
-            Map<String, String> aliasToRaw = new HashMap<>();
-            if (ast.getAggregates() != null) {
-                for (SelectStatement.AggregateExpr agg : ast.getAggregates()) {
-                    if (agg.getAlias() != null) {
-                        String rawName = agg.getFunction().toUpperCase() + "(" + agg.getColumn() + ")";
-                        aliasToRaw.put(agg.getAlias(), rawName);
-                    }
-                }
-            }
             List<String> outputNames = new ArrayList<>();
             List<String> sourceNames = new ArrayList<>();
             List<String> aliases = ast.getColumnAliases();
             for (int i = 0; i < ast.getColumns().size(); i++) {
                 String col = ast.getColumns().get(i);
-                sourceNames.add(aliasToRaw.getOrDefault(col, col));
+                sourceNames.add(col);
                 outputNames.add((aliases != null && i < aliases.size() && aliases.get(i) != null)
                     ? aliases.get(i) : col);
             }
