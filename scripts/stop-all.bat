@@ -10,10 +10,11 @@ echo Shutting down RegionServers first, then Master...
 echo Graceful: WM_CLOSE triggers JVM shutdown hook, 3s wait, then force-kill if needed.
 echo.
 
+call :stop_port_graceful 16000 Master
 call :stop_port_graceful 16022 RegionServer-3
 call :stop_port_graceful 16021 RegionServer-2
 call :stop_port_graceful 16020 RegionServer-1
-call :stop_port_graceful 16000 Master
+
 
 echo.
 echo Stopping CLI helper windows...
