@@ -91,11 +91,8 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             // 2. 本地提交
             regionServer.put(regionId, keyValues, false);
-            logger.debug("Local commit completed for region: {}", regionId);
 
             // 3. 复制到从副本（如果有副本组）
-            // Best-effort: local write already committed; replication failure degrades
-            // durability but should not reject the client's write.
             if (replicationCoordinator != null && replicationCoordinator.getReplicaGroup(regionId) != null) {
                 boolean replicationSuccess = replicationEntry != null
                     ? replicationCoordinator.replicateSync(regionId, replicationEntry)
@@ -103,10 +100,10 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 if (!replicationSuccess) {
                     logger.warn("Replication degraded for region {}: local write committed but replica sync failed", regionId);
                 } else {
-                    logger.debug("Replication completed successfully for region: {}", regionId);
+                    logger.debug("Replication completed for region {}", regionId);
                 }
             } else {
-                logger.debug("No replica group found for region: {}, skipping replication", regionId);
+                logger.debug("No replica group for region {}, skipping replication", regionId);
             }
 
             // 4. 标记 WAL 已应用
@@ -597,8 +594,18 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 currentSequenceId = wal.getCurrentSequenceId(regionId);
             }
 
-            long lastAppliedSequenceId = regionServer.getRegionManager().getLastAppliedReplicationSequenceId(regionId);
-            long lagInEntries = Math.max(0L, currentSequenceId - lastAppliedSequenceId);
+            long lagInEntries;
+            long lastAppliedSequenceId;
+
+            if (regionServer.getRegionManager().isPrimary(regionId)) {
+                // Primary: lag is meaningless (it's the source of truth), report 0
+                lagInEntries = 0L;
+                lastAppliedSequenceId = currentSequenceId;
+            } else {
+                lastAppliedSequenceId = regionServer.getRegionManager()
+                    .getLastAppliedReplicationSequenceId(regionId);
+                lagInEntries = Math.max(0L, currentSequenceId - lastAppliedSequenceId);
+            }
 
             RegionServerProto.GetReplicationLagResponse response = RegionServerProto.GetReplicationLagResponse.newBuilder()
                 .setStatus(createSuccessStatus())

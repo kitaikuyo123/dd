@@ -18,7 +18,7 @@
 
     <!-- 定义变量 -->
     <Properties>
-        <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</Property>
+        <Property name="LOG_PATTERN">%d{HH:mm:ss} %-25.25logger{0} %-5level - %msg%n</Property>
         <Property name="LOG_DIR">logs</Property>
     </Properties>
 
@@ -44,37 +44,37 @@
 
     <Loggers>
         <!-- MiniSQL 包日志 - INFO 级别 -->
-        <Logger name="com.minisql" level="INFO" additivity="false">
+        <Logger name="com.minisql" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- Master 模块日志 -->
-        <Logger name="com.minisql.master" level="INFO" additivity="false">
+        <Logger name="com.minisql.master" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- RegionServer 模块日志 -->
-        <Logger name="com.minisql.regionserver" level="INFO" additivity="false">
+        <Logger name="com.minisql.regionserver" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- 复制模块日志 -->
-        <Logger name="com.minisql.replication" level="INFO" additivity="false">
+        <Logger name="com.minisql.replication" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- 客户端模块日志 -->
-        <Logger name="com.minisql.client" level="INFO" additivity="false">
+        <Logger name="com.minisql.client" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- SQL 解析模块日志 -->
-        <Logger name="com.minisql.sql" level="INFO" additivity="false">
+        <Logger name="com.minisql.sql" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 
         <!-- 存储模块日志 -->
-        <Logger name="com.minisql.storage" level="INFO" additivity="false">
+        <Logger name="com.minisql.storage" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
         </Logger>
 

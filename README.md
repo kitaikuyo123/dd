@@ -31,7 +31,7 @@ INSERT INTO users (id, name, age) VALUES (2, 'bob', 30);
 SELECT * FROM users WHERE age > 25 ORDER BY name;
 ```
 
-默认端口：Master `16000`，RS1 `16020`，RS2 `16021`，RS3 `16022`，Monitor `16010`
+默认端口：Master `16000`，备份 Master `16001`，RS1 `16020`，RS2 `16021`，RS3 `16022`，Monitor `16010`
 
 ### 5. 停止集群
 
@@ -96,7 +96,7 @@ SELECT COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM orders;
 SELECT user_id, COUNT(*) AS cnt, SUM(amount) AS total
 FROM orders GROUP BY user_id;
 
--- JOIN
+-- JOIN（INNER / LEFT / RIGHT / FULL OUTER）
 SELECT u.name, o.product, o.amount
 FROM users u JOIN orders o ON u.id = o.user_id;
 
@@ -107,11 +107,12 @@ ORDER BY u.name;
 
 | 支持 | 未支持 |
 |------|--------|
-| `=` `!=` `>` `>=` `<` `<=` `AND` `OR` `LIKE` | `BETWEEN` `IN` `IS NULL` 子查询 |
-| `COUNT` `SUM` `AVG` `MAX` `MIN` | `DISTINCT` |
-| `GROUP BY` `ORDER BY` `LIMIT` `OFFSET` | `HAVING`（parser 已有，运行时未完全跑通） |
-| `INNER JOIN` `LEFT JOIN` | `RIGHT JOIN` `FULL OUTER JOIN` |
-| 表别名 `AS`、列别名 `AS` | 无事务（auto-commit only） |
+| `=` `!=` `>` `>=` `<` `<=` `AND` `OR` `NOT` | 子查询（AST 就绪，运行期待接入） |
+| `BETWEEN` `IN` `IS NULL` `LIKE` | 无事务（auto-commit only） |
+| `COUNT` `SUM` `AVG` `MAX` `MIN` `DISTINCT` | |
+| `GROUP BY` `ORDER BY` `LIMIT` `OFFSET` | |
+| `INNER JOIN` `LEFT JOIN` `RIGHT JOIN` `FULL OUTER JOIN` | |
+| 表别名 `AS`、列别名 `AS` | |
 
 ---
 
@@ -157,42 +158,23 @@ Client (CLI / JDBC)
 
 ### 负载均衡与热点检测
 
-**综合负载评分**：`LoadBalancer` 基于 CPU、内存、磁盘、Region 数量、请求负载五个指标加权评分（权重可配置，自动归一化），自动跨节点迁移 Region。
+**负载均衡**：`LoadBalancer` 基于 Region 计数评分自动跨节点迁移 Region，每轮只迁移 1 个 Region 并立即重评估，避免过度迁移。支持迁移预算控制和热点感知放置。
 
-**EWMA 负载预测**：使用指数加权移动平均替代简单滑动窗口，通过趋势预测提前识别负载上升/下降趋势，而非仅依赖历史均值。
-
-**多因子 Region 选择**：迁移时综合考虑四个因子选择最优 Region——负载降低收益、迁移传输成本、写密集惩罚（二次方）、目标服务器适配度，替代简单的"大小/热度"评分。
-
-**迁移预算控制**：每轮最大并发迁移数可配置（默认 3），结合正在进行的迁移数量动态计算预算，防止惊群效应。
-
-**热点感知放置**：`HotSpotCoordinator` 检测读/写热点后，通过共享的 `HotSpotRegistry` 将热点信息同步给 `LoadBalancer`。放置 Region 时自动避开已托管同表热点 Region 的服务器，避免热点聚集。
+**热点检测**：`HotSpotCoordinator` 检测读/写热点后，放置 Region 时自动避开已托管同表热点 Region 的服务器。读热点自动增加读副本分散压力，写热点自动触发 Region 分裂。
 
 **相关配置项**（`master.properties`，均支持热加载）：
 
 ```properties
-# 负载评分权重（相对值，自动归一化）
-load.balance.weight.cpu=25
-load.balance.weight.memory=25
-load.balance.weight.disk=20
-load.balance.weight.region.count=15
-load.balance.weight.request=15
+load.balance.enabled=true
+load.balance.strategy=load_based
+load.balance.threshold=5
+load.balance.interval.ms=30000
 
-# 每轮最大并发迁移数
-load.balance.max.migrations.per.round=3
-
-# EWMA 负载预测参数
-load.balance.ewma.alpha=0.3
-load.balance.ewma.trend.threshold=5.0
-load.balance.ewma.prediction.steps=2
-
-# Region 选择成本模型权重
-load.balance.region.weight.benefit=1.0
-load.balance.region.weight.cost=0.5
-load.balance.region.weight.write.penalty=0.8
-load.balance.region.weight.fit=0.3
-
-# 热点感知放置惩罚权重
-load.balance.hotspot.penalty.weight=15.0
+hotspot.detector.interval.ms=10000
+hotspot.read.threshold.per.interval=200
+hotspot.write.threshold.per.interval=100
+hotspot.target.read.replica.count=3
+hotspot.cooldown.ms=300000
 ```
 
 ### 并发安全
@@ -241,10 +223,15 @@ Ctrl+C → `RegionServer.stop()`：
 
 `stop-all.bat` 等效。
 
-### gRPC 安全
+### 双 Master 拓扑
 
-- 默认 plaintext，TLS 可选（`GrpcSslConfig` + 证书配置）
-- Channel 工厂统一缓存复用，不每次新建连接
+支持备份 Master，通过 ZooKeeper LeaderLatch 自动选主。启动备份 Master：
+
+```powershell
+.\scripts\start-master.bat master2.properties
+```
+
+备份 Master 处于 Standby 状态，主 Master 故障后自动提升。
 
 ### 监控
 
@@ -271,8 +258,6 @@ powershell -File tests/e2e/Run-All.ps1            # 全部 E2E
 | 认证授权 | 零认证，需 network-level 防护 |
 | 事务 | auto-commit only，无 BEGIN/COMMIT/ROLLBACK |
 | 滚动升级 | 序列化格式无版本号，混合版本不安全 |
-| LIKE/HAVING | Parser + ConditionEvaluator 已实现，运行时待完全跑通 |
 | UPDATE/DELETE 部分主键 | 全表扫描，无二级索引 |
 | 二级索引 | 不支持 |
-| RIGHT/FULL JOIN | 不支持 |
 | 子查询 | 不支持 |
