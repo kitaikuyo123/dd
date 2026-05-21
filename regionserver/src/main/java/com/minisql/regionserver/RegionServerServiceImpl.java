@@ -45,7 +45,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
      */
     @Override
     public void put(RegionServerProto.PutRequest request, StreamObserver<RegionServerProto.PutResponse> responseObserver) {
-        logger.debug("PUT method called! Thread: {}", Thread.currentThread().getName());
+        logger.trace("PUT method called! Thread: {}", Thread.currentThread().getName());
 
         try {
             String regionId = request.getRegionId();
@@ -55,7 +55,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 throw new IllegalStateException("Region is not primary on this server: " + regionId);
             }
 
-            logger.info("Received put request for region: {}, KeyValues count: {}", regionId, request.getKeyValuesCount());
+            logger.trace("Received put request for region: {}, KeyValues count: {}", regionId, request.getKeyValuesCount());
 
             // 转换 protobuf KeyValue 到模型 KeyValue
             for (CommonProto.KeyValue kvProto : request.getKeyValuesList()) {
@@ -68,14 +68,14 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 kv.setValue(valueBytes);
                 kv.setType(kvProto.getType() == CommonProto.KeyValueType.PUT ?
                     KeyValue.Type.PUT : KeyValue.Type.DELETE);
-                logger.info("[RegionServer.put] KeyValue: rowKey={}, family={}, qualifier={}, value.length={}, value={}",
+                logger.trace("[RegionServer.put] KeyValue: rowKey={}, family={}, qualifier={}, value.length={}, value={}",
                     new String(kv.getRowKey()), kv.getFamily(), kv.getQualifier(),
                     kv.getValue() != null ? kv.getValue().length : 0,
                     kv.getValue() != null ? BytesUtil.bytesToHex(kv.getValue()) : "null");
                 keyValues.add(kv);
             }
 
-            logger.info("Converted keyValues, count: {}", keyValues.size());
+            logger.trace("Converted keyValues, count: {}", keyValues.size());
 
             // === 新增：集成 WAL 和副本复制 ===
 
@@ -94,16 +94,31 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             // 3. 复制到从副本（如果有副本组）
             if (replicationCoordinator != null && replicationCoordinator.getReplicaGroup(regionId) != null) {
-                boolean replicationSuccess = replicationEntry != null
-                    ? replicationCoordinator.replicateSync(regionId, replicationEntry)
-                    : replicationCoordinator.replicateSync(regionId, keyValues);
-                if (!replicationSuccess) {
-                    logger.warn("Replication degraded for region {}: local write committed but replica sync failed", regionId);
+                if (replicationCoordinator.isSyncReplicationEnabled()) {
+                    boolean replicationSuccess = replicationEntry != null
+                        ? replicationCoordinator.replicateSync(regionId, replicationEntry)
+                        : replicationCoordinator.replicateSync(regionId, keyValues);
+                    if (!replicationSuccess) {
+                        logger.warn("Replication degraded for region {}: local write committed but replica sync failed", regionId);
+                    } else {
+                        logger.trace("Replication completed for region {}", regionId);
+                    }
                 } else {
-                    logger.debug("Replication completed for region {}", regionId);
+                    java.util.concurrent.CompletableFuture<Boolean> replicationFuture = replicationEntry != null
+                        ? replicationCoordinator.replicate(regionId, replicationEntry)
+                        : replicationCoordinator.replicate(regionId, keyValues);
+                    replicationFuture.whenComplete((success, error) -> {
+                        if (error != null) {
+                            logger.warn("Async replication failed for region {}: {}", regionId, error.getMessage());
+                        } else if (!Boolean.TRUE.equals(success)) {
+                            logger.warn("Async replication degraded for region {}", regionId);
+                        } else {
+                            logger.trace("Async replication completed for region {}", regionId);
+                        }
+                    });
                 }
             } else {
-                logger.debug("No replica group for region {}, skipping replication", regionId);
+                logger.trace("No replica group for region {}, skipping replication", regionId);
             }
 
             // 4. 标记 WAL 已应用
@@ -119,7 +134,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 }
             }
 
-            logger.info("Put request completed successfully for region: {}", regionId);
+            logger.trace("Put request completed successfully for region: {}", regionId);
 
             RegionServerProto.PutResponse response = RegionServerProto.PutResponse.newBuilder()
                 .setStatus(createSuccessStatus())
@@ -688,7 +703,7 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
                 return;
             }
 
-            // 执行分裂
+            // Prepare split. The parent is closed only after Master commits metadata.
             RegionSplitService.RegionSplitResult result =
                 regionServer.getSplitService().splitRegion(regionId, splitKey,
                     request.getLeftRegionId(), request.getRightRegionId());
@@ -718,13 +733,49 @@ public class RegionServerServiceImpl extends RegionServerServiceGrpc.RegionServe
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
-            logger.info("Split request handled successfully for region: {}", regionId);
+            logger.info("Split prepare request handled successfully for region: {}", regionId);
 
         } catch (Exception e) {
             RegionServerProto.SplitRegionResponse response = RegionServerProto.SplitRegionResponse.newBuilder()
                 .setStatus(createErrorStatus(e.getMessage()))
                 .build();
             responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+    }
+
+    @Override
+    public void commitSplit(RegionServerProto.CommitSplitRequest request,
+                            StreamObserver<RegionServerProto.CommitSplitResponse> responseObserver) {
+        try {
+            regionServer.getSplitService().commitSplit(
+                request.getParentRegionId(), request.getLeftRegionId(), request.getRightRegionId());
+            responseObserver.onNext(RegionServerProto.CommitSplitResponse.newBuilder()
+                .setStatus(createSuccessStatus())
+                .build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            responseObserver.onNext(RegionServerProto.CommitSplitResponse.newBuilder()
+                .setStatus(createErrorStatus(e.getMessage()))
+                .build());
+            responseObserver.onCompleted();
+        }
+    }
+
+    @Override
+    public void abortSplit(RegionServerProto.AbortSplitRequest request,
+                           StreamObserver<RegionServerProto.AbortSplitResponse> responseObserver) {
+        try {
+            regionServer.getSplitService().abortSplit(
+                request.getParentRegionId(), request.getLeftRegionId(), request.getRightRegionId());
+            responseObserver.onNext(RegionServerProto.AbortSplitResponse.newBuilder()
+                .setStatus(createSuccessStatus())
+                .build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            responseObserver.onNext(RegionServerProto.AbortSplitResponse.newBuilder()
+                .setStatus(createErrorStatus(e.getMessage()))
+                .build());
             responseObserver.onCompleted();
         }
     }

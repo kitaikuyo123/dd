@@ -244,10 +244,10 @@ public class RegionServer {
     }
 
     public void put(String regionId, List<KeyValue> keyValues, boolean bypassWriteBlock) throws Exception {
-        logger.debug("Starting put for region: {}", regionId);
+        logger.trace("Starting put for region: {}", regionId);
 
         checkRegionOpen(regionId);
-        logger.debug("Region is open: {}", regionId);
+        logger.trace("Region is open: {}", regionId);
 
         if (!bypassWriteBlock && regionManager.isWriteBlocked(regionId)) {
             throw new IllegalStateException("Region is temporarily read-only during migration: " + regionId);
@@ -259,9 +259,9 @@ public class RegionServer {
             throw new IllegalStateException("Region storage not found: " + regionId);
         }
 
-        logger.debug("Storage found, writing data...");
+        logger.trace("Storage found, writing data...");
         storage.put(keyValues);
-        logger.debug("Put completed successfully for region: {}", regionId);
+        logger.trace("Put completed successfully for region: {}", regionId);
     }
 
     public List<KeyValue> get(String regionId, byte[] rowKey) {
@@ -315,7 +315,7 @@ public class RegionServer {
 
     private void checkRegionOpen(String regionId) {
         boolean isOpen = regionManager.isRegionOpen(regionId);
-        logger.debug("Region {} is open: {}", regionId, isOpen);
+        logger.trace("Region {} is open: {}", regionId, isOpen);
         if (!isOpen) {
             RegionManager.RegionState state = regionManager.getRegionState(regionId);
             logger.error("Region {} state: {}", regionId, state);

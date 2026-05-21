@@ -12,7 +12,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -29,6 +31,7 @@ public class RegionSplitService {
     private long splitThreshold = Constants.DEFAULT_SPLIT_THRESHOLD;
     // 最小分裂大小（防止过度分裂）
     private long minSplitSize = Constants.DEFAULT_SPLIT_MIN_SIZE;
+    private final Map<String, PendingSplit> pendingSplits = new ConcurrentHashMap<>();
 
     public RegionSplitService(RegionManager regionManager) {
         this.regionManager = regionManager;
@@ -91,10 +94,17 @@ public class RegionSplitService {
     }
 
     /**
-     * 执行 Region 分裂
+     * Prepare a split. This copies child-region data and blocks parent writes, but
+     * does not close the parent region until Master commits metadata.
      */
     public RegionSplitResult splitRegion(String regionId, byte[] splitKey,
                                          String leftRegionId, String rightRegionId) throws Exception {
+        PendingSplit existing = pendingSplits.get(regionId);
+        if (existing != null && existing.matches(leftRegionId, rightRegionId)) {
+            logger.info("Returning existing prepared split for region: {}", regionId);
+            return existing.toResult();
+        }
+
         RegionStorage oldStorage = regionManager.getRegionStorage(regionId);
         if (oldStorage == null) {
             throw new IOException("Region storage not found: " + regionId);
@@ -112,8 +122,7 @@ public class RegionSplitService {
                 "Invalid split key for region " + regionId + ": " + BytesUtil.bytesToHex(splitKey));
         }
 
-        logger.info("Splitting region: {} at key: {}", regionId, BytesUtil.bytesToHex(splitKey));
-        boolean parentRegionClosed = false;
+        logger.info("Preparing split for region: {} at key: {}", regionId, BytesUtil.bytesToHex(splitKey));
         regionManager.blockWrites(regionId);
         try {
 
@@ -169,16 +178,9 @@ public class RegionSplitService {
                 regionId, BytesUtil.bytesToHex(splitKey), leftCount, rightCount));
         }
 
-        // 5. 关闭旧 Region（不删除表，用于回滚）
-        logger.info("Closing old region: {}", regionId);
-        regionManager.closeRegion(regionId, true, true);
-        parentRegionClosed = true;
-
-        // 6. 注册并打开新 Region
-        regionManager.registerOpenedRegion(leftRegion, leftStorage);
-        regionManager.registerOpenedRegion(rightRegion, rightStorage);
-
-        logger.info("Region split completed: {} -> {} + {}", regionId, leftId, rightId);
+        pendingSplits.put(regionId, new PendingSplit(regionId, leftRegion, rightRegion,
+            leftStorage, rightStorage, splitKey));
+        logger.info("Region split prepared: {} -> {} + {}", regionId, leftId, rightId);
 
         RegionSplitResult result = new RegionSplitResult();
         result.setParentRegionId(regionId);
@@ -187,11 +189,84 @@ public class RegionSplitService {
         result.setSplitKey(splitKey);
 
         return result;
-        } finally {
-            // Parent region remains open when split fails before closeRegion.
-            if (!parentRegionClosed && regionManager.getRegion(regionId) != null) {
-                regionManager.unblockWrites(regionId);
+        } catch (Exception e) {
+            regionManager.unblockWrites(regionId);
+            throw e;
+        }
+    }
+
+    public void commitSplit(String parentRegionId, String leftRegionId, String rightRegionId) throws Exception {
+        PendingSplit pending = pendingSplits.get(parentRegionId);
+        if (pending == null) {
+            if (regionManager.getRegion(parentRegionId) == null
+                    && regionManager.getRegion(leftRegionId) != null
+                    && regionManager.getRegion(rightRegionId) != null) {
+                logger.info("Split already committed for parent region: {}", parentRegionId);
+                return;
             }
+            throw new IOException("Pending split not found: " + parentRegionId);
+        }
+        if (!pending.matches(leftRegionId, rightRegionId)) {
+            throw new IllegalStateException("Pending split child ids do not match commit request: " + parentRegionId);
+        }
+
+        logger.info("Committing split for region: {} -> {} + {}", parentRegionId, leftRegionId, rightRegionId);
+        regionManager.closeRegion(parentRegionId, true, true);
+        regionManager.registerOpenedRegion(pending.leftRegion, pending.leftStorage);
+        regionManager.registerOpenedRegion(pending.rightRegion, pending.rightStorage);
+        pendingSplits.remove(parentRegionId);
+        logger.info("Region split committed: {} -> {} + {}", parentRegionId, leftRegionId, rightRegionId);
+    }
+
+    public void abortSplit(String parentRegionId, String leftRegionId, String rightRegionId) {
+        PendingSplit pending = pendingSplits.remove(parentRegionId);
+        if (pending == null) {
+            regionManager.unblockWrites(parentRegionId);
+            logger.info("No pending split to abort for region: {}", parentRegionId);
+            return;
+        }
+
+        if (!pending.matches(leftRegionId, rightRegionId)) {
+            pendingSplits.put(parentRegionId, pending);
+            throw new IllegalStateException("Pending split child ids do not match abort request: " + parentRegionId);
+        }
+
+        cleanupSplitStorage(pending.leftRegion.getRegionId(), pending.leftStorage);
+        cleanupSplitStorage(pending.rightRegion.getRegionId(), pending.rightStorage);
+        regionManager.unblockWrites(parentRegionId);
+        logger.info("Region split aborted: {}", parentRegionId);
+    }
+
+    private static class PendingSplit {
+        final String parentRegionId;
+        final Region leftRegion;
+        final Region rightRegion;
+        final RegionStorage leftStorage;
+        final RegionStorage rightStorage;
+        final byte[] splitKey;
+
+        PendingSplit(String parentRegionId, Region leftRegion, Region rightRegion,
+                     RegionStorage leftStorage, RegionStorage rightStorage, byte[] splitKey) {
+            this.parentRegionId = parentRegionId;
+            this.leftRegion = leftRegion;
+            this.rightRegion = rightRegion;
+            this.leftStorage = leftStorage;
+            this.rightStorage = rightStorage;
+            this.splitKey = splitKey;
+        }
+
+        boolean matches(String leftRegionId, String rightRegionId) {
+            return leftRegion.getRegionId().equals(leftRegionId)
+                && rightRegion.getRegionId().equals(rightRegionId);
+        }
+
+        RegionSplitResult toResult() {
+            RegionSplitResult result = new RegionSplitResult();
+            result.setParentRegionId(parentRegionId);
+            result.setLeftRegion(leftRegion);
+            result.setRightRegion(rightRegion);
+            result.setSplitKey(splitKey);
+            return result;
         }
     }
 

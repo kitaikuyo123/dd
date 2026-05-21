@@ -65,6 +65,10 @@ public class ReplicationCoordinator {
         return java.util.Collections.unmodifiableSet(degradedRegions);
     }
 
+    public boolean isSyncReplicationEnabled() {
+        return config.isSyncReplicationEnabled();
+    }
+
     public ReplicationCoordinator(ReplicationConfig config) {
         this(config, null, new GrpcReplicationTransportClient());
     }

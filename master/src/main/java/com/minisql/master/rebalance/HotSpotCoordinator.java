@@ -127,6 +127,24 @@ public class HotSpotCoordinator {
         }
     }
 
+    public void removeRegion(String regionId) {
+        if (regionId == null || regionId.isBlank()) {
+            return;
+        }
+        loadHistory.remove(regionId);
+        hotSpots.remove(regionId);
+        cooldownUntilMs.remove(regionId);
+        pendingRegionIds.remove(regionId);
+        pendingActions.removeIf(action -> regionId.equals(action.getRegionId()));
+        if (hotSpotRegistry != null) {
+            hotSpotRegistry.clearHotSpot(regionId);
+        }
+        if (recoveryCoordinator != null) {
+            recoveryCoordinator.clearDesiredReplicaCount(regionId);
+        }
+        logger.info("Hot spot runtime removed for region: {}", regionId);
+    }
+
 
     private List<HotSpotAction> drainPendingActions() {
         List<HotSpotAction> actions = new ArrayList<>();

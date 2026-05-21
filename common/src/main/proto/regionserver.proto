@@ -23,6 +23,8 @@ service RegionServerService {
     rpc OpenRegion(OpenRegionRequest) returns (OpenRegionResponse);
     rpc CloseRegion(CloseRegionRequest) returns (CloseRegionResponse);
     rpc SplitRegion(SplitRegionRequest) returns (SplitRegionResponse);
+    rpc CommitSplit(CommitSplitRequest) returns (CommitSplitResponse);
+    rpc AbortSplit(AbortSplitRequest) returns (AbortSplitResponse);
     rpc MergeRegion(MergeRegionRequest) returns (MergeRegionResponse);
     rpc CompactRegion(CompactRegionRequest) returns (CompactRegionResponse);
     rpc FlushRegion(FlushRegionRequest) returns (FlushRegionResponse);
@@ -243,6 +245,26 @@ message SplitRegionResponse {
     Status status = 1;
     RegionInfo leftRegion = 2;
     RegionInfo rightRegion = 3;
+}
+
+message CommitSplitRequest {
+    string parentRegionId = 1;
+    string leftRegionId = 2;
+    string rightRegionId = 3;
+}
+
+message CommitSplitResponse {
+    Status status = 1;
+}
+
+message AbortSplitRequest {
+    string parentRegionId = 1;
+    string leftRegionId = 2;
+    string rightRegionId = 3;
+}
+
+message AbortSplitResponse {
+    Status status = 1;
 }
 
 // GetSplitKey 请求 - 获取最佳分裂点

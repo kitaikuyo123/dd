@@ -19,6 +19,20 @@ public interface RegionServerCommandClient {
     RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
                                                       String leftRegionId, String rightRegionId);
 
+    default RegionServerProto.CommitSplitResponse commitSplit(ServerId serverId, String parentRegionId,
+                                                              String leftRegionId, String rightRegionId) {
+        return RegionServerProto.CommitSplitResponse.newBuilder()
+            .setStatus(successStatus())
+            .build();
+    }
+
+    default RegionServerProto.AbortSplitResponse abortSplit(ServerId serverId, String parentRegionId,
+                                                            String leftRegionId, String rightRegionId) {
+        return RegionServerProto.AbortSplitResponse.newBuilder()
+            .setStatus(successStatus())
+            .build();
+    }
+
     RegionServerProto.MergeRegionResponse mergeRegion(ServerId serverId, String leftRegionId, String rightRegionId,
                                                       String mergedRegionId);
 
@@ -28,4 +42,12 @@ public interface RegionServerCommandClient {
                                                                  long fromSequenceId);
 
     RegionServerProto.AbortMigrationResponse abortMigration(ServerId serverId, String regionId);
+
+    private static com.minisql.common.proto.CommonProto.Status successStatus() {
+        return com.minisql.common.proto.CommonProto.Status.newBuilder()
+            .setSuccess(true)
+            .setCode(0)
+            .setMessage("OK")
+            .build();
+    }
 }

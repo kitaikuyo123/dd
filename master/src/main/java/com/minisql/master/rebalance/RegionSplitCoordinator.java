@@ -45,6 +45,7 @@ public class RegionSplitCoordinator {
     private final RebalanceSupport support;
     private final RegionServerCommandClient commandClient;
     private RegionMergeCoordinator mergeCoordinator;
+    private HotSpotCoordinator hotSpotCoordinator;
     private volatile boolean running = false;
 
     public RegionSplitCoordinator(ClusterManager clusterManager,
@@ -79,6 +80,10 @@ public class RegionSplitCoordinator {
 
     public void setMergeCoordinator(RegionMergeCoordinator mergeCoordinator) {
         this.mergeCoordinator = mergeCoordinator;
+    }
+
+    public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
+        this.hotSpotCoordinator = hotSpotCoordinator;
     }
 
     public void setRecoveryCoordinator(RecoveryCoordinator recoveryCoordinator) {
@@ -247,24 +252,35 @@ public class RegionSplitCoordinator {
                 "Region split started", null);
             String leftRegionId = support.metadataManager.allocateRegionId(task.getTableName());
             String rightRegionId = support.metadataManager.allocateRegionId(task.getTableName());
+            Region parentRegion = support.metadataManager.getRegion(regionId);
+            List<ServerId> parentReplicas = parentRegion != null && parentRegion.getReplicas() != null
+                ? new ArrayList<>(parentRegion.getReplicas()) : Collections.emptyList();
             SplitResult result = notifyServerSplitRegion(task.getServerId(), regionId, splitKey,
                 leftRegionId, rightRegionId);
             if (result == null) {
+                abortPreparedSplit(task.getServerId(), regionId, leftRegionId, rightRegionId);
                 logger.warn("Split failed for region: {} (server={})", regionId, task.getServerId());
                 return;
             }
 
-            updateMetadataAfterSplit(regionId, task.getServerId(), result);
+            try {
+                updateMetadataAfterSplit(regionId, task.getServerId(), result);
+            } catch (Exception e) {
+                abortPreparedSplit(task.getServerId(), regionId,
+                    result.getLeftRegion().getRegionId(), result.getRightRegion().getRegionId());
+                throw e;
+            }
+
+            if (!commitPreparedSplit(task.getServerId(), regionId,
+                    result.getLeftRegion().getRegionId(), result.getRightRegion().getRegionId())) {
+                logger.warn("Split metadata was updated but commit failed for region: {} (server={})",
+                    regionId, task.getServerId());
+                return;
+            }
+            closeStaleParentReplicas(regionId, task.getServerId(), parentReplicas);
 
             ServerId leftServer = task.getServerId();
-            ServerId rightServer = selectServerForNewRegion(result.getRightRegion());
-
-            if (rightServer == null) {
-                rightServer = leftServer;
-            }
-            if (!rightServer.equals(leftServer)) {
-                migrateRegion(result.getRightRegion().getRegionId(), leftServer, rightServer);
-            }
+            ServerId rightServer = leftServer;
 
             support.ensureReplicaTopology(result.getLeftRegion().getRegionId());
             support.ensureReplicaTopology(result.getRightRegion().getRegionId());
@@ -323,10 +339,78 @@ public class RegionSplitCoordinator {
         return null;
     }
 
+    private boolean commitPreparedSplit(ServerId serverId, String parentRegionId,
+                                        String leftRegionId, String rightRegionId) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                RegionServerProto.CommitSplitResponse response =
+                    commandClient.commitSplit(serverId, parentRegionId, leftRegionId, rightRegionId);
+                if (response.getStatus().getSuccess()) {
+                    return true;
+                }
+                logger.warn("RegionServer rejected split commit: parent={} server={} attempt={} message={}",
+                    parentRegionId, serverId, attempt, response.getStatus().getMessage());
+            } catch (Exception e) {
+                logger.error("Failed to commit split on server: parent={} server={} attempt={} error={}",
+                    parentRegionId, serverId, attempt, e.getMessage(), e);
+            }
+            sleepBeforeSplitRetry();
+        }
+        return false;
+    }
+
+    private void abortPreparedSplit(ServerId serverId, String parentRegionId,
+                                    String leftRegionId, String rightRegionId) {
+        try {
+            RegionServerProto.AbortSplitResponse response =
+                commandClient.abortSplit(serverId, parentRegionId, leftRegionId, rightRegionId);
+            if (!response.getStatus().getSuccess()) {
+                logger.warn("RegionServer rejected split abort: parent={} server={} message={}",
+                    parentRegionId, serverId, response.getStatus().getMessage());
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to abort prepared split: parent={} server={} error={}",
+                parentRegionId, serverId, e.getMessage());
+        }
+    }
+
+    private void sleepBeforeSplitRetry() {
+        try {
+            Thread.sleep(1000L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void closeStaleParentReplicas(String parentRegionId, ServerId primaryServer, List<ServerId> parentReplicas) {
+        if (parentReplicas == null || parentReplicas.isEmpty()) {
+            return;
+        }
+        for (ServerId replica : parentReplicas) {
+            if (replica == null || replica.equals(primaryServer)) {
+                continue;
+            }
+            try {
+                RegionServerProto.CloseRegionResponse response =
+                    commandClient.closeRegion(replica, parentRegionId, true, true);
+                if (!response.getStatus().getSuccess()) {
+                    logger.warn("Failed to close stale parent region {} on replica {}: {}",
+                        parentRegionId, replica, response.getStatus().getMessage());
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to close stale parent region {} on replica {}: {}",
+                    parentRegionId, replica, e.getMessage());
+            }
+        }
+    }
+
     private void updateMetadataAfterSplit(String oldRegionId, ServerId primaryServer, SplitResult result) {
         Region oldRegion = support.metadataManager.getRegion(oldRegionId);
         String tableName = oldRegion != null ? oldRegion.getTableName() : null;
         support.cleanupRegionRuntime(oldRegionId, tableName);
+        if (hotSpotCoordinator != null) {
+            hotSpotCoordinator.removeRegion(oldRegionId);
+        }
         support.metadataManager.removeRegion(oldRegionId);
         support.metadataManager.removeRegion(result.getLeftRegion().getRegionId());
         support.metadataManager.removeRegion(result.getRightRegion().getRegionId());

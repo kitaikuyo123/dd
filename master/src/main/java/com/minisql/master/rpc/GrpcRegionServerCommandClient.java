@@ -64,8 +64,24 @@ public class GrpcRegionServerCommandClient implements RegionServerCommandClient 
     @Override
     public RegionServerProto.SplitRegionResponse splitRegion(ServerId serverId, String regionId, byte[] splitKey,
                                                               String leftRegionId, String rightRegionId) {
-        try (CommandSession session = openSession(serverId, 30000)) {
+        try (CommandSession session = openSession(serverId, 120000)) {
             return session.stub.splitRegion(buildSplitRegionRequest(regionId, splitKey, leftRegionId, rightRegionId));
+        }
+    }
+
+    @Override
+    public RegionServerProto.CommitSplitResponse commitSplit(ServerId serverId, String parentRegionId,
+                                                              String leftRegionId, String rightRegionId) {
+        try (CommandSession session = openSession(serverId, 30000)) {
+            return session.stub.commitSplit(buildCommitSplitRequest(parentRegionId, leftRegionId, rightRegionId));
+        }
+    }
+
+    @Override
+    public RegionServerProto.AbortSplitResponse abortSplit(ServerId serverId, String parentRegionId,
+                                                            String leftRegionId, String rightRegionId) {
+        try (CommandSession session = openSession(serverId, 30000)) {
+            return session.stub.abortSplit(buildAbortSplitRequest(parentRegionId, leftRegionId, rightRegionId));
         }
     }
 
@@ -136,13 +152,33 @@ public class GrpcRegionServerCommandClient implements RegionServerCommandClient 
     }
 
     public RegionServerProto.SplitRegionRequest buildSplitRegionRequest(String regionId, byte[] splitKey,
-                                                                          String leftRegionId, String rightRegionId) {
+                                                                         String leftRegionId, String rightRegionId) {
         RegionServerProto.SplitRegionRequest.Builder b = RegionServerProto.SplitRegionRequest.newBuilder()
             .setRegionId(regionId)
             .setSplitKey(ByteString.copyFrom(splitKey));
         if (leftRegionId != null && !leftRegionId.isEmpty()) b.setLeftRegionId(leftRegionId);
         if (rightRegionId != null && !rightRegionId.isEmpty()) b.setRightRegionId(rightRegionId);
         return b.build();
+    }
+
+    public RegionServerProto.CommitSplitRequest buildCommitSplitRequest(String parentRegionId,
+                                                                         String leftRegionId,
+                                                                         String rightRegionId) {
+        return RegionServerProto.CommitSplitRequest.newBuilder()
+            .setParentRegionId(parentRegionId)
+            .setLeftRegionId(leftRegionId)
+            .setRightRegionId(rightRegionId)
+            .build();
+    }
+
+    public RegionServerProto.AbortSplitRequest buildAbortSplitRequest(String parentRegionId,
+                                                                       String leftRegionId,
+                                                                       String rightRegionId) {
+        return RegionServerProto.AbortSplitRequest.newBuilder()
+            .setParentRegionId(parentRegionId)
+            .setLeftRegionId(leftRegionId)
+            .setRightRegionId(rightRegionId)
+            .build();
     }
 
     public RegionServerProto.MergeRegionRequest buildMergeRegionRequest(String leftRegionId, String rightRegionId,
