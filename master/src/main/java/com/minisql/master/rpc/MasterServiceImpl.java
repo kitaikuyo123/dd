@@ -162,6 +162,7 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
         this.splitCoordinator.setHotSpotCoordinator(hotSpotCoordinator);
+        this.migrationCoordinator.setHotSpotCoordinator(hotSpotCoordinator);
         this.hotSpotCoordinator.setHotSpotRegistry(loadBalancer.getHotSpotRegistry());
         if (hotSpotSettings != null) {
             this.hotSpotCoordinator.configure(hotSpotSettings);

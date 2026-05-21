@@ -106,6 +106,24 @@ public class HotSpotCoordinator {
         return cooldownMs;
     }
 
+    private static final long MIGRATION_QPS_WINDOW_MS = 10_000L;
+
+    public double getRecentWriteQps(String regionId) {
+        Queue<RegionLoadSnapshot> history = loadHistory.get(regionId);
+        if (history == null || history.size() < 2) return 0.0;
+        long cutoff = System.currentTimeMillis() - MIGRATION_QPS_WINDOW_MS;
+        List<RegionLoadSnapshot> recent = new ArrayList<>();
+        for (RegionLoadSnapshot s : history) {
+            if (s.timestamp >= cutoff) recent.add(s);
+        }
+        if (recent.size() < 2) return 0.0;
+        List<IntervalDelta> deltas = computePerIntervalDeltas(recent);
+        if (deltas.isEmpty()) return 0.0;
+        double sum = 0;
+        for (IntervalDelta d : deltas) sum += d.writePerSec;
+        return sum / deltas.size();
+    }
+
     public List<HotSpotAction> planPendingActions() {
         detectAndPlanHotSpots();
         return drainPendingActions();

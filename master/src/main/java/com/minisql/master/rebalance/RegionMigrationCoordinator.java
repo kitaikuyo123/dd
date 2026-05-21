@@ -42,9 +42,12 @@ public class RegionMigrationCoordinator {
 
     private static final Logger logger = LoggerFactory.getLogger(RegionMigrationCoordinator.class);
 
+    private static final double MIGRATION_WRITE_QPS_THRESHOLD = 10.0;
+
     private final RebalanceSupport support;
     private final RegionServerCommandClient commandClient;
     private final ReplicaLifecycleManager lifecycleManager;
+    private HotSpotCoordinator hotSpotCoordinator;
     private final Map<String, MigrationStatus> migrationStatuses = new ConcurrentHashMap<>();
 
     public RegionMigrationCoordinator(ClusterManager clusterManager,
@@ -55,6 +58,10 @@ public class RegionMigrationCoordinator {
         this.support = new RebalanceSupport(clusterManager, metadataManager, loadBalancer);
         this.commandClient = commandClient;
         this.lifecycleManager = lifecycleManager;
+    }
+
+    public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
+        this.hotSpotCoordinator = hotSpotCoordinator;
     }
 
     public void setMonitoringService(MonitoringService monitoringService) {
@@ -73,6 +80,17 @@ public class RegionMigrationCoordinator {
         MigrationStatus migrationStatus = new MigrationStatus(
             action.getRegionId(), action.getSource(), action.getTarget());
         migrationStatuses.put(action.getRegionId(), migrationStatus);
+
+        if (hotSpotCoordinator != null) {
+            double writeQps = hotSpotCoordinator.getRecentWriteQps(action.getRegionId());
+            if (writeQps > MIGRATION_WRITE_QPS_THRESHOLD) {
+                logger.info("Skipping migration for region {}: write QPS too high ({}/s, threshold={}/s)",
+                    action.getRegionId(), String.format("%.1f", writeQps),
+                    String.format("%.1f", MIGRATION_WRITE_QPS_THRESHOLD));
+                migrationStatuses.remove(action.getRegionId());
+                return;
+            }
+        }
 
         try {
             lock = support.acquireRegionLock(action.getRegionId());
