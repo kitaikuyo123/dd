@@ -28,6 +28,9 @@ import java.util.stream.Collectors;
 public class MiniSQLConnection implements Connection {
 
     private static final Logger logger = LoggerFactory.getLogger(MiniSQLConnection.class);
+    private static final int WRITE_RETRY_MAX_ATTEMPTS = 30;
+    private static final long WRITE_RETRY_BASE_DELAY_MS = 100;
+    private static final long WRITE_RETRY_MAX_DELAY_MS = 2000;
 
     private boolean closed = false;
     private boolean autoCommit = true;
@@ -445,11 +448,7 @@ public class MiniSQLConnection implements Connection {
                         .build());
                 }
             }
-            MutationTarget target = resolveMutationTarget(tableName, rowKeys.get(0));
-            RegionServerProto.PutResponse response = target.stub.put(batch.build());
-            if (!response.getStatus().getSuccess()) {
-                throw new SQLException("Batch delete failed on " + regionId + ": " + response.getStatus().getMessage());
-            }
+            putWithRetry(tableName, rowKeys.get(0), batch.build(), "Batch delete on " + regionId);
         }
 
         clearTableSchemaCache(tableName);
@@ -461,13 +460,12 @@ public class MiniSQLConnection implements Connection {
         Row existing = fetchExistingRowWithRetry(tableName, rowKey, schema, "Delete");
         if (existing == null) return 0;
 
-        MutationTarget target = resolveMutationTarget(tableName, rowKey);
         List<String> qualifiers = schema.getColumns().stream()
                 .map(com.minisql.common.model.Column::getName)
                 .collect(Collectors.toList());
         long timestamp = System.currentTimeMillis();
         RegionServerProto.PutRequest.Builder deleteRequest = RegionServerProto.PutRequest.newBuilder()
-                .setRegionId(target.regionId)
+                .setRegionId("")
                 .setDurable(true);
         for (String qualifier : qualifiers) {
             deleteRequest.addKeyValues(CommonProto.KeyValue.newBuilder()
@@ -479,10 +477,7 @@ public class MiniSQLConnection implements Connection {
                     .setType(CommonProto.KeyValueType.DELETE)
                     .build());
         }
-        RegionServerProto.PutResponse response = target.stub.put(deleteRequest.build());
-        if (!response.getStatus().getSuccess()) {
-            throw new SQLException("Delete failed: " + response.getStatus().getMessage());
-        }
+        putWithRetry(tableName, rowKey, deleteRequest.build(), "Delete");
         return 1;
     }
 
@@ -509,6 +504,7 @@ public class MiniSQLConnection implements Connection {
 
         // Group KeyValues by region for batch put
         Map<String, List<KeyValue>> regionKvs = new LinkedHashMap<>();
+        Map<String, byte[]> regionRepresentativeRowKeys = new LinkedHashMap<>();
         long timestamp = System.currentTimeMillis();
         for (Row row : matchingRows) {
             Row existing = fetchExistingRowWithRetry(tableName, row.getRowKey(), schema, "Update");
@@ -524,6 +520,7 @@ public class MiniSQLConnection implements Connection {
             KeyValue[] kvs = KeyValueConverter.rowToKeyValues(existing, schema);
             regionKvs.computeIfAbsent(target.regionId, k -> new ArrayList<>())
                 .addAll(Arrays.asList(kvs));
+            regionRepresentativeRowKeys.putIfAbsent(target.regionId, row.getRowKey());
         }
 
         // Send one batch PutRequest per region
@@ -534,12 +531,8 @@ public class MiniSQLConnection implements Connection {
             for (KeyValue kv : entry.getValue()) {
                 batch.addKeyValues(convertToProto(kv));
             }
-            byte[] firstRk = matchingRows.get(0).getRowKey();
-            MutationTarget target = resolveMutationTarget(tableName, firstRk);
-            RegionServerProto.PutResponse response = target.stub.put(batch.build());
-            if (!response.getStatus().getSuccess()) {
-                throw new SQLException("Batch update failed on " + entry.getKey() + ": " + response.getStatus().getMessage());
-            }
+            byte[] representativeRowKey = regionRepresentativeRowKeys.get(entry.getKey());
+            putWithRetry(tableName, representativeRowKey, batch.build(), "Batch update on " + entry.getKey());
         }
 
         clearTableSchemaCache(tableName);
@@ -771,8 +764,14 @@ public class MiniSQLConnection implements Connection {
             .setDurable(true)
             .build();
 
+        putWithRetry(tableName, rowKey, request, operation);
+    }
+
+    private RegionServerProto.PutResponse putWithRetry(String tableName, byte[] rowKey,
+                                                       RegionServerProto.PutRequest request,
+                                                       String operation) throws SQLException {
         SQLException lastError = null;
-        for (int attempt = 0; attempt < 2; attempt++) {
+        for (int attempt = 0; attempt < WRITE_RETRY_MAX_ATTEMPTS; attempt++) {
             MutationTarget target = resolveMutationTarget(tableName, rowKey);
             RegionServerProto.PutResponse response = target.stub.put(
                 request.toBuilder()
@@ -780,19 +779,33 @@ public class MiniSQLConnection implements Connection {
                     .build());
 
             if (response.getStatus().getSuccess()) {
-                return;
+                return response;
             }
 
             String message = response.getStatus().getMessage();
             lastError = new SQLException(operation + " failed: " + message);
-            if (attempt == 0 && isRetryableWriteRouteError(message)) {
-                router.refreshRouteCache(tableName);
-                continue;
+            if (!isRetryableWriteRouteError(message) || attempt == WRITE_RETRY_MAX_ATTEMPTS - 1) {
+                throw lastError;
             }
-            throw lastError;
+
+            logger.warn("{} failed with retryable region routing error (attempt {}/{}): {}",
+                operation, attempt + 1, WRITE_RETRY_MAX_ATTEMPTS, message);
+            router.refreshRouteCache(tableName);
+            sleepBeforeWriteRetry(attempt, operation);
         }
 
         throw lastError != null ? lastError : new SQLException(operation + " failed");
+    }
+
+    private void sleepBeforeWriteRetry(int attempt, String operation) throws SQLException {
+        long delayMs = Math.min(WRITE_RETRY_MAX_DELAY_MS,
+            WRITE_RETRY_BASE_DELAY_MS * (1L << Math.min(attempt, 4)));
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SQLException(operation + " interrupted while waiting to retry", e);
+        }
     }
 
     private boolean isRetryableWriteRouteError(String message) {
