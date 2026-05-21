@@ -98,15 +98,25 @@ public class RegionServer {
             logger.warn("Master address not configured, skipping Master connection");
             return;
         }
+        reconnectMaster(masterAddress);
+    }
 
-        logger.info("Connecting to Master at {}", masterAddress);
-        String[] parts = masterAddress.split(":");
+    public synchronized void reconnectMaster(String address) {
+        if (address == null || address.isBlank()) {
+            return;
+        }
+        String[] parts = address.split(":");
         String host = parts[0];
         int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 16000;
 
-        masterChannel = GrpcChannelFactory.newChannel(host, port);
-        masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
-        logger.info("Connected to Master successfully");
+        ManagedChannel oldChannel = this.masterChannel;
+        this.masterChannel = GrpcChannelFactory.newChannel(host, port);
+        this.masterStub = MasterServiceGrpc.newBlockingStub(masterChannel);
+        logger.info("RegionServer (re)connected to Master: {}", address);
+
+        if (oldChannel != null && !oldChannel.isShutdown()) {
+            oldChannel.shutdown();
+        }
     }
 
     public Table getTableSchema(String tableName) {

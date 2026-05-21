@@ -39,6 +39,7 @@ public class HeartbeatSender {
     private volatile boolean running;
     private volatile String zkConnectString;
     private volatile ZkManager zkManager;
+    private volatile RegionServer regionServer;
     private final com.sun.management.OperatingSystemMXBean operatingSystemMxBean;
     private volatile long lastCpuSampleWallClockNs = -1L;
     private volatile long lastCpuSampleProcessCpuNs = -1L;
@@ -68,6 +69,10 @@ public class HeartbeatSender {
         this.zkConnectString = zkConnectString;
     }
 
+    public void setRegionServer(RegionServer regionServer) {
+        this.regionServer = regionServer;
+    }
+
     public synchronized void setMasterAddress(String address) {
         if (address == null || address.isBlank()) {
             return;
@@ -80,6 +85,10 @@ public class HeartbeatSender {
         this.masterAddress = address;
         connectToMaster(address);
         registeredWithCurrentMaster = false;
+
+        if (regionServer != null) {
+            regionServer.reconnectMaster(address);
+        }
     }
 
     public void start() {

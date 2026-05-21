@@ -5,9 +5,11 @@ import com.minisql.common.model.ServerId;
 import com.minisql.common.proto.RegionServerProto;
 import com.minisql.master.monitoring.MonitoringService;
 import com.minisql.master.rpc.RegionServerCommandClient;
+import com.minisql.master.recover.RecoveryCoordinator;
 import com.minisql.master.state.ClusterManager;
 import com.minisql.master.state.MetadataManager;
 import com.minisql.master.state.ReplicaLifecycleManager;
+import com.minisql.master.state.ReplicaMonitor;
 import com.minisql.zookeeper.DistributedLock;
 import com.minisql.zookeeper.ZkClient;
 import org.slf4j.Logger;
@@ -62,6 +64,22 @@ public class RegionMigrationCoordinator {
 
     public void setHotSpotCoordinator(HotSpotCoordinator hotSpotCoordinator) {
         this.hotSpotCoordinator = hotSpotCoordinator;
+    }
+
+    public void setRecoveryCoordinator(RecoveryCoordinator recoveryCoordinator) {
+        this.support.recoveryCoordinator = recoveryCoordinator;
+    }
+
+    public void setReplicationCoordinator(com.minisql.replication.ReplicationCoordinator replicationCoordinator) {
+        this.support.replicationCoordinator = replicationCoordinator;
+    }
+
+    public void setReplicaMonitor(ReplicaMonitor replicaMonitor) {
+        this.support.replicaMonitor = replicaMonitor;
+    }
+
+    public void setLifecycleManager(ReplicaLifecycleManager lifecycleManager) {
+        this.support.lifecycleManager = lifecycleManager;
     }
 
     public void setMonitoringService(MonitoringService monitoringService) {
@@ -195,6 +213,8 @@ public class RegionMigrationCoordinator {
                 "Source replica closed after balance");
 
             support.syncReplicaMonitor(regionId, sourceServer);
+
+            support.ensureReplicaTopology(regionId);
 
             migrationStatus.setState(MigrationState.COMPLETED);
             updateMigrationState(migrationStatus, MigrationState.COMPLETED, "Migration completed");

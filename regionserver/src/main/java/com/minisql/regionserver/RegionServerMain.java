@@ -155,6 +155,7 @@ public class RegionServerMain {
             regionServer.getRegionManager(),
             heartbeatInterval
         );
+        heartbeatSender.setRegionServer(regionServer);
         heartbeatSender.setZkConnectString(zkConnect);
         heartbeatSender.setMasterAddress(masterAddress);
         heartbeatSender.setDiskCapacityMb(diskCapacityMb);

@@ -22,7 +22,7 @@ public class ZkClient {
         this.connectString = connectString;
         this.client = CuratorFrameworkFactory.builder()
                 .connectString(connectString)
-                .sessionTimeoutMs(30000)
+                .sessionTimeoutMs(10000)
                 .connectionTimeoutMs(10000)
                 .retryPolicy(new ExponentialBackoffRetry(1000, 3))
                 .build();

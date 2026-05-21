@@ -159,6 +159,10 @@ public class MasterServiceImpl extends MasterServiceGrpc.MasterServiceImplBase {
         this.mergeCoordinator.setReplicaMonitor(replicaMonitor);
         this.mergeCoordinator.setLifecycleManager(lifecycleManager);
         this.mergeCoordinator.setMigrationCoordinator(migrationCoordinator);
+        this.migrationCoordinator.setRecoveryCoordinator(recoveryCoordinator);
+        this.migrationCoordinator.setReplicationCoordinator(replicationCoordinator);
+        this.migrationCoordinator.setReplicaMonitor(replicaMonitor);
+        this.migrationCoordinator.setLifecycleManager(lifecycleManager);
         this.splitCoordinator.setMergeCoordinator(mergeCoordinator);
         this.hotSpotCoordinator = new HotSpotCoordinator(clusterManager, metadataManager, splitCoordinator, recoveryCoordinator);
         this.splitCoordinator.setHotSpotCoordinator(hotSpotCoordinator);
