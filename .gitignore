@@ -93,3 +93,5 @@ jacoco.exec
 
 # Claude Code
 .claude/
+
+docs/
